@@ -234,13 +234,6 @@ jobs:
             platform: linux
           - os: windows
             ls: dir
-          - os: windows
-            ls: dir
-            target: i686
-            python-architecture: x86
-          - os: ubuntu
-            platform: linux
-            target: i686
           - os: ubuntu
             platform: linux
             target: armv7
@@ -265,7 +258,6 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.15'
-          architecture: ${{ matrix.python-architecture || 'x64' }}
 
       - name: check GITHUB_REF matches package version
         uses: samuelcolvin/check-python-version@ee87cddb8049d2694cc03badc8569765a05cef00 # v5
