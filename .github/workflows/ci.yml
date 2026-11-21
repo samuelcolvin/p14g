@@ -61,6 +61,8 @@ jobs:
         env:
           SKIP: no-commit-to-branch
 
+      - run: make test-fuzz-agent
+
   test-rust:
     name: test rust ${{ matrix.rust-version }}
     strategy:

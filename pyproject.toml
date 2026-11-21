@@ -13,6 +13,14 @@ linting = [
     # for `python -m mypy.stubtest`, which checks p14g.pyi against the built module
     "mypy",
 ]
+# for the LLM fuzzer in crates/fuzz-agent
+fuzz-agent = [
+    "pydantic-ai-slim[anthropic,openai,typesafe]",
+    "psycopg[binary]",
+    # Postgres's own parser, to check what p14g emits
+    "pglast",
+    "logfire",
+]
 
 [tool.uv]
 # only use package versions that have been published for at least 7 days
@@ -49,7 +57,7 @@ combine-as-imports = true
 quote-style = "single"
 
 [tool.basedpyright]
-include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests"]
+include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests", "crates/fuzz-agent"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingModuleSource = false
