@@ -270,6 +270,17 @@ A permission error or a syntax error from Postgres fails the test.
 The fuzz targets check the same thing with [libpg_query](https://github.com/pganalyze/libpg_query), Postgres's parser
 as a library.
 
+### Releasing
+
+CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, the Rust tests against Postgres 18 on stable and the minimum
+supported Rust version, the Python tests on every supported Python version, and both fuzz targets.
+It builds wheels on every run and tests the built wheel on Linux, macOS and Windows.
+
+Pushing a tag publishes the crate to crates.io and the wheels to PyPI, once those jobs pass.
+The tag must match `version` in the root `Cargo.toml`.
+The `release` job needs a `CARGO_REGISTRY_TOKEN` secret in a GitHub environment called `release`.
+The `release-python` job uses PyPI trusted publishing from an environment called `release-python`.
+
 ## License
 
 MIT

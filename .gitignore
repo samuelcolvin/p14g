@@ -10,3 +10,4 @@ __pycache__
 /crates/fuzz/Cargo.lock
 .coverage
 htmlcov/
+*.profraw

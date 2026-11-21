@@ -11,44 +11,64 @@ on:
 permissions: {}
 
 env:
-  UV_LOCKED: '1'
+  COLUMNS: 120
+  UV_PYTHON: '3.14'
+  UV_FROZEN: '1'
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          components: clippy
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
-      - uses: dtolnay/rust-toolchain@nightly
+      # `make format-rs` and `make lint-rs` use nightly rustfmt, for the import grouping options in .rustfmt.toml
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
+          toolchain: nightly
           components: rustfmt
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+          components: clippy
 
       - run: rustup default stable
 
-      - uses: Swatinem/rust-cache@v2 # zizmor: ignore[cache-poisoning]
-
-      - uses: astral-sh/setup-uv@v7
+      - name: cache rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          enable-cache: false
+          workspaces: |
+            .
+            crates/fuzz
+          lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-on-failure: true
 
       - run: uv sync --all-groups --all-packages
 
-      - run: make lint
+      - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
+        env:
+          SKIP: no-commit-to-branch
 
-  test:
-    name: test rust-${{ matrix.rust-version }}
-    runs-on: ubuntu-latest
+  test-rust:
+    name: test rust ${{ matrix.rust-version }}
     strategy:
       fail-fast: false
       matrix:
         rust-version: [stable, '1.88']
 
+    runs-on: ubuntu-latest
+
+    # the tests in crates/pgsafe/tests/postgres.rs run pgsafe's output on a real database
     services:
       postgres:
         image: postgres:18
@@ -66,96 +86,292 @@ jobs:
       PGSAFE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - name: install rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: ${{ matrix.rust-version }}
 
-      - uses: Swatinem/rust-cache@v2 # zizmor: ignore[cache-poisoning]
+      - name: cache rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-on-failure: true
 
-      - run: cargo test --workspace
+      - run: cargo test -p pgsafe
+
+      # without the test dependencies, to check the library alone builds on this version of rust
+      - run: cargo check -p pgsafe -p pgsafe-python
 
   test-python:
-    name: test python-${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: test python ${{ matrix.python-version }} on ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.14']
+        os: [ubuntu]
+        python-version:
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+          - '3.14t'
+          - '3.15'
+        include:
+          - os: macos
+            python-version: '3.10'
+          - os: macos
+            python-version: '3.15'
+          - os: windows
+            python-version: '3.10'
+          - os: windows
+            python-version: '3.15'
+
+    runs-on: ${{ matrix.os }}-latest
+
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2 # zizmor: ignore[cache-poisoning]
-
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: ${{ matrix.python-version }}
-          enable-cache: false
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - name: install rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+
+      - name: cache rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # pyo3's build output depends on the interpreter it was built against (free-threaded
+          # builds differ), so keep one cache per matrix entry
+          key: ${{ matrix.python-version }}
+          lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-on-failure: true
+
+      - run: uv run python -c 'import sys; print("free threading enable:", hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled())'
 
       - run: make python-test
 
   fuzz:
     name: fuzz ${{ matrix.target }}
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         target: [check, mutate]
 
+    runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@nightly
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: nightly
 
-      - uses: Swatinem/rust-cache@v2 # zizmor: ignore[cache-poisoning]
+      - name: cache rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/fuzz
+          lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-on-failure: true
 
-      - run: cargo install cargo-fuzz --locked
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        with:
+          tool: cargo-fuzz
 
-      - run: cargo fuzz run --fuzz-dir crates/fuzz "$TARGET" --release -- -max_total_time=120
+      - run: cargo fuzz run --target="$(rustc --print host-tuple)" --fuzz-dir crates/fuzz "$TARGET" --release -- -max_total_time=120
         env:
           TARGET: ${{ matrix.target }}
 
   build:
-    name: build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: >
+      build on ${{ matrix.platform || matrix.os }} (${{ matrix.target }} - ${{ matrix.manylinux || 'auto' }})
+
+    if: '!contains(github.event.pull_request.labels.*.name, ''Quick Build'')'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu, macos, windows]
+        target: [x86_64, aarch64]
+        manylinux: [auto]
+        include:
+          - os: ubuntu
+            platform: linux
+          - os: windows
+            ls: dir
+          - os: windows
+            ls: dir
+            target: i686
+            python-architecture: x86
+          - os: ubuntu
+            platform: linux
+            target: i686
+          - os: ubuntu
+            platform: linux
+            target: armv7
+          # musllinux
+          - os: ubuntu
+            platform: linux
+            target: x86_64
+            manylinux: musllinux_1_1
+          - os: ubuntu
+            platform: linux
+            target: aarch64
+            manylinux: musllinux_1_1
+
+    runs-on: ${{ matrix.os }}-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: PyO3/maturin-action@v1
+      - name: set up python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          args: --release --out dist
+          python-version: '3.15'
+          architecture: ${{ matrix.python-architecture || 'x64' }}
+
+      - name: check GITHUB_REF matches package version
+        uses: samuelcolvin/check-python-version@ee87cddb8049d2694cc03badc8569765a05cef00 # v5
+        if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.os == 'ubuntu' }}
+        with:
+          version_file_path: Cargo.toml
+
+      - name: build sdist
+        if: ${{ matrix.os == 'ubuntu' && matrix.target == 'x86_64' && matrix.manylinux == 'auto' }}
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
           working-directory: crates/pgsafe-python
 
-      - uses: actions/upload-artifact@v6
+      # CPython wheels use the stable ABI (`abi3-py310` in Cargo.toml), so one wheel covers
+      # every CPython version >= 3.10. Free-threaded builds don't support abi3, so maturin
+      # builds a separate version-specific wheel for the one listed here.
+      - name: build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
-          name: wheels-${{ matrix.os }}
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist --interpreter 3.10 3.14t
+          working-directory: crates/pgsafe-python
+
+      - run: ${{ matrix.ls || 'ls -lh' }} crates/pgsafe-python/dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi_files_${{ matrix.os }}_${{ matrix.target }}_${{ matrix.manylinux }}
           path: crates/pgsafe-python/dist
 
-  # https://github.com/marketplace/actions/alls-green#why used for branch protection checks
+  test-builds:
+    name: test build on ${{ matrix.os }}
+    needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, macos, windows]
+
+    runs-on: ${{ matrix.os }}-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # no cache: this job handles the wheels that get published
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+
+      - name: get dist artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: pypi_files_*
+          merge-multiple: true
+          path: dist
+
+      # install the built wheel, not the source tree, and run the tests against it
+      - run: uv venv --no-project test-env
+
+      - run: uv pip install --python test-env --no-index --find-links dist pgsafe
+
+      - run: uv pip install --python test-env pytest
+
+      - run: uv run --no-project --python test-env pytest crates/pgsafe-python/tests
+
+  # Used for branch protection checks, see https://github.com/marketplace/actions/alls-green#why
   check:
     if: always()
-    needs: [lint, test, test-python, fuzz, build]
+    needs: [lint, test-rust, test-python, fuzz]
     runs-on: ubuntu-latest
     steps:
-      - uses: re-actors/alls-green@release/v1
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
+
+  release:
+    name: release to crates.io
+    needs: [check, build, test-builds]
+    if: 'success() && startsWith(github.ref, ''refs/tags/'')'
+    runs-on: ubuntu-latest
+    environment: release
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - name: install rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+
+      - run: cargo publish -p pgsafe
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-python:
+    name: release to PyPI
+    needs: [check, build, test-builds]
+    if: 'success() && startsWith(github.ref, ''refs/tags/'')'
+    runs-on: ubuntu-latest
+    environment: release-python
+
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+
+      - name: get dist artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: pypi_files_*
+          merge-multiple: true
+          path: dist
+
+      - run: ls -lh dist/
+
+      - name: Publish to PyPI
+        run: 'uv publish --trusted-publishing always dist/*'
