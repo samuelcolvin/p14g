@@ -17,12 +17,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import logfire
 import pglast
 import psycopg
 from p14g import DEFAULT_FUNCTIONS, P14gError, Policy, SafeSql
 from pglast import visitors
 from psycopg import conninfo, sql as pgsql
-from psycopg.rows import dict_row
+from psycopg.rows import dict_row, tuple_row
 
 from . import target
 from .target import Row
@@ -100,6 +101,20 @@ class Oracle:
         return self._owner is not None
 
     def attempt(self, sql: str) -> Attempt:
+        with logfire.span('attempt', sql=sql) as span:
+            attempt = self._attempt(sql)
+            span.set_attributes(
+                {
+                    'accepted': attempt.output is not None,
+                    'output': attempt.output,
+                    'rejection': attempt.rejection,
+                    'ran': attempt.ran,
+                    'findings': [finding.kind for finding in attempt.findings],
+                }
+            )
+        return attempt
+
+    def _attempt(self, sql: str) -> Attempt:
         attempt = Attempt(sql)
         with self._lock:
             accepted: dict[str, SafeSql] = {}
@@ -130,23 +145,31 @@ class Oracle:
         return attempt
 
     def _rewrite(self, policy: Policy, attempt: Attempt) -> SafeSql | None:
-        start = time.perf_counter()
-        try:
-            safe = policy.rewrite(attempt.sql, context=target.CONTEXT)
-        except P14gError as e:
-            attempt.rejection = f'{e.kind}: {e}'
-            safe = None
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException as e:  # noqa: BLE001
-            # a Rust panic arrives as `pyo3_runtime.PanicException`, which is not an `Exception`
-            attempt.findings.append(Finding('panic', f'{type(e).__name__}: {e}', attempt.sql))
-            return None
-        took = time.perf_counter() - start
+        mode = 'inline' if policy is self.inline else 'params'
+        with logfire.span('rewrite {mode}', mode=mode) as span:
+            start = time.perf_counter()
+            try:
+                safe = policy.rewrite(attempt.sql, context=target.CONTEXT)
+            except P14gError as e:
+                # a rejection is the usual outcome, so it is an attribute and not an error on the span
+                attempt.rejection = f'{e.kind}: {e}'
+                span.set_attribute('rejection', attempt.rejection)
+                safe = None
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:  # noqa: BLE001
+                # a Rust panic arrives as `pyo3_runtime.PanicException`, which is not an `Exception`
+                attempt.findings.append(Finding('panic', f'{type(e).__name__}: {e}', attempt.sql))
+                span.record_exception(e)
+                return None
+            else:
+                span.set_attributes({'output': safe.sql, 'params': safe.params, 'tables': safe.tables})
+            took = time.perf_counter() - start
         if took > SLOW_REWRITE:
             attempt.findings.append(Finding('slow', f'rewrite() took {took:.1f}s', attempt.sql))
         return safe
 
+    @logfire.instrument('check structure', extract_args=False)
     def _check_structure(self, policy: Policy, safe: SafeSql, attempt: Attempt) -> None:
         def found(kind: str, detail: str) -> None:
             attempt.findings.append(Finding(kind, detail, attempt.sql, safe.sql))
@@ -188,6 +211,7 @@ class Oracle:
             if again.sql != safe.sql:
                 found('not-idempotent', f'the output reads back as different SQL:\n{again.sql}')
 
+    @logfire.instrument('explain as the restricted role', extract_args=False)
     def _explain(self, attempt: Attempt) -> None:
         """Ask Postgres to plan the output for a role that has exactly the policy's grants."""
         if self._role is None or attempt.output is None:
@@ -199,6 +223,7 @@ class Oracle:
                 kind, what = problem
                 attempt.findings.append(Finding(kind, f'{what}: {_message(e)}', attempt.sql, attempt.output))
 
+    @logfire.instrument('run as the owner', extract_args=False)
     def _run(self, safe: SafeSql, attempt: Attempt) -> None:
         if self._owner is None:
             return
@@ -206,11 +231,13 @@ class Oracle:
         def found(kind: str, detail: str) -> None:
             attempt.findings.append(Finding(kind, detail, attempt.sql, safe.sql))
 
-        rows: list[Row] = []
+        # tuples, not dicts: columns of a result can share a name (`?column?`), and a dict would keep only one
+        rows: list[tuple[Any, ...]] = []
         after = self._before
         try:
             with self._owner.transaction(force_rollback=True):
-                cursor = self._owner.execute(safe.sql.encode(), prepare=True)
+                cursor = self._owner.cursor(row_factory=tuple_row)
+                cursor.execute(safe.sql.encode(), prepare=True)
                 if cursor.description is not None:
                     rows = cursor.fetchall()
                 affected = cursor.rowcount
@@ -222,7 +249,7 @@ class Oracle:
                 found('error-leak', f'the error message holds a value from {", ".join(leaked)}: {message}')
             return
 
-        shown = '\n'.join(_clip(str(list(row.values())), 300) for row in rows[:10])
+        shown = '\n'.join(_clip(str(list(row)), 300) for row in rows[:10])
         attempt.ran = f'ran: {affected} rows' + (f', the first {min(len(rows), 10)}:\n{shown}' if rows else '')
         if leaked := self.canaries.found_in(str(rows)):
             found('canary', f'the result holds a value from {", ".join(leaked)}')
@@ -271,16 +298,21 @@ class Oracle:
         self._owner = owner
         self._role = connect(ROLE)
         self._before = self._snapshot()
+        # from here on, so that each statement is a span but the rows put in above are not
+        logfire.instrument_psycopg(owner)
+        logfire.instrument_psycopg(self._role)
 
     def _snapshot(self) -> Snapshot:
         assert self._owner is not None
-        return {
-            table: {
-                row['id']: row
-                for row in self._owner.execute(pgsql.SQL('SELECT * FROM ONLY {}').format(_table(table))).fetchall()
+        # the same queries every time, so they are left out of the trace
+        with logfire.suppress_instrumentation():
+            return {
+                table: {
+                    row['id']: row
+                    for row in self._owner.execute(pgsql.SQL('SELECT * FROM ONLY {}').format(_table(table))).fetchall()
+                }
+                for table in target.WRITES
             }
-            for table in target.WRITES
-        }
 
 
 def _forbidden_writes(before: Snapshot, after: Snapshot) -> list[str]:

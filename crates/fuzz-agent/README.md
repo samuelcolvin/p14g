@@ -10,14 +10,28 @@ unignored text file in the repository. Its `rewrite` tool runs both inline-liter
 
 ## Run it
 
-Set a key for any model supported by Pydantic AI. The default attacker uses Anthropic; `--model` accepts another
-Pydantic AI model name. Start the disposable Postgres container, then run one short round with:
+Models are reached through the Pydantic AI Gateway and traces go to [Logfire](https://logfire.pydantic.dev/). One
+Logfire API key with the `write` and `gateway` permissions does both. Connect this directory to a project and make
+the key once:
 
 ```bash
-export ANTHROPIC_API_KEY=...
+cd crates/fuzz-agent
+uvx logfire-cli init
+uvx logfire-cli api-key write gateway --name p14g-fuzz-agent
+```
+
+The key is printed once; keep it in your secret manager. Then start the disposable Postgres container and run one
+short round:
+
+```bash
+export LOGFIRE_API_KEY=...
 make postgres
 make fuzz-agent ARGS='--rounds 1 --turns 20'
 ```
+
+The default attacker is GLM 5.3 on [Doubleword](https://docs.doubleword.ai/inference-api/models), reached through the
+Gateway as `gateway/doubleword:zai-org/GLM-5.3`. Any other Doubleword model works the same way, for example
+`--model gateway/doubleword:moonshotai/Kimi-K3.1-Pro`, and `--model` takes any other Pydantic AI model name.
 
 `make fuzz-agent` recreates only the `p14g_agent` database inside the server named by
 `P14G_TEST_DATABASE_URL`. Do not point it at a server where a database of that name matters. The default points at
@@ -33,7 +47,6 @@ Useful options:
 --judge-model MODEL       optional independent judge
 --judge-threshold P       yes/no cutoff for a decision-model judge
 --database-url URL        disposable Postgres server; omit it when invoking Python directly for static checks only
---logfire                 send Pydantic AI traces to Logfire
 ```
 
 Run `uv run --group fuzz-agent python -m fuzz_agent --help` from this directory for the complete CLI.
@@ -57,6 +70,14 @@ For repeatable evaluation, pass a versioned model after tuning the threshold, fo
 flags are recorded as opinions and do not make the command fail. The attacking model is not shown them, which keeps
 it from optimizing against the judge. Findings record the exact model version returned by the provider even when
 the configured name is an alias.
+
+## Traces
+
+Each run is one trace: a span for the run, one for each round, and under those the model requests and tool calls
+that Pydantic AI records. Every `rewrite` call has an `attempt` span with the statement, whether it was accepted,
+the output, the rejection and what Postgres did. Under it are spans for the rewrite in each literal mode, the
+structure check, the `EXPLAIN` as the restricted role and the run as the owner, along with the statements psycopg
+sent. Every finding is also a warning-level log, so `level >= warn` in Logfire lists them.
 
 ## Checks
 

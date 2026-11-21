@@ -19,7 +19,7 @@ fuzz-agent = [
     "psycopg[binary]",
     # Postgres's own parser, to check what p14g emits
     "pglast",
-    "logfire",
+    "logfire[psycopg]",
 ]
 
 [tool.uv]

@@ -10,7 +10,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import logfire
 from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 
 from .judge import Judge
@@ -92,6 +94,9 @@ yours to change.
   A line starting `FINDING` in the result means a check failed. That is a success: it is recorded for you, so move
   on to a different idea, or find out how far it goes.
 - Call several tools in one turn when the calls do not depend on each other. You have a limited number of turns.
+- Reading is only worth what it leads you to try. Call `rewrite` within your first three or four turns, and from
+  then on try statements in most turns, several at once, reading more only to explain a result or to find the
+  next idea. A round that reads the whole library and tries nothing has found nothing.
 - Use `report_finding` only for a real problem the checks cannot see, such as output that leaks through timing or
   through which error is raised, or an answer about rows you should not be able to count. Give the exact SQL.
   Do not report things the README documents as limits, such as an error raised before a row filter is applied.
@@ -128,6 +133,13 @@ class Session:
     def found(self, finding: Finding) -> None:
         self.findings.append(finding)
         self.record('findings', asdict(finding))
+        logfire.warn(
+            'finding {kind}: {detail}',
+            kind=finding.kind,
+            detail=finding.detail,
+            input=finding.input,
+            output=finding.output,
+        )
         print(f'  FINDING ({finding.kind}): {finding.detail.splitlines()[0][:150]}')
 
     @property
@@ -168,7 +180,7 @@ def instructions() -> str:
     return '\n\n'.join(parts)
 
 
-def build(model: str) -> Agent[Session, str]:
+def build(model: Model | str) -> Agent[Session, str]:
     agent = Agent(
         model,
         deps_type=Session,
@@ -192,8 +204,10 @@ def build(model: str) -> Agent[Session, str]:
         """
         session = ctx.deps
         session.attempts += 1
+        # the agent calls this tool several at a time, so each call keeps its own number
+        number = session.attempts
         # written before anything is run, so a statement that crashes the process is the last line of the file
-        session.record('attempts', {'n': session.attempts, 'sql': sql})
+        session.record('attempts', {'n': number, 'sql': sql})
         attempt = await asyncio.to_thread(session.oracle.attempt, sql)
         if attempt.output is not None:
             session.accepted += 1
@@ -202,7 +216,7 @@ def build(model: str) -> Agent[Session, str]:
                 model, flags = judgment
                 session.found(Finding('judge', f'{model}: {", ".join(flags)}', sql, attempt.output))
         status = 'rejected' if attempt.output is None else 'accepted'
-        print(f'{session.attempts:4} {status}: {" ".join(sql.split())[:120]}')
+        print(f'{number:4} {status}: {" ".join(sql.split())[:120]}')
         for finding in attempt.findings:
             session.found(finding)
         return attempt.render()
