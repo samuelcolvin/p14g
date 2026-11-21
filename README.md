@@ -374,6 +374,8 @@ becomes.
 
 `Limits` bounds the input before any rule is checked: 64 KiB of SQL, 10,000 tokens, nesting 50 deep, 8 joins,
 16 subqueries, 8 set operations, 1,000 items in an `IN` list, 200 select items and 1,000 inserted rows by default.
+The select-list limit is checked again once `*` is expanded, since each level of nested subqueries can multiply
+the columns of the one below.
 
 sqlparser builds chains such as `1+1+1+...` with a loop, so the parsed tree can be half as deep as the statement has
 tokens whatever the nesting limit is.

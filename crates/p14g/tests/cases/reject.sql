@@ -214,6 +214,9 @@ unsupported: select count(*) from orders group by null
 denied: select id from orders order by 1.5
 denied: select id from orders union select id from customers order by 'x'
 
+-- star expanded past the select-list limit: each level multiplies the one below
+limit: select a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.* from (select o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.* from orders o) a
+
 -- select syntax p14g has no representation for
 unsupported: select id from orders for update
 unsupported: select id from orders for share nowait

@@ -566,6 +566,34 @@ fn limits() {
 }
 
 #[test]
+fn star_expansion_limit() {
+    let build = |max_projection: usize| -> Policy {
+        dense()
+            .select(orders())
+            .limits(Limits {
+                max_projection,
+                ..Limits::default()
+            })
+            .build()
+            .unwrap()
+    };
+    // `*` on orders is 3 columns, so 3 of them are 9 items: the limit counts the expanded list
+    let nine = "select o.*, o.*, o.* from orders o";
+    assert!(build(9).rewrite(nine, &()).is_ok());
+    assert_eq!(kind(&build(8), nine), ErrorKind::Limit);
+
+    // each derived table multiplies the columns of the one below: 40 stars over 3 levels would be 3 * 40^4
+    // columns, and expanding them all ran out of memory before the limit was checked
+    let mut nested = format!("select {} from orders o", vec!["o.*"; 40].join(", "));
+    for level in 1..=3 {
+        let stars = vec![format!("a{level}.*"); 40].join(", ");
+        nested = format!("select {stars} from ({nested}) a{level}");
+    }
+    assert!(nested.len() < 1_000);
+    assert_eq!(kind(&build(200), &nested), ErrorKind::Limit);
+}
+
+#[test]
 fn max_rows() {
     let policy: Policy = dense().select(orders()).max_rows(Some(100)).build().unwrap();
     assert_eq!(

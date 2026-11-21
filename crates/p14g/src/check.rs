@@ -523,6 +523,14 @@ impl<'p, C> Checker<'p, C> {
                         let alias = self.instances[index].alias.clone();
                         if let Some(columns) = self.star_columns(index)? {
                             for name in columns {
+                                // checked as the list grows: each level of derived tables can multiply the
+                                // columns of the one below, so the expanded list is exponential in the input
+                                if expanded.len() >= self.policy.limits.max_projection {
+                                    return Err(Error::limit(format!(
+                                        "select list has more than {} items once * is expanded",
+                                        self.policy.limits.max_projection
+                                    )));
+                                }
                                 self.instances[index].used_columns.insert(name.clone());
                                 outputs.names.push(Some(name.clone()));
                                 expanded.push(SelectItem::Expr {
