@@ -476,6 +476,9 @@ fn insert_extra() {
                 Ok(vec![
                     ("flag".to_owned(), true.into()),
                     ("ratio".to_owned(), (-1.5).into()),
+                    ("whole".to_owned(), 2.0.into()),
+                    ("big".to_owned(), 1e300.into()),
+                    ("small".to_owned(), 1e-7.into()),
                     ("label".to_owned(), "it's".into()),
                     ("nothing".to_owned(), Literal::Null.into()),
                     ("nan".to_owned(), f64::NAN.into()),
@@ -522,7 +525,7 @@ fn insert_extra() {
             .check("insert into notes (body) values ('x')", &Tenant { id: 1, schema: "" })
             .unwrap()
             .sql,
-        r#"INSERT INTO "notes" ("body", "flag", "ratio", "label", "nothing", "nan") VALUES ('x', TRUE, (- 1.5), 'it''s', NULL, CAST('NaN' AS double precision))"#
+        r#"INSERT INTO "notes" ("body", "flag", "ratio", "whole", "big", "small", "label", "nothing", "nan") VALUES ('x', TRUE, (- 1.5), 2.0, 1e300, 1e-7, 'it''s', NULL, CAST('NaN' AS double precision))"#
     );
     let error = policy.check("insert into bad (x) values (1)", &tenant).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Callback);

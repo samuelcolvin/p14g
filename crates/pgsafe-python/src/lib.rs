@@ -1,4 +1,5 @@
 //! Python bindings for pgsafe.
+#![expect(clippy::absolute_paths, reason = "in the code `#[pyclass(hash)]` expands to")]
 
 use pgsafe::{ErrorKind, Literals, Mapper, Op, PolicyBuilder, Star, StatementKind, ast, functions};
 use pyo3::{
@@ -319,8 +320,8 @@ impl PyLimits {
 // ------------------------------------------------------------------ nodes seen by mappers
 
 /// A table or view in `FROM`, or the target of a write.
-#[pyclass(frozen, eq, module = "pgsafe", name = "Table")]
-#[derive(PartialEq)]
+#[pyclass(frozen, eq, hash, module = "pgsafe", name = "Table")]
+#[derive(PartialEq, Eq, Hash)]
 struct PyTable(ast::Table);
 
 #[pymethods]
@@ -365,8 +366,8 @@ fn repr_option(value: Option<&str>) -> String {
 }
 
 /// A reference to a column. `table` is the name or alias of the table it belongs to.
-#[pyclass(frozen, eq, module = "pgsafe", name = "Column")]
-#[derive(PartialEq)]
+#[pyclass(frozen, eq, hash, module = "pgsafe", name = "Column")]
+#[derive(PartialEq, Eq, Hash)]
 struct PyColumn(ast::Column);
 
 #[pymethods]
@@ -396,8 +397,8 @@ impl PyColumn {
 }
 
 /// A function call. `args` holds `Column`, `Function`, `Literal` and opaque `Expr` objects.
-#[pyclass(frozen, eq, module = "pgsafe", name = "Function")]
-#[derive(PartialEq)]
+#[pyclass(frozen, eq, hash, module = "pgsafe", name = "Function")]
+#[derive(PartialEq, Eq, Hash)]
 struct PyFunction(ast::Function);
 
 #[pymethods]
@@ -465,8 +466,8 @@ impl PyFunction {
 }
 
 /// A literal value: `None`, a `bool`, a number or a `str`.
-#[pyclass(frozen, eq, module = "pgsafe", name = "Literal")]
-#[derive(PartialEq)]
+#[pyclass(frozen, eq, hash, module = "pgsafe", name = "Literal")]
+#[derive(PartialEq, Eq, Hash)]
 struct PyLiteral(ast::Literal);
 
 #[pymethods]
@@ -511,8 +512,8 @@ impl PyLiteral {
 }
 
 /// Any other expression. It can be passed along, for example as a function argument, but not inspected.
-#[pyclass(frozen, eq, module = "pgsafe", name = "Expr")]
-#[derive(PartialEq)]
+#[pyclass(frozen, eq, hash, module = "pgsafe", name = "Expr")]
+#[derive(PartialEq, Eq, Hash)]
 struct PyExpr(ast::Expr);
 
 #[pymethods]

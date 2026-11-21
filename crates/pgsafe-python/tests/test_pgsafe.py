@@ -110,13 +110,24 @@ def test_insert_extra_callable(policy: Policy):
 def test_insert_extra_dict_and_values():
     policy = Policy(
         Insert(
-            't', extra={'a': None, 'b': True, 'c': -5, 'd': 1.5, 'e': "it's", 'f': 10**30, 'g': float('inf'), 'h': -0.0}
+            't',
+            extra={
+                'a': None,
+                'b': True,
+                'c': -5,
+                'd': 1.5,
+                'e': "it's",
+                'f': 10**30,
+                'g': float('inf'),
+                'h': -0.0,
+                'i': 2.0,
+            },
         )
     )
     assert policy.check('insert into t (x) values (1), (2)').sql == (
-        'INSERT INTO "t" ("x", "a", "b", "c", "d", "e", "f", "g", "h") VALUES '
-        "(1, NULL, TRUE, (- 5), 1.5, 'it''s', 1000000000000000000000000000000, CAST('Infinity' AS double precision), 0), "
-        "(2, NULL, TRUE, (- 5), 1.5, 'it''s', 1000000000000000000000000000000, CAST('Infinity' AS double precision), 0)"
+        'INSERT INTO "t" ("x", "a", "b", "c", "d", "e", "f", "g", "h", "i") VALUES '
+        "(1, NULL, TRUE, (- 5), 1.5, 'it''s', 1000000000000000000000000000000, CAST('Infinity' AS double precision), 0.0, 2.0), "
+        "(2, NULL, TRUE, (- 5), 1.5, 'it''s', 1000000000000000000000000000000, CAST('Infinity' AS double precision), 0.0, 2.0)"
     )
 
 
@@ -434,7 +445,7 @@ def test_nodes():
     assert [type(arg) for arg in Function('abs', [-1]).args] == [Expr]
     assert repr(Function('abs', [-1]).args[0]) == 'Expr(...)'
 
-    for value in None, True, False, 0, 42, 1.5, 'text', '':
+    for value in None, True, False, 0, 42, 1.5, 1.0, 0.0, 1e300, 1e-7, 'text', '':
         literal = Literal(value)
         assert literal.value == value
         assert type(literal.value) is type(value)
@@ -472,3 +483,395 @@ def test_mapper_output_is_still_escaped():
 def test_version():
     assert isinstance(pgsafe.__version__, str)
     assert pgsafe.__version__.count('.') == 2
+
+
+def test_nodes_are_hashable():
+    assert hash(Table('a', schema='s')) == hash(Table('a', schema='s'))
+    assert len({Table('a'), Table('a'), Table('a', alias='x')}) == 2
+    assert len({Column('a'), Column('a', table='t'), Column('a')}) == 2
+    assert len({Literal(1), Literal(1), Literal('1'), Literal(True), Literal(None)}) == 4
+    assert len({Function('f', [1]), Function('f', [1]), Function('f', [2]), Function('f', [1], schema='s')}) == 3
+    by_table = {Table('orders'): 'o'}
+    assert by_table[Table('orders')] == 'o'
+
+
+def test_nodes_are_not_equal_to_other_things():
+    assert Table('a') != 'a'
+    assert Column('a') != Table('a')
+    assert Literal(1) != 1
+    assert Function('f') != Function('g')
+    assert Literal(1) != Literal(1.0)
+    assert Literal(True) != Literal(1)
+
+
+def test_nodes_cannot_be_pickled():
+    import copy
+    import pickle
+
+    for node in Table('a'), Column('a'), Function('f'), Literal(1), Select('a'), Policy():
+        with pytest.raises(TypeError, match='cannot pickle'):
+            pickle.dumps(node)
+        with pytest.raises(TypeError, match='cannot pickle'):
+            copy.deepcopy(node)
+
+
+def test_nodes_are_immutable():
+    for node, attribute in (Table('a'), 'name'), (Column('a'), 'name'), (Select('a'), 'table'), (Limits(), 'max_depth'):
+        with pytest.raises(AttributeError):
+            setattr(node, attribute, 'x')
+    safe = Policy().check('select 1')
+    with pytest.raises(AttributeError):
+        safe.sql = 'drop table x'  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(TypeError):
+        Table()  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError, match='cannot create'):
+        pgsafe.SafeSql()  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError, match='cannot create'):
+        Expr()  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError, match='cannot create'):
+        pgsafe.Mapper()  # pyright: ignore[reportCallIssue]
+
+
+def test_function_args_shapes():
+    seen: dict[str, list[Any]] = {}
+
+    @mapper(Function)
+    def record(function: Function, context: Any) -> pgsafe.ExprLike:
+        seen[function.name] = function.args
+        return function
+
+    policy = Policy(Select('v'), mappers=[record])
+    sql = "select count(*), current_date, now(), lower(a), coalesce(b, -1, 'x', c + 1, (select max(d) from v)) from v"
+    out = policy.check(sql).sql
+    # a mapper that returns what it was given changes nothing
+    assert out == Policy(Select('v')).check(sql).sql
+    assert seen['count'] == []
+    assert seen['current_date'] == []
+    assert seen['now'] == []
+    assert seen['lower'] == [Column('a', table='v')]
+    assert [type(arg) for arg in seen['coalesce']] == [Column, Expr, Literal, Expr, Expr]
+    assert seen['max'] == [Column('d', table='v')]
+
+    # `f(*)` has no argument list to replace, so giving it one makes an ordinary call
+    @mapper(Function)
+    def count_one(function: Function, context: Any) -> pgsafe.ExprLike:
+        return function.replace(args=[1]) if function.name == 'count' else function
+
+    assert Policy(Select('v'), mappers=[count_one]).check('select count(*) from v').sql == (
+        'SELECT pg_catalog."count"(1) FROM "v"'
+    )
+
+
+def test_mappers_run_in_order_and_bottom_up():
+    calls: list[str] = []
+
+    @mapper(Function)
+    def first(function: Function, context: Any) -> pgsafe.ExprLike:
+        calls.append(f'first:{function.name}')
+        return function.replace(name='abs') if function.name == 'lower' else function
+
+    @mapper(Function)
+    def second(function: Function, context: Any) -> pgsafe.ExprLike:
+        calls.append(f'second:{function.name}')
+        return function
+
+    @mapper(Function)
+    def to_literal(function: Function, context: Any) -> pgsafe.ExprLike:
+        return 7 if function.name == 'upper' else function
+
+    @mapper(Literal)
+    def never_sees_mapped_output(literal: Literal, context: Any) -> pgsafe.ExprLike:
+        calls.append(f'literal:{literal.value}')
+        return literal
+
+    policy = Policy(Select('v'), mappers=[first, second, to_literal, never_sees_mapped_output])
+    assert policy.check('select lower(upper(a)), 1 from v').sql == 'SELECT pg_catalog."abs"(7), 1 FROM "v"'
+    # the inner call is mapped before the outer one, and each mapper is given what the one before returned,
+    # so the literal mapper sees the literal that replaced `upper(a)`
+    assert calls == ['first:upper', 'second:upper', 'literal:7', 'first:lower', 'second:abs', 'literal:1']
+
+
+def test_mapper_everywhere_in_a_statement():
+    @mapper(Literal)
+    def bump(literal: Literal, context: Any) -> pgsafe.ExprLike:
+        return literal.value + 1 if isinstance(literal.value, int) and not isinstance(literal.value, bool) else literal
+
+    policy = Policy(Select('v'), Insert('v'), Update('v'), Delete('v'), mappers=[bump])
+    assert policy.check(
+        'with c as (select 1 as n from v) select a, case when b = 1 then 2 else 3 end from v join c on c.n = 1 '
+        'where a in (1, 2) and b between 1 and 2 and exists (select 1 from v where a = 1) '
+        'group by a, b having count(*) > 1 order by a + 1 limit 1 offset 1'
+    ).sql == (
+        'WITH "c" AS (SELECT 2 AS "n" FROM "v") SELECT "v"."a", (CASE WHEN ("v"."b" = 2) THEN 3 ELSE 4 END) '
+        'FROM "v" INNER JOIN "c" ON ("c"."n" = 2) '
+        'WHERE ((("v"."a" IN (2, 3)) AND ("v"."b" BETWEEN 2 AND 3)) AND (EXISTS (SELECT 2 FROM "v" WHERE ("v"."a" = 2)))) '
+        'GROUP BY "v"."a", "v"."b" HAVING (pg_catalog."count"(*) > 2) ORDER BY ("v"."a" + 2) LIMIT 2 OFFSET 2'
+    )
+    assert policy.check('insert into v (a) values (1), (2) returning a + 1').sql == (
+        'INSERT INTO "v" ("a") VALUES (2), (3) RETURNING ("v"."a" + 2)'
+    )
+    assert policy.check('update v set a = 1 where b = 1 returning 1').sql == (
+        'UPDATE "v" SET "a" = 2 WHERE ("v"."b" = 2) RETURNING 2'
+    )
+    assert policy.check('delete from v where b = 1').sql == 'DELETE FROM "v" WHERE ("v"."b" = 2)'
+    assert policy.check('select a from v union select a from v where a = 1 order by 1').sql == (
+        '(SELECT "v"."a" FROM "v") UNION (SELECT "v"."a" FROM "v" WHERE ("v"."a" = 2)) ORDER BY 1'
+    )
+
+
+def test_mapper_returns_opaque_expr():
+    @mapper(Function)
+    def unwrap(function: Function, context: Any) -> pgsafe.ExprLike:
+        # replace `lower(x)` with `x`, whatever `x` is
+        return function.args[0] if function.name == 'lower' else function
+
+    policy = Policy(Select('v'), mappers=[unwrap])
+    assert policy.check('select lower(a + 1), lower(b), lower(-2) from v').sql == (
+        'SELECT ("v"."a" + 1), "v"."b", (- 2) FROM "v"'
+    )
+
+
+def test_mapper_builds_invalid_sql():
+    @mapper(Table)
+    def keyword_function(table: Table, context: Any) -> Table:
+        return table
+
+    @mapper(Function)
+    def bad_arity(function: Function, context: Any) -> pgsafe.ExprLike:
+        return Function('nullif', [1])
+
+    with pytest.raises(PgSafeError, match='NULLIF cannot be written with these arguments') as exc_info:
+        Policy(Select('v'), mappers=[keyword_function, bad_arity]).check('select lower(a) from v')
+    assert exc_info.value.kind == 'unsupported'
+
+
+def test_context_is_passed_through_unchanged():
+    marker = object()
+    seen: list[Any] = []
+
+    @mapper(Table)
+    def table(table: Table, context: Any) -> Table:
+        seen.append(context)
+        return table
+
+    def extra(context: Any) -> dict[str, Any]:
+        seen.append(context)
+        return {}
+
+    policy = Policy(Select('t'), Insert('t', extra=extra), mappers=[table])
+    policy.check('insert into t (a) values (1)', context=marker)
+    assert seen == [marker, marker]
+    seen.clear()
+    policy.check('select a from t')
+    assert seen == [None]
+
+
+def test_extra_is_called_once_per_check():
+    calls = 0
+
+    def extra(context: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {'n': calls}
+
+    policy = Policy(Insert('t', extra=extra))
+    assert policy.check('insert into t (a) values (1), (2), (3)').sql == (
+        'INSERT INTO "t" ("a", "n") VALUES (1, 1), (2, 1), (3, 1)'
+    )
+    assert calls == 1
+    # not called for a statement that is rejected before the rule is reached
+    with pytest.raises(PgSafeError):
+        policy.check('insert into other (a) values (1)')
+    assert calls == 1
+
+
+def test_extra_values():
+    policy = Policy(
+        Insert(
+            't',
+            extra={'col': Column('x'), 'fn': Function('now'), 'lit': Literal('s'), 'neg': -1.5, 'nan': float('nan')},
+        )
+    )
+    assert policy.check('insert into t (a) values (1)').sql == (
+        'INSERT INTO "t" ("a", "col", "fn", "lit", "neg", "nan") '
+        'VALUES (1, "x", pg_catalog."now"(), \'s\', (- 1.5), CAST(\'NaN\' AS double precision))'
+    )
+    params = Policy(Insert('t', extra={'s': 'from policy'}), literals='params')
+    safe = params.check("insert into t (a) values ('x')")
+    assert safe.sql == 'INSERT INTO "t" ("a", "s") VALUES ($1, $2)'
+    assert safe.params == ['x', 'from policy']
+    with pytest.raises(TypeError, match='expected a Column, Function, Literal, Expr, None, bool, int, float or str'):
+        Insert('t', extra={'a': b'bytes'})  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match='the keys of extra must be column names'):
+        Insert('t', extra={1: 'a'})  # pyright: ignore[reportArgumentType]
+
+
+def test_policy_can_be_used_from_a_callback():
+    inner = Policy(Select('v'))
+
+    @mapper(Literal)
+    def nested(literal: Literal, context: Any) -> pgsafe.ExprLike:
+        if literal.value == 'sql':
+            return inner.check('select a from v').sql
+        return literal
+
+    outer = Policy(Select('v'), mappers=[nested])
+    assert outer.check("select 'sql' from v").sql == """SELECT 'SELECT "v"."a" FROM "v"' FROM "v\""""
+
+    # and a policy can check from inside its own mapper
+    policies: list[Policy] = []
+
+    @mapper(Table)
+    def recursive(table: Table, context: Any) -> Table:
+        if context == 0:
+            return table
+        return Table(policies[0].check('select 1 from v', context=context - 1).kind)
+
+    policies.append(Policy(Select('v'), mappers=[recursive]))
+    assert policies[0].check('select a from v', context=3).sql == 'SELECT "v"."a" FROM "select" AS "v"'
+
+
+def test_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    def extra(context: int) -> dict[str, int]:
+        return {'n': context}
+
+    @mapper(Table)
+    def suffix(table: Table, context: int) -> Table:
+        return Table(f'{table.name}_{context}')
+
+    policy = Policy(Select('t', columns=['a']), Insert('t', extra=extra), mappers=[suffix])
+
+    def work(n: int) -> list[str]:
+        out: list[str] = []
+        for _ in range(200):
+            out.append(policy.check('select * from t where a = 1', context=n).sql)
+            out.append(policy.check('insert into t (a) values (1)', context=n).sql)
+            with pytest.raises(PgSafeError):
+                policy.check('select b from t', context=n)
+        return out
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(work, range(16)))
+    for n, result in enumerate(results):
+        assert set(result) == {
+            f'SELECT "t"."a" FROM "t_{n}" AS "t" WHERE ("t"."a" = 1)',
+            f'INSERT INTO "t_{n}" AS "t" ("a", "n") VALUES (1, {n})',
+        }
+
+
+def test_check_arguments():
+    policy = Policy(Select('v'))
+    with pytest.raises(TypeError):
+        policy.check(b'select 1')  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError):
+        policy.check('select 1', 'context')  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError):
+        policy.check('select 1', allow='select')  # pyright: ignore[reportArgumentType]
+    with pytest.raises(PgSafeError, match='SELECT statements are not allowed here'):
+        policy.check('select 1', allow=[])
+    assert policy.check('SELECT 1', allow=['SELECT', 'Insert']).kind == 'select'  # pyright: ignore[reportArgumentType]
+    # the input is unicode, not bytes: a lone surrogate cannot be encoded
+    with pytest.raises(UnicodeEncodeError):
+        policy.check("select '\ud800'")
+    assert policy.check("select 'café \U0001f600'").sql == "SELECT 'café \U0001f600'"
+    with pytest.raises(PgSafeError, match='string literals may not contain NUL'):
+        policy.check("select 'a\0b'")
+
+
+def test_policy_arguments():
+    with pytest.raises(TypeError):
+        Policy(functions='count')  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError):
+        Policy(limits={'max_depth': 1})  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError):
+        Policy(Select('v'), Select)  # pyright: ignore[reportArgumentType]
+    with pytest.raises((TypeError, OverflowError)):
+        Policy(max_rows=-1)
+    with pytest.raises((TypeError, OverflowError)):
+        Limits(max_depth=-1)
+    # an empty policy allows statements that touch no table
+    empty = Policy()
+    assert empty.check('select 1 + 1, lower($1)').sql == 'SELECT (1 + 1), pg_catalog."lower"($1)'
+    assert empty.check('select 1').tables == []
+
+
+def test_all_limits():
+    defaults = Limits()
+    assert (
+        defaults.max_sql_bytes,
+        defaults.max_depth,
+        defaults.max_nodes,
+        defaults.max_joins,
+        defaults.max_subqueries,
+        defaults.max_set_operations,
+        defaults.max_in_list,
+        defaults.max_projection,
+        defaults.max_values_rows,
+    ) == (65536, 50, 10000, 8, 16, 8, 1000, 200, 1000)
+
+    def rejected(sql: str, **limits: int) -> str:
+        policy = Policy(Select('v'), Insert('v'), limits=Limits(**limits))
+        with pytest.raises(PgSafeError) as exc_info:
+            policy.check(sql)
+        assert exc_info.value.kind == 'limit'
+        return exc_info.value.message
+
+    assert rejected('select ((((a)))) from v', max_depth=4) == 'SQL is nested too deeply'
+    assert rejected('select a, b, c from v', max_nodes=5) == 'SQL has 8 tokens, the limit is 5'
+    assert rejected('select v.a from v join v x on true', max_joins=0) == 'SQL has more than 0 joins'
+    assert rejected('select (select 1) from v', max_subqueries=0) == 'SQL has more than 0 subqueries'
+    assert rejected('select 1 union select 2', max_set_operations=0) == 'SQL has more than 0 set operations'
+    assert rejected('select a from v where a in (1, 2)', max_in_list=1) == 'IN list has more than 1 items'
+    assert rejected('select a, b from v', max_projection=1) == 'select list has more than 1 items'
+    assert rejected('insert into v (a) values (1), (2)', max_values_rows=1) == 'INSERT has more than 1 rows'
+
+
+def test_expr_like_alias():
+    import typing
+
+    assert set(typing.get_args(pgsafe.ExprLike)) == {Column, Function, Literal, Expr, type(None), bool, int, float, str}
+    public = {name for name in dir(pgsafe) if not name.startswith('_') and name != 'pgsafe'}
+    assert set(pgsafe.__all__) == public | {'__version__'}
+
+
+def test_error_is_a_normal_exception():
+    error = PgSafeError('message')
+    assert str(error) == 'message'
+    assert not hasattr(error, 'kind')
+    try:
+        Policy().check('select * from t')
+    except ValueError as e:
+        assert isinstance(e, PgSafeError)
+        assert e.args == ('reading from table "t" is not allowed',)
+        assert e.__cause__ is None
+
+
+def test_nodes_have_no_order():
+    pairs: list[list[Any]] = [
+        [Table('a'), Table('b')],
+        [Column('a'), Column('b')],
+        [Literal(1), Literal(2)],
+        [Function('a'), Function('b')],
+    ]
+    for pair in pairs:
+        with pytest.raises(TypeError, match="'<' not supported"):
+            sorted(pair)
+
+
+def test_opaque_expr():
+    first, second, third = Function('f', [-1, -1, -2]).args
+    assert isinstance(first, Expr)
+    assert first == second
+    assert first != third
+    assert hash(first) == hash(second)
+    assert first != -1
+
+
+def test_mapper_repr():
+    def f(node: Any, context: Any) -> Any:
+        return node
+
+    for kind in Table, Column, Function, Literal:
+        assert repr(mapper(kind)(f)).startswith(f'<Mapper of {kind.__name__} <function test_mapper_repr.<locals>.f')

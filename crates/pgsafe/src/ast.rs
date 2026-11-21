@@ -53,7 +53,7 @@ impl fmt::Display for Ident {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Statement {
     Query(Query),
@@ -105,7 +105,7 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Query {
     pub with: Vec<Cte>,
     pub body: SetExpr,
@@ -114,13 +114,13 @@ pub struct Query {
     pub offset: Option<Expr>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cte {
     pub name: Ident,
     pub query: Query,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SetExpr {
     Select(Box<Select>),
@@ -134,14 +134,14 @@ pub enum SetExpr {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SetOperator {
     Union,
     Except,
     Intersect,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Select {
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
@@ -151,7 +151,7 @@ pub struct Select {
     pub having: Option<Expr>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SelectItem {
     Expr {
@@ -164,13 +164,13 @@ pub enum SelectItem {
     QualifiedWildcard(Ident),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableWithJoins {
     pub relation: TableFactor,
     pub joins: Vec<Join>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TableFactor {
     Table(Table),
@@ -178,7 +178,7 @@ pub enum TableFactor {
 }
 
 /// A reference to a table or view, as it appears in `FROM` or as the target of a write.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Table {
     pub schema: Option<Ident>,
     pub name: Ident,
@@ -202,7 +202,7 @@ impl Table {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Join {
     pub kind: JoinKind,
     pub relation: TableFactor,
@@ -210,7 +210,7 @@ pub struct Join {
     pub on: Option<Expr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JoinKind {
     Inner,
     Left,
@@ -219,7 +219,7 @@ pub enum JoinKind {
     Cross,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderBy {
     pub expr: Expr,
     /// `Some(true)` for `DESC`, `Some(false)` for `ASC`, `None` when not given.
@@ -227,7 +227,7 @@ pub struct OrderBy {
     pub nulls_first: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Expr {
     Column(Column),
@@ -302,13 +302,13 @@ pub enum Expr {
 }
 
 /// A column reference. After checking, `table` is always set to the alias of the table it belongs to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Column {
     pub table: Option<Ident>,
     pub name: Ident,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Literal {
     Null,
@@ -347,14 +347,14 @@ macro_rules! literal_from_unsigned {
 }
 literal_from_unsigned!(u8, u16, u32, u64, usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOperator {
     Not,
     Minus,
     Plus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BinaryOperator {
     Eq,
@@ -389,7 +389,7 @@ pub enum BinaryOperator {
     ContainedBy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IsTest {
     Null,
     True,
@@ -397,7 +397,7 @@ pub enum IsTest {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LikeKind {
     Like,
     ILike,
@@ -406,7 +406,7 @@ pub enum LikeKind {
 
 /// The types a value may be cast to. Types that read the catalog (`regclass` and friends) or that run
 /// arbitrary input functions are deliberately absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DataType {
     SmallInt,
@@ -431,7 +431,7 @@ pub enum DataType {
 }
 
 /// The fields `EXTRACT` accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DateField {
     Century,
@@ -454,7 +454,7 @@ pub enum DateField {
     Year,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     pub schema: Option<Ident>,
     pub name: Ident,
@@ -493,7 +493,7 @@ impl Function {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum FunctionArgs {
     /// Written without parentheses, e.g. `CURRENT_DATE`.
@@ -503,13 +503,13 @@ pub enum FunctionArgs {
     List(Vec<Expr>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Window {
     pub partition_by: Vec<Expr>,
     pub order_by: Vec<OrderBy>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Insert {
     pub table: Table,
     pub columns: Vec<Ident>,
@@ -517,7 +517,7 @@ pub struct Insert {
     pub returning: Vec<SelectItem>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Update {
     pub table: Table,
     pub assignments: Vec<Assignment>,
@@ -525,13 +525,13 @@ pub struct Update {
     pub returning: Vec<SelectItem>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Assignment {
     pub column: Ident,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Delete {
     pub table: Table,
     pub selection: Option<Expr>,
@@ -593,7 +593,8 @@ impl From<f64> for Expr {
     /// only way to write them in SQL.
     fn from(v: f64) -> Self {
         if v.is_finite() {
-            let magnitude = Self::Literal(Literal::Number(v.abs().to_string()));
+            // `{:?}` keeps the decimal point (`1.0`, not `1`), which decides integer or numeric arithmetic
+            let magnitude = Self::Literal(Literal::Number(format!("{:?}", v.abs())));
             if v.is_sign_negative() && v != 0.0 {
                 Self::Unary {
                     op: UnaryOperator::Minus,

@@ -17,7 +17,8 @@ use crate::{
 /// Rewrites nodes of a checked statement. Every method defaults to leaving the node alone.
 ///
 /// Nodes are visited bottom-up, so a function's arguments have already been mapped when the function is.
-/// The replacement a mapper returns is not visited again.
+/// Mappers run in the order they were added and each is given what the one before returned. The inside of
+/// a replacement is not visited.
 pub trait Mapper<C>: Send + Sync {
     /// A table or view in `FROM`, or the target of a write.
     ///
