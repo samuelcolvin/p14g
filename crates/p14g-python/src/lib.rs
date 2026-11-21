@@ -6,7 +6,7 @@ use pyo3::{
     create_exception,
     exceptions::{PyTypeError, PyValueError},
     prelude::*,
-    types::{PyBool, PyDict, PyFloat, PyInt, PyString, PyTuple, PyType},
+    types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType},
 };
 
 /// The context handed to `rewrite()`, passed on untouched to `extra` callables and mappers.
@@ -73,19 +73,22 @@ struct PySelect {
     operators: Option<Vec<String>>,
     #[pyo3(get)]
     only: bool,
+    filter: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PySelect {
     #[new]
-    #[pyo3(signature = (table, *, columns=None, operators=None, only=false))]
+    #[pyo3(signature = (table, *, columns=None, operators=None, only=false, filter=None))]
     fn new(
         py: Python<'_>,
         table: String,
         columns: Option<Vec<String>>,
         operators: Option<Vec<String>>,
         only: bool,
+        filter: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
+        check_filter(py, filter.as_ref())?;
         if let Some(operators) = &operators {
             parse_operators(py, operators)?;
         }
@@ -94,6 +97,7 @@ impl PySelect {
             columns,
             operators,
             only,
+            filter,
         })
     }
 
@@ -110,6 +114,49 @@ impl PySelect {
 
 fn repr_bool(value: bool) -> &'static str {
     if value { "True" } else { "False" }
+}
+
+/// A rule's `filter` is a callable, or a string for a condition with no values to bind.
+fn check_filter(py: Python<'_>, filter: Option<&Py<PyAny>>) -> PyResult<()> {
+    match filter.map(|filter| filter.bind(py)) {
+        Some(filter) if !filter.is_callable() && !filter.is_instance_of::<PyString>() => Err(PyTypeError::new_err(
+            "filter must be a callable returning (sql, values), or a str",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Call a rule's `filter` with the context and read what it returns: `(sql, values)` or just `sql`.
+fn python_filter(filter: &Py<PyAny>, context: &Context) -> p14g::Result<p14g::Filter> {
+    Python::attach(|py| {
+        let filter = filter.bind(py);
+        let returned = if filter.is_callable() {
+            filter.call1((context.bind(py),))?
+        } else {
+            filter.clone()
+        };
+        if let Ok(sql) = returned.cast::<PyString>() {
+            return Ok(p14g::Filter::new(sql.to_str()?));
+        }
+        let invalid = || PyTypeError::new_err("a filter must return (sql, values) or sql");
+        let (sql, values): (Bound<'_, PyString>, Bound<'_, PyDict>) = returned.extract().map_err(|_| invalid())?;
+        let mut filter = p14g::Filter::new(sql.to_str()?);
+        for (name, value) in values.iter() {
+            let name: String = name
+                .extract()
+                .map_err(|_| PyTypeError::new_err("the keys of a filter's values must be placeholder names"))?;
+            // a list or a tuple is the items of `IN (:name)`, anything else is one value
+            let value = if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+                let items: Vec<Bound<'_, PyAny>> = value.extract()?;
+                p14g::FilterValue::Many(items.iter().map(py_to_expr).collect::<PyResult<_>>()?)
+            } else {
+                p14g::FilterValue::One(py_to_expr(&value)?)
+            };
+            filter = filter.bind(name, value);
+        }
+        Ok(filter)
+    })
+    .map_err(callback_error)
 }
 
 fn parse_operators(py: Python<'_>, operators: &[String]) -> PyResult<Vec<Op>> {
@@ -186,19 +233,29 @@ struct PyUpdate {
     allow_unfiltered: bool,
     #[pyo3(get)]
     only: bool,
+    filter: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyUpdate {
     #[new]
-    #[pyo3(signature = (table, *, columns=None, allow_unfiltered=false, only=false))]
-    fn new(table: String, columns: Option<Vec<String>>, allow_unfiltered: bool, only: bool) -> Self {
-        Self {
+    #[pyo3(signature = (table, *, columns=None, allow_unfiltered=false, only=false, filter=None))]
+    fn new(
+        py: Python<'_>,
+        table: String,
+        columns: Option<Vec<String>>,
+        allow_unfiltered: bool,
+        only: bool,
+        filter: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        check_filter(py, filter.as_ref())?;
+        Ok(Self {
             table,
             columns,
             allow_unfiltered,
             only,
-        }
+            filter,
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -221,18 +278,27 @@ struct PyDelete {
     allow_unfiltered: bool,
     #[pyo3(get)]
     only: bool,
+    filter: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyDelete {
     #[new]
-    #[pyo3(signature = (table, *, allow_unfiltered=false, only=false))]
-    fn new(table: String, allow_unfiltered: bool, only: bool) -> Self {
-        Self {
+    #[pyo3(signature = (table, *, allow_unfiltered=false, only=false, filter=None))]
+    fn new(
+        py: Python<'_>,
+        table: String,
+        allow_unfiltered: bool,
+        only: bool,
+        filter: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        check_filter(py, filter.as_ref())?;
+        Ok(Self {
             table,
             allow_unfiltered,
             only,
-        }
+            filter,
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -948,6 +1014,10 @@ fn add_rule(
         if let Some(operators) = &select.operators {
             rule = rule.operators(parse_operators(py, operators)?);
         }
+        if let Some(filter) = &select.filter {
+            let filter = filter.clone_ref(py);
+            rule = rule.try_filter(move |context: &Context| python_filter(&filter, context));
+        }
         Ok(builder.select(rule))
     } else if let Ok(insert) = rule.cast::<PyInsert>() {
         let insert = insert.get();
@@ -978,14 +1048,21 @@ fn add_rule(
         if let Some(columns) = &update.columns {
             rule = rule.columns(columns);
         }
+        if let Some(filter) = &update.filter {
+            let filter = filter.clone_ref(py);
+            rule = rule.try_filter(move |context: &Context| python_filter(&filter, context));
+        }
         Ok(builder.update(rule))
     } else if let Ok(delete) = rule.cast::<PyDelete>() {
         let delete = delete.get();
-        Ok(builder.delete(
-            p14g::Delete::table(&delete.table)
-                .allow_unfiltered(delete.allow_unfiltered)
-                .only(delete.only),
-        ))
+        let mut rule = p14g::Delete::table(&delete.table)
+            .allow_unfiltered(delete.allow_unfiltered)
+            .only(delete.only);
+        if let Some(filter) = &delete.filter {
+            let filter = filter.clone_ref(py);
+            rule = rule.try_filter(move |context: &Context| python_filter(&filter, context));
+        }
+        Ok(builder.delete(rule))
     } else {
         Err(PyTypeError::new_err(format!(
             "a rule must be a Select, Insert, Update or Delete, not {}",

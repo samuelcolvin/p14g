@@ -12,7 +12,7 @@ mod common;
 use std::env;
 
 use common::{accept_cases, params_policy, policy};
-use p14g::{Layout, Literals, Policy, QuoteIdentifiers, Select, functions};
+use p14g::{Delete, Filter, Insert, Layout, Literals, Policy, QuoteIdentifiers, Select, Update, functions};
 use postgres::{Client, Config, NoTls, SimpleQueryMessage, error::SqlState};
 
 const ROLE: &str = "p14g_test_role";
@@ -128,6 +128,7 @@ fn postgres_agrees() {
     generated_grants(&mut client);
     keywords_and_quoting(&mut client);
     function_names(&mut client);
+    filters_restrict_rows(&mut client);
 }
 
 const NASTY: &[&str] = &[
@@ -486,4 +487,87 @@ fn function_names(client: &mut Client) {
                 .unwrap_or_else(|e| panic!("line {}: {}\n  {}", case.line, safe.sql, describe(&e)));
         }
     }
+}
+
+/// A rule's filter holds for reads through joins and subqueries, and for updates and deletes, whatever the
+/// statement's own conditions say.
+fn filters_restrict_rows(client: &mut Client) {
+    let org = |org: &i64| Filter::new("org = :org").bind("org", *org);
+    let policy: Policy<i64> = Policy::builder()
+        .layout(Layout::Dense)
+        .select(Select::table("scoped").columns(["id", "val"]).filter(org))
+        .select(Select::table("customers").columns(["id", "name"]))
+        .insert(
+            Insert::table("scoped")
+                .columns(["id", "val"])
+                .extra(|org: &i64| [("org", *org)]),
+        )
+        .update(
+            Update::table("scoped")
+                .columns(["val"])
+                .allow_unfiltered(true)
+                .filter(org),
+        )
+        .delete(Delete::table("scoped").allow_unfiltered(true).filter(org))
+        .build()
+        .unwrap();
+    // org 1 has two rows and org 2 has three; the role itself may read and write them all
+    assert_eq!(run(client, "SELECT id FROM scoped", &[]).unwrap(), 5);
+
+    let mut rows = |org: i64, sql: &str| {
+        let safe = policy.rewrite(sql, &org).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        run(client, &safe.sql, &[]).unwrap_or_else(|e| panic!("{}: {}", safe.sql, describe(&e)))
+    };
+    for (org, count) in [(1, 2), (2, 3), (3, 0)] {
+        assert_eq!(rows(org, "select * from scoped"), count);
+        assert_eq!(rows(org, "select id from scoped where true or id > 0"), count);
+        assert_eq!(
+            rows(org, "select s.id from scoped s where s.id in (select id from scoped)"),
+            count
+        );
+        assert_eq!(
+            rows(org, "select 1 from scoped union all select 1 from scoped"),
+            count * 2
+        );
+        // the nullable side of an outer join is where a condition added to WHERE would go wrong
+        assert_eq!(
+            rows(
+                org,
+                "select c.id, s.id from customers c left join scoped s on true where s.id is not null"
+            ),
+            count * 2
+        );
+        assert_eq!(
+            rows(
+                org,
+                "select c.id from customers c left join scoped s on true where s.id is null"
+            ),
+            if count == 0 { 2 } else { 0 }
+        );
+        assert_eq!(
+            rows(org, "select a.id from scoped a join scoped b on true"),
+            count * count
+        );
+        assert_eq!(rows(org, "update scoped set val = 'x' returning id"), count);
+        assert_eq!(
+            rows(org, "update scoped set val = 'x' where true or id = 999 returning id"),
+            count
+        );
+        assert_eq!(rows(org, "delete from scoped returning id"), count);
+        assert_eq!(
+            rows(org, "delete from scoped as s where s.id > 0 or true returning s.id"),
+            count
+        );
+        assert_eq!(
+            rows(org, "insert into scoped (id, val) values (100, 'new') returning id"),
+            1
+        );
+    }
+    // the generated grants cover the column the filter reads
+    assert!(
+        policy
+            .grants("someone", &1)
+            .unwrap()
+            .contains(&r#"GRANT SELECT ("id", "val", "org") ON "scoped" TO "someone""#.to_owned())
+    );
 }

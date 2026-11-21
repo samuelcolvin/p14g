@@ -8,7 +8,7 @@ use crate::{
     check,
     dialect::Dialect,
     error::{Error, Result},
-    functions, lower,
+    filter, functions, lower,
     map::{self, Mapper},
 };
 
@@ -252,15 +252,15 @@ impl Default for Limits {
 ///
 /// Reads include every mention of a column, wherever it appears: a column used in a `WHERE` or
 /// `ORDER BY`, or in the `WHERE` of an `UPDATE`, has been read just as much as one in the select list.
-#[derive(Debug, Clone)]
-pub struct Select {
+pub struct Select<C = ()> {
     table: String,
     columns: Option<Vec<String>>,
     operators: Option<Vec<Op>>,
     only: bool,
+    filter: Option<Box<FilterFn<C>>>,
 }
 
-impl Select {
+impl<C> Select<C> {
     /// `table` is `name` or `schema.name`, spelled exactly as Postgres stores it.
     pub fn table(table: impl Into<String>) -> Self {
         Self {
@@ -268,6 +268,7 @@ impl Select {
             columns: None,
             operators: None,
             only: false,
+            filter: None,
         }
     }
 
@@ -298,7 +299,97 @@ impl Select {
         self.only = only;
         self
     }
+
+    /// A condition every row read through this rule has to meet, computed from the context passed to
+    /// `rewrite`.
+    ///
+    /// The table is replaced in the statement by a subquery with the condition as its `WHERE`, so it holds
+    /// through joins and subqueries. The condition is p14g's to write: it may use columns and functions
+    /// the rule does not otherwise allow.
+    ///
+    /// Postgres may evaluate the statement's own conditions on a row before this one, so an error such as
+    /// a division by zero can reveal something about rows the filter excludes. Row-level security or a
+    /// `security_barrier` view does not have that gap.
+    #[must_use]
+    pub fn filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C) -> Filter + Send + Sync + 'static,
+    {
+        self.filter = Some(Box::new(move |ctx| Ok(filter(ctx))));
+        self
+    }
+
+    /// Like [`Select::filter`] for a callback that can fail.
+    #[must_use]
+    pub fn try_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C) -> Result<Filter> + Send + Sync + 'static,
+    {
+        self.filter = Some(Box::new(filter));
+        self
+    }
 }
+
+/// A condition for a rule's `filter`: an SQL expression and the values for its `:name` placeholders.
+///
+/// The expression is parsed by p14g, never pasted into the output, and each value is written as an
+/// escaped literal (or a parameter, with [`Literals::Params`]). A list is allowed where the placeholder is
+/// the only item of an `IN (...)`. Subqueries are not allowed.
+///
+/// ```
+/// use p14g::Filter;
+///
+/// let filter = Filter::new("org = :org and status in (:statuses)")
+///     .bind("org", 42)
+///     .bind("statuses", vec!["open", "held"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Filter {
+    pub(crate) sql: String,
+    pub(crate) values: Vec<(String, FilterValue)>,
+}
+
+impl Filter {
+    pub fn new(sql: impl Into<String>) -> Self {
+        Self {
+            sql: sql.into(),
+            values: Vec::new(),
+        }
+    }
+
+    /// Give the value for `:name`. Names are letters, digits and underscores, and match exactly.
+    #[must_use]
+    pub fn bind(mut self, name: impl Into<String>, value: impl Into<FilterValue>) -> Self {
+        self.values.push((name.into(), value.into()));
+        self
+    }
+}
+
+/// A value bound to a placeholder of a [`Filter`]: one value, or a list for `IN (:name)`.
+#[derive(Debug, Clone)]
+pub enum FilterValue {
+    One(Expr),
+    Many(Vec<Expr>),
+}
+
+impl<T: Into<Expr>> From<Vec<T>> for FilterValue {
+    fn from(values: Vec<T>) -> Self {
+        Self::Many(values.into_iter().map(Into::into).collect())
+    }
+}
+
+macro_rules! filter_value_from {
+    ($($t:ty),*) => {$(
+        impl From<$t> for FilterValue {
+            fn from(value: $t) -> Self {
+                Self::One(value.into())
+            }
+        }
+    )*};
+}
+filter_value_from!(Expr, Literal, bool, i32, i64, u64, f64, &str, String);
+
+pub(crate) type FilterFn<C> = dyn Fn(&C) -> Result<Filter> + Send + Sync;
 
 /// Columns a rule sets on every inserted row.
 type ExtraFn<C> = dyn Fn(&C) -> Result<Vec<(String, Expr)>> + Send + Sync;
@@ -355,21 +446,22 @@ impl<C> Insert<C> {
 }
 
 /// Allows `UPDATE table SET column = ...`.
-#[derive(Debug, Clone)]
-pub struct Update {
+pub struct Update<C = ()> {
     table: String,
     columns: Option<Vec<String>>,
     allow_unfiltered: bool,
     only: bool,
+    filter: Option<Box<FilterFn<C>>>,
 }
 
-impl Update {
+impl<C> Update<C> {
     pub fn table(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
             columns: None,
             allow_unfiltered: false,
             only: false,
+            filter: None,
         }
     }
 
@@ -395,22 +487,45 @@ impl Update {
         self.only = only;
         self
     }
+
+    /// A condition every row this rule lets a statement update has to meet, computed from the context passed
+    /// to `rewrite`. It is added to the statement's `WHERE` with `AND`. A statement that sets a column the
+    /// condition uses is rejected, so a row cannot be moved out of it. See [`Select::filter`].
+    #[must_use]
+    pub fn filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C) -> Filter + Send + Sync + 'static,
+    {
+        self.filter = Some(Box::new(move |ctx| Ok(filter(ctx))));
+        self
+    }
+
+    /// Like `filter` for a callback that can fail.
+    #[must_use]
+    pub fn try_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C) -> Result<Filter> + Send + Sync + 'static,
+    {
+        self.filter = Some(Box::new(filter));
+        self
+    }
 }
 
 /// Allows `DELETE FROM table`.
-#[derive(Debug, Clone)]
-pub struct Delete {
+pub struct Delete<C = ()> {
     table: String,
     allow_unfiltered: bool,
     only: bool,
+    filter: Option<Box<FilterFn<C>>>,
 }
 
-impl Delete {
+impl<C> Delete<C> {
     pub fn table(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
             allow_unfiltered: false,
             only: false,
+            filter: None,
         }
     }
 
@@ -425,6 +540,27 @@ impl Delete {
     #[must_use]
     pub fn only(mut self, only: bool) -> Self {
         self.only = only;
+        self
+    }
+
+    /// A condition every row this rule lets a statement delete has to meet, computed from the context passed
+    /// to `rewrite`. It is added to the statement's `WHERE` with `AND`. See [`Select::filter`].
+    #[must_use]
+    pub fn filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C) -> Filter + Send + Sync + 'static,
+    {
+        self.filter = Some(Box::new(move |ctx| Ok(filter(ctx))));
+        self
+    }
+
+    /// Like `filter` for a callback that can fail.
+    #[must_use]
+    pub fn try_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C) -> Result<Filter> + Send + Sync + 'static,
+    {
+        self.filter = Some(Box::new(filter));
         self
     }
 }
@@ -477,9 +613,10 @@ fn parse_columns(columns: Option<Vec<String>>, table: &str) -> Result<Option<Vec
     Ok(Some(out))
 }
 
-pub(crate) struct SelectRule {
+pub(crate) struct SelectRule<C> {
     pub columns: Option<Vec<Ident>>,
     pub operators: OpSet,
+    pub filter: Option<Box<FilterFn<C>>>,
 }
 
 pub(crate) struct InsertRule<C> {
@@ -487,21 +624,23 @@ pub(crate) struct InsertRule<C> {
     pub extra: Option<Box<ExtraFn<C>>>,
 }
 
-pub(crate) struct UpdateRule {
+pub(crate) struct UpdateRule<C> {
     pub columns: Option<Vec<Ident>>,
     pub allow_unfiltered: bool,
+    pub filter: Option<Box<FilterFn<C>>>,
 }
 
-pub(crate) struct DeleteRule {
+pub(crate) struct DeleteRule<C> {
     pub allow_unfiltered: bool,
+    pub filter: Option<Box<FilterFn<C>>>,
 }
 
 /// Builds a [`Policy`]. Nothing is validated until [`PolicyBuilder::build`].
 pub struct PolicyBuilder<C = ()> {
-    selects: Vec<Select>,
+    selects: Vec<Select<C>>,
     inserts: Vec<Insert<C>>,
-    updates: Vec<Update>,
-    deletes: Vec<Delete>,
+    updates: Vec<Update<C>>,
+    deletes: Vec<Delete<C>>,
     functions: Vec<String>,
     deny_functions: Vec<String>,
     default_functions: bool,
@@ -547,7 +686,7 @@ impl<C> Default for PolicyBuilder<C> {
 
 impl<C> PolicyBuilder<C> {
     #[must_use]
-    pub fn select(mut self, rule: Select) -> Self {
+    pub fn select(mut self, rule: Select<C>) -> Self {
         self.selects.push(rule);
         self
     }
@@ -559,13 +698,13 @@ impl<C> PolicyBuilder<C> {
     }
 
     #[must_use]
-    pub fn update(mut self, rule: Update) -> Self {
+    pub fn update(mut self, rule: Update<C>) -> Self {
         self.updates.push(rule);
         self
     }
 
     #[must_use]
-    pub fn delete(mut self, rule: Delete) -> Self {
+    pub fn delete(mut self, rule: Delete<C>) -> Self {
         self.deletes.push(rule);
         self
     }
@@ -748,7 +887,7 @@ impl<C> PolicyBuilder<C> {
             _ => Ok(()),
         };
 
-        let mut selects: BTreeMap<TableKey, Vec<SelectRule>> = BTreeMap::new();
+        let mut selects: BTreeMap<TableKey, Vec<SelectRule<C>>> = BTreeMap::new();
         for rule in self.selects {
             let key = table_key(&rule.table)?;
             agree(&key, &rule.table, rule.only)?;
@@ -756,7 +895,11 @@ impl<C> PolicyBuilder<C> {
             let operators = rule
                 .operators
                 .map_or(default_operators, |ops| ops.into_iter().collect());
-            selects.entry(key).or_default().push(SelectRule { columns, operators });
+            selects.entry(key).or_default().push(SelectRule {
+                columns,
+                operators,
+                filter: rule.filter,
+            });
         }
         let mut inserts: BTreeMap<TableKey, Vec<InsertRule<C>>> = BTreeMap::new();
         for rule in self.inserts {
@@ -767,7 +910,7 @@ impl<C> PolicyBuilder<C> {
                 extra: rule.extra,
             });
         }
-        let mut updates: BTreeMap<TableKey, Vec<UpdateRule>> = BTreeMap::new();
+        let mut updates: BTreeMap<TableKey, Vec<UpdateRule<C>>> = BTreeMap::new();
         for rule in self.updates {
             let key = table_key(&rule.table)?;
             agree(&key, &rule.table, rule.only)?;
@@ -775,17 +918,27 @@ impl<C> PolicyBuilder<C> {
             updates.entry(key).or_default().push(UpdateRule {
                 columns,
                 allow_unfiltered: rule.allow_unfiltered,
+                filter: rule.filter,
             });
         }
-        let mut deletes: BTreeMap<TableKey, DeleteRule> = BTreeMap::new();
+        let mut deletes: BTreeMap<TableKey, DeleteRule<C>> = BTreeMap::new();
         for rule in self.deletes {
             let key = table_key(&rule.table)?;
             agree(&key, &rule.table, rule.only)?;
-            // two delete rules for one table can only differ in `allow_unfiltered`: either one allowing it is enough
-            let entry = deletes.entry(key).or_insert(DeleteRule {
-                allow_unfiltered: false,
-            });
-            entry.allow_unfiltered |= rule.allow_unfiltered;
+            // a delete rule has nothing for a statement to fit or not, so there is nothing to choose between
+            let previous = deletes.insert(
+                key,
+                DeleteRule {
+                    allow_unfiltered: rule.allow_unfiltered,
+                    filter: rule.filter,
+                },
+            );
+            if previous.is_some() {
+                return Err(Error::config(format!(
+                    "there is more than one delete rule for table {:?}",
+                    rule.table
+                )));
+            }
         }
 
         let mut allowed: BTreeSet<String> = BTreeSet::new();
@@ -880,10 +1033,10 @@ pub struct SafeSql {
 pub struct Policy<C = ()> {
     /// Tables that are always written `ONLY table`.
     pub(crate) only: BTreeSet<TableKey>,
-    pub(crate) selects: BTreeMap<TableKey, Vec<SelectRule>>,
+    pub(crate) selects: BTreeMap<TableKey, Vec<SelectRule<C>>>,
     pub(crate) inserts: BTreeMap<TableKey, Vec<InsertRule<C>>>,
-    pub(crate) updates: BTreeMap<TableKey, Vec<UpdateRule>>,
-    pub(crate) deletes: BTreeMap<TableKey, DeleteRule>,
+    pub(crate) updates: BTreeMap<TableKey, Vec<UpdateRule<C>>>,
+    pub(crate) deletes: BTreeMap<TableKey, DeleteRule<C>>,
     pub(crate) functions: BTreeSet<String>,
     pub(crate) default_operators: OpSet,
     pub(crate) star: Star,
@@ -891,7 +1044,7 @@ pub struct Policy<C = ()> {
     quote_identifiers: QuoteIdentifiers,
     layout: Layout,
     qualify_builtins: bool,
-    limits: Limits,
+    pub(crate) limits: Limits,
     max_rows: Option<u64>,
     /// The schema unqualified table names are given before they are looked up and written.
     pub(crate) default_schema: Option<Ident>,
@@ -909,14 +1062,15 @@ impl<C> Policy<C> {
     /// The `GRANT` statements that give `role` the table access this policy allows.
     ///
     /// Run them once as the owner of the tables, for the role that will run p14g's output, so that the
-    /// database enforces the same rules. `context` is passed to [`Insert::extra`] callbacks to learn which
-    /// columns they set.
+    /// database enforces the same rules. `context` is passed to [`Insert::extra`] and `filter` callbacks to
+    /// learn which columns they use.
     ///
     /// Grants cannot say everything a policy does, so they allow somewhat more:
     ///
     /// * several rules for one table are alternatives in the policy, here their columns are combined;
     /// * functions, operators and cast types are not restricted;
-    /// * `only` has no equivalent, a grant on a parent table always covers its children's rows.
+    /// * `only` has no equivalent, a grant on a parent table always covers its children's rows;
+    /// * a `filter` has no equivalent either: the grants let the role read and write every row.
     ///
     /// Not included: `USAGE` on sequences that inserted rows take defaults from, and anything for tables
     /// that a mapper renames statements to.
@@ -950,10 +1104,21 @@ impl<C> Policy<C> {
             None => quote(&key.name),
         };
 
+        // a filter reads the columns it names, which takes the SELECT privilege on them whatever the statement
+        let filter_columns = |key: &TableKey, filter: Option<&FilterFn<C>>| -> Result<Vec<Ident>> {
+            let Some(filter) = filter else {
+                return Ok(Vec::new());
+            };
+            let bound = filter::bind(&filter(context)?, &key.name, &key.name, &self.limits)?;
+            Ok(bound.columns.into_iter().collect())
+        };
+
         let mut tables: BTreeMap<&TableKey, [Columns; 3]> = BTreeMap::new();
         for (key, rules) in &self.selects {
             for rule in rules {
-                tables.entry(key).or_default()[0].add(rule.columns.as_deref());
+                let columns = &mut tables.entry(key).or_default()[0];
+                columns.add(rule.columns.as_deref());
+                columns.add(Some(&filter_columns(key, rule.filter.as_deref())?));
             }
         }
         for (key, rules) in &self.inserts {
@@ -972,11 +1137,14 @@ impl<C> Policy<C> {
         }
         for (key, rules) in &self.updates {
             for rule in rules {
-                tables.entry(key).or_default()[2].add(rule.columns.as_deref());
+                let [select, _, update] = tables.entry(key).or_default();
+                update.add(rule.columns.as_deref());
+                select.add(Some(&filter_columns(key, rule.filter.as_deref())?));
             }
         }
-        for key in self.deletes.keys() {
-            tables.entry(key).or_default();
+        for (key, rule) in &self.deletes {
+            let [select, ..] = tables.entry(key).or_default();
+            select.add(Some(&filter_columns(key, rule.filter.as_deref())?));
         }
 
         let mut statements = Vec::new();

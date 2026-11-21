@@ -5,15 +5,20 @@
 //! one table instance here and written fully qualified, so if Postgres would have resolved a name
 //! differently the query fails in the database instead of reading something that was not checked.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    iter,
+};
 
 use crate::{
     ast::{
         BinaryOperator, Column, Delete, Expr, Function, FunctionArgs, Ident, Insert, KeyExpr, LikeKind, Literal,
-        OrderBy, Query, Select, SelectItem, SetExpr, Statement, Table, TableFactor, UnaryOperator, Update,
+        OrderBy, Query, Select, SelectItem, SetExpr, Statement, Table, TableFactor, TableWithJoins, UnaryOperator,
+        Update,
     },
     error::{Error, Result},
-    policy::{Op, OpSet, Policy, SelectRule, Star, TableKey, function_lookup_key},
+    filter,
+    policy::{FilterFn, Op, OpSet, Policy, SelectRule, Star, TableKey, function_lookup_key},
 };
 
 /// Check `statement` against `policy`, rewriting it in place: columns are qualified, `*` is expanded and
@@ -21,6 +26,7 @@ use crate::{
 pub(crate) fn check<C>(policy: &Policy<C>, statement: &mut Statement, context: &C) -> Result<Vec<String>> {
     let mut checker = Checker {
         policy,
+        context,
         instances: Vec::new(),
         scopes: Vec::new(),
         ctes: Vec::new(),
@@ -63,22 +69,22 @@ pub(crate) fn apply_max_rows(statement: &mut Statement, max_rows: u64) -> Result
 type Refs = BTreeSet<usize>;
 
 /// One table, view, subquery or CTE in a `FROM` clause, or the target of a write.
-struct Instance<'p> {
+struct Instance<'p, C> {
     /// The name its columns are qualified with.
     alias: Ident,
-    kind: InstanceKind<'p>,
+    kind: InstanceKind<'p, C>,
     used_columns: BTreeSet<Ident>,
     used_operators: OpSet,
     /// The rule chosen for a base table once its scope is complete.
-    rule: Option<&'p SelectRule>,
+    rule: Option<&'p SelectRule<C>>,
 }
 
-enum InstanceKind<'p> {
+enum InstanceKind<'p, C> {
     Base {
         name: String,
         /// The select rules for the table. Empty for the target of a write that has no select rule, which
         /// can then be written to but not read from.
-        rules: &'p [SelectRule],
+        rules: &'p [SelectRule<C>],
     },
     Derived {
         columns: Vec<Ident>,
@@ -87,7 +93,7 @@ enum InstanceKind<'p> {
     },
 }
 
-impl Instance<'_> {
+impl<C> Instance<'_, C> {
     /// Whether the instance is known to have this column.
     fn lists(&self, column: &Ident) -> bool {
         match &self.kind {
@@ -129,7 +135,8 @@ impl Outputs {
 
 struct Checker<'p, C> {
     policy: &'p Policy<C>,
-    instances: Vec<Instance<'p>>,
+    instances: Vec<Instance<'p, C>>,
+    context: &'p C,
     scopes: Vec<Scope>,
     /// CTEs in scope, innermost `WITH` last.
     ctes: Vec<BTreeMap<Ident, (Vec<Ident>, bool)>>,
@@ -319,7 +326,95 @@ impl<'p, C> Checker<'p, C> {
                 KeyExpr::Position(_) | KeyExpr::Output(_) => {}
             }
         }
-        self.close_scope(projection)
+        let outputs = self.close_scope(projection)?;
+        self.filter_tables(from)?;
+        Ok(outputs)
+    }
+
+    /// Put each table whose rule has a filter behind a subquery that applies it.
+    ///
+    /// `FROM orders AS o` becomes `FROM (SELECT ... FROM orders WHERE <filter>) AS o`. A condition added to
+    /// the statement's own `WHERE` would be wrong for the nullable side of an outer join; this form means
+    /// the same wherever the table is. Postgres flattens it, so it costs nothing at run time.
+    fn filter_tables(&mut self, from: &mut [TableWithJoins]) -> Result<()> {
+        let instances = self.scopes.last().expect("select pushed a scope").instances.clone();
+        // instances were added in this order: each FROM item, then the tables it joins
+        let factors = from.iter_mut().flat_map(|table| {
+            iter::once(&mut table.relation).chain(table.joins.iter_mut().map(|join| &mut join.relation))
+        });
+        for (index, factor) in instances.into_iter().zip(factors) {
+            let Some(rule) = self.instances[index].rule else {
+                continue;
+            };
+            let (Some(filter), TableFactor::Table(table)) = (&rule.filter, &*factor) else {
+                continue;
+            };
+            let filter = filter(self.context)?;
+            // inside the subquery the table has no alias, its columns go by its own name
+            let bound = filter::bind(&filter, &table.name, &table.name, &self.policy.limits)?;
+            // name the columns when the rule does: `*` would need the privilege to read all of them
+            let projection = match &rule.columns {
+                Some(columns) => columns
+                    .iter()
+                    .map(|name| SelectItem::Expr {
+                        expr: Expr::Column(Column {
+                            table: Some(table.name.clone()),
+                            name: name.clone(),
+                        }),
+                        alias: None,
+                    })
+                    .collect(),
+                None => vec![SelectItem::Wildcard],
+            };
+            let alias = table.reference_name().clone();
+            let inner = Table {
+                alias: None,
+                ..table.clone()
+            };
+            *factor = TableFactor::Derived {
+                subquery: Box::new(Query {
+                    with: Vec::new(),
+                    body: SetExpr::Select(Box::new(Select {
+                        distinct: false,
+                        projection,
+                        from: vec![TableWithJoins {
+                            relation: TableFactor::Table(inner),
+                            joins: Vec::new(),
+                        }],
+                        selection: Some(bound.expr),
+                        group_by: Vec::new(),
+                        having: None,
+                    })),
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                }),
+                alias,
+            };
+        }
+        Ok(())
+    }
+
+    /// The filters that apply to the target of an `UPDATE` or `DELETE`: the write rule's, and the one of
+    /// the select rule its `WHERE` and `RETURNING` were read under. They go into the statement's `WHERE`,
+    /// which for a single table means the same as the subquery form and is the only form a write allows.
+    fn write_filters(
+        &self,
+        table: &Table,
+        index: usize,
+        write_filter: Option<&'p FilterFn<C>>,
+    ) -> Result<Vec<filter::Bound>> {
+        let read_filter = self.instances[index].rule.and_then(|rule| rule.filter.as_deref());
+        let mut bound: Vec<filter::Bound> = Vec::new();
+        for filter in [write_filter, read_filter].into_iter().flatten() {
+            let filter = filter(self.context)?;
+            let filter = filter::bind(&filter, &table.name, table.reference_name(), &self.policy.limits)?;
+            // the two rules usually give the same condition, which need not be written twice
+            if !bound.iter().any(|other| other.expr == filter.expr) {
+                bound.push(filter);
+            }
+        }
+        Ok(bound)
     }
 
     /// `GROUP BY name` prefers an input column, and falls back to an output alias. p14g cannot always
@@ -388,7 +483,7 @@ impl<'p, C> Checker<'p, C> {
             // a write-only target: any read of it was already refused
             return Ok(());
         }
-        let columns_fit = |rule: &SelectRule| {
+        let columns_fit = |rule: &SelectRule<C>| {
             rule.columns
                 .as_ref()
                 .is_none_or(|columns| instance.used_columns.iter().all(|c| columns.contains(c)))
@@ -506,7 +601,7 @@ impl<'p, C> Checker<'p, C> {
         }
     }
 
-    fn add_instance(&mut self, alias: Ident, kind: InstanceKind<'p>) -> Result<usize> {
+    fn add_instance(&mut self, alias: Ident, kind: InstanceKind<'p, C>) -> Result<usize> {
         let scope = self.scopes.last().expect("a scope is open");
         if scope.instances.iter().any(|&i| self.instances[i].alias == alias) {
             return Err(Error::denied(format!(
@@ -994,13 +1089,16 @@ impl<'p, C> Checker<'p, C> {
                 disallowed(&columns, rules.iter().map(|r| r.columns.as_deref()))
             )));
         }
-        if selection.is_none() && !rules.iter().any(|rule| fits(&rule.columns) && rule.allow_unfiltered) {
-            return Err(Error::denied(format!(
-                "UPDATE of table {name:?} without a WHERE clause is not allowed"
-            )));
-        }
+        let rule = rules
+            .iter()
+            .find(|rule| fits(&rule.columns) && (selection.is_some() || rule.allow_unfiltered))
+            .ok_or_else(|| {
+                Error::denied(format!(
+                    "UPDATE of table {name:?} without a WHERE clause is not allowed"
+                ))
+            })?;
 
-        self.write_scope(table, true)?;
+        let index = self.write_scope(table, true)?;
         let mut refs = Refs::new();
         let result = (|| {
             for assignment in assignments.iter_mut() {
@@ -1012,12 +1110,28 @@ impl<'p, C> Checker<'p, C> {
             Ok(())
         })();
         match result {
-            Ok(()) => self.close_write_scope(returning),
+            Ok(()) => self.close_write_scope(returning)?,
             Err(e) => {
                 self.scopes.pop();
-                Err(e)
+                return Err(e);
             }
         }
+
+        let filters = self.write_filters(table, index, rule.filter.as_deref())?;
+        // a row that could be given a new value for a column the filter reads could be moved out of it
+        if let Some(column) = columns
+            .iter()
+            .find(|column| filters.iter().any(|filter| filter.columns.contains(column)))
+        {
+            return Err(Error::denied(format!(
+                "column {column:?} of table {name:?} is used by the policy's filter and cannot be set"
+            )));
+        }
+        *selection = filter::and(
+            filters.into_iter().map(|filter| filter.expr).collect(),
+            selection.take(),
+        );
+        Ok(())
     }
 
     fn delete(&mut self, delete: &mut Delete) -> Result<()> {
@@ -1038,7 +1152,7 @@ impl<'p, C> Checker<'p, C> {
                 "DELETE from table {name:?} without a WHERE clause is not allowed"
             )));
         }
-        self.write_scope(table, true)?;
+        let index = self.write_scope(table, true)?;
         let mut refs = Refs::new();
         if let Some(selection) = selection
             && let Err(e) = self.expr(selection, &mut refs)
@@ -1046,11 +1160,18 @@ impl<'p, C> Checker<'p, C> {
             self.scopes.pop();
             return Err(e);
         }
-        self.close_write_scope(returning)
+        self.close_write_scope(returning)?;
+
+        let filters = self.write_filters(table, index, rule.filter.as_deref())?;
+        *selection = filter::and(
+            filters.into_iter().map(|filter| filter.expr).collect(),
+            selection.take(),
+        );
+        Ok(())
     }
 }
 
-impl Instance<'_> {
+impl<C> Instance<'_, C> {
     /// A base table every one of whose rules allows all columns.
     fn open_base_only(&self) -> bool {
         match &self.kind {

@@ -1,6 +1,8 @@
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal as _Literal, TypeAlias, final, overload
 
+from typing_extensions import LiteralString
+
 __all__ = [
     'DEFAULT_FUNCTIONS',
     'ERROR_KINDS',
@@ -33,6 +35,9 @@ ERROR_KINDS: tuple[str, ...]
 
 _Scalar: TypeAlias = None | bool | int | float | str
 ExprLike: TypeAlias = Column | Function | Literal | Expr | None | bool | int | float | str
+
+_FilterValue: TypeAlias = ExprLike | list[ExprLike] | tuple[ExprLike, ...]
+_Filter: TypeAlias = Callable[[Any], tuple[LiteralString, Mapping[str, _FilterValue]] | LiteralString] | LiteralString
 """What a mapper or an `extra` may give as a value."""
 
 _Operator: TypeAlias = _Literal[
@@ -59,6 +64,21 @@ class Select:
 
     Without `columns`, every column is allowed. Without `operators`, the policy's default operators apply.
 
+    `filter` is a condition every row read through this rule has to meet. It is a function of the context passed
+    to `rewrite()` that returns an SQL expression and the values for its `:name` placeholders:
+
+        def org(context):
+            return 'org = :org_id and status in (:statuses)', {'org_id': context.org_id, 'statuses': ['a', 'b']}
+
+    p14g parses the expression and writes each value as an escaped literal; nothing is pasted into the output.
+    A list or tuple is allowed where the placeholder is the only item of an `IN (...)`. The expression may use
+    columns and functions the rule does not otherwise allow, but not a subquery. A filter with no values can be
+    returned, or given, as a plain string.
+
+    In a `SELECT` the table is replaced by a subquery with the filter as its `WHERE`. Postgres may evaluate the
+    statement's own conditions on a row before the filter's, so an error such as a division by zero can reveal
+    something about rows the filter excludes; row-level security does not have that gap.
+
     Set `only` when the table has inheritance children the policy should not reach: Postgres includes their rows
     in a query on the parent, and checks privileges on the parent alone. With `only`, p14g writes the table as
     `ONLY table`. Do not set it for a partitioned table, whose parent holds no rows. Every `Select`, `Update`
@@ -72,6 +92,7 @@ class Select:
         columns: Sequence[str] | None = None,
         operators: Sequence[_Operator] | None = None,
         only: bool = False,
+        filter: _Filter | None = None,
     ) -> Select: ...
     @property
     def table(self) -> str: ...
@@ -110,10 +131,20 @@ class Update:
     not a security control: `WHERE true` passes.
 
     `only` writes the table as `ONLY table`, see `Select`.
+
+    `filter` is a condition every row the statement updates has to meet, written like the `filter` of `Select`.
+    It is added to the statement's `WHERE` with `AND`. A statement that sets a column the filter uses is rejected,
+    so a row cannot be moved out of it.
     """
 
     def __new__(
-        cls, table: str, *, columns: Sequence[str] | None = None, allow_unfiltered: bool = False, only: bool = False
+        cls,
+        table: str,
+        *,
+        columns: Sequence[str] | None = None,
+        allow_unfiltered: bool = False,
+        only: bool = False,
+        filter: _Filter | None = None,
     ) -> Update: ...
     @property
     def table(self) -> str: ...
@@ -129,9 +160,14 @@ class Delete:
     """Allows `DELETE FROM table`. A `DELETE` with no `WHERE` is rejected unless `allow_unfiltered` is set.
 
     `only` writes the table as `ONLY table`, see `Select`.
+
+    `filter` is a condition every row the statement deletes has to meet, written like the `filter` of `Select`.
+    It is added to the statement's `WHERE` with `AND`. There can be one `Delete` rule for a table.
     """
 
-    def __new__(cls, table: str, *, allow_unfiltered: bool = False, only: bool = False) -> Delete: ...
+    def __new__(
+        cls, table: str, *, allow_unfiltered: bool = False, only: bool = False, filter: _Filter | None = None
+    ) -> Delete: ...
     @property
     def table(self) -> str: ...
     @property

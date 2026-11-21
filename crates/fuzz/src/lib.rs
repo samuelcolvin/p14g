@@ -18,7 +18,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use p14g::{Delete, ErrorKind, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update, functions};
+use p14g::{Delete, ErrorKind, Filter, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update, functions};
 use postgres::{Client, Config, NoTls, error::SqlState};
 
 /// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
@@ -38,9 +38,23 @@ fn builder() -> PolicyBuilder {
         .insert(Insert::table("audit").columns(["message"]))
         .update(Update::table("orders").columns(["qty"]))
         .delete(Delete::table("orders"))
+        // a table whose rules have a filter, reading a column the statement may not
+        .select(
+            Select::table("scoped")
+                .columns(["id", "val"])
+                .filter(|()| scoped_filter()),
+        )
+        .update(Update::table("scoped").columns(["val"]).filter(|()| scoped_filter()))
+        .delete(Delete::table("scoped").filter(|()| scoped_filter()))
 }
 
-const TABLES: &[&str] = &["orders", "customers", "v", "app.events", "limited", "audit"];
+fn scoped_filter() -> Filter {
+    Filter::new("org = :org and kind in (:kinds)")
+        .bind("org", 7)
+        .bind("kinds", vec!["a", "b'c"])
+}
+
+const TABLES: &[&str] = &["orders", "customers", "v", "app.events", "limited", "audit", "scoped"];
 
 static INLINE: LazyLock<Policy> = LazyLock::new(|| builder().build().unwrap());
 static PARAMS: LazyLock<Policy> = LazyLock::new(|| builder().literals(Literals::Params).build().unwrap());
@@ -60,6 +74,7 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS limited (a int, b int, c int);
     CREATE TABLE IF NOT EXISTS audit (id int, message text, tenant_id int);
     CREATE TABLE IF NOT EXISTS secrets (id int, password text);
+    CREATE TABLE IF NOT EXISTS scoped (id int, val text, org int, kind text, hidden text);
     DO $$ BEGIN CREATE ROLE p14g_fuzz_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ";
 
@@ -69,9 +84,7 @@ static DATABASE: LazyLock<Option<Mutex<Client>>> = LazyLock::new(|| {
     let mut config: Config = url
         .parse()
         .expect("P14G_TEST_DATABASE_URL is not a valid connection string");
-    let mut admin = config
-        .connect(NoTls)
-        .expect("cannot connect to P14G_TEST_DATABASE_URL");
+    let mut admin = config.connect(NoTls).expect("cannot connect to P14G_TEST_DATABASE_URL");
     if let Err(e) = admin.batch_execute("CREATE DATABASE p14g_fuzz") {
         assert_eq!(e.code(), Some(&SqlState::DUPLICATE_DATABASE), "{e}");
     }
@@ -163,6 +176,17 @@ pub fn check(sql: &str) {
             explain(sql, &safe.sql);
         }
 
+        // the output of a statement on a filtered table has the filter in it, and reading it back would
+        // apply the filter a second time
+        if safe.tables.iter().any(|table| table == "scoped") {
+            assert!(
+                safe.sql.contains(".org = 7 AND "),
+                "the filter is missing\n input: {sql}\noutput: {}",
+                safe.sql
+            );
+            continue;
+        }
+
         match policy.rewrite(&safe.sql, &()) {
             Ok(again) => {
                 // in params mode the literals are already placeholders, so there is nothing new to bind
@@ -198,11 +222,18 @@ pub const SEEDS: &[&str] = &[
     "insert into audit (message) values ('x')",
     "update orders as o set qty = o.qty + 1 where o.id = 1 returning *",
     "delete from orders where id in (select id from customers) returning id, product",
+    "select s.id, o.id from scoped s left join orders o on o.id = s.id where s.val like 'a%' or true",
+    "select id from orders where id in (select id from scoped) union select id from scoped",
+    "update scoped set val = 'x' where id = 1 or true returning *",
+    "delete from scoped as s where s.id > 0 returning s.val",
 ];
 
 /// Fragments to splice into the seeds: things the policy forbids, and syntax that might confuse a parser.
 pub const FRAGMENTS: &[&str] = &[
     " secrets ",
+    " scoped ",
+    " org ",
+    " kind ",
     " secret ",
     " email ",
     " hidden ",

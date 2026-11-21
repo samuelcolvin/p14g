@@ -9,6 +9,8 @@ dev = [
     "pytest",
     "pytest-pretty",
     "dirty-equals",
+    # for `LiteralString` in the tests, on Python 3.10
+    "typing-extensions",
 ]
 linting = [
     "ruff",

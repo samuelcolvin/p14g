@@ -90,6 +90,11 @@ Ask what the SQL author can now read, write or call that no rule names:
     Insert columns, `SET` targets, `extra` collisions, the unfiltered guard, and that anything a write reads needs a
     `Select` rule. `only` and `default_schema` must be applied to every reference to the table, including write
     targets.
+- **Filters?**
+    A rule's `filter` must reach every use of its table: each `FROM` item in every scope, the target of an `UPDATE`
+    or `DELETE`, and the read side of a write. A new place a table can appear needs it too. A filter value must stay a
+    node (`lower::parse_filter`), never text, and a filter that fails must reject the statement, not be left out. An
+    `UPDATE` must not be able to set a column a filter reads.
 - **Functions, operators and cast types?**
     Each addition to `functions.rs` defaults, the `Op`/`BinaryOperator` sets or `DataType` is a grant to every policy.
     A default function must have no side effects, read only its arguments, and not turn a small input into a large

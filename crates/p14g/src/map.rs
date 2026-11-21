@@ -80,11 +80,24 @@ impl<C, F: Fn(Literal, &C) -> Result<Expr> + Send + Sync> Mapper<C> for LiteralM
     }
 }
 
+/// Run one mapper over a single expression, for the rewriting p14g does itself.
+pub(crate) fn apply_to_expr(mapper: &dyn Mapper<()>, expr: &mut Expr) -> Result<()> {
+    Walker {
+        mappers: &[mapper],
+        context: &(),
+    }
+    .expr(expr)
+}
+
 pub(crate) fn apply<C>(mappers: &[Box<dyn Mapper<C>>], statement: &mut Statement, context: &C) -> Result<()> {
     if mappers.is_empty() {
         return Ok(());
     }
-    let walker = Walker { mappers, context };
+    let mappers: Vec<&dyn Mapper<C>> = mappers.iter().map(AsRef::as_ref).collect();
+    let walker = Walker {
+        mappers: &mappers,
+        context,
+    };
     match statement {
         Statement::Query(query) => walker.query(query),
         Statement::Insert(Insert {
@@ -125,7 +138,7 @@ pub(crate) fn apply<C>(mappers: &[Box<dyn Mapper<C>>], statement: &mut Statement
 }
 
 struct Walker<'a, C> {
-    mappers: &'a [Box<dyn Mapper<C>>],
+    mappers: &'a [&'a dyn Mapper<C>],
     context: &'a C,
 }
 

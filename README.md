@@ -82,7 +82,8 @@ It does not replace database privileges, and it cannot limit how much work a per
   Built-in functions are then written `pg_catalog.lower(...)`.
   Postgres looks in `pg_catalog` first, but between functions with different argument types it picks the closest
   match wherever it is in the path, so a `public.lower(varchar)` would be called for a `varchar` argument.
-- Restrict rows with views, not with p14g (see below).
+- For rows that must not leak even through error messages or timing, use row-level security or a `security_barrier`
+  view as well as, or in place of, a rule's `filter` (see [Rows](#rows)).
 - Do not show database error messages to the author of the SQL unless you are content for them to see them.
   A unique-violation error says that a value exists.
 
@@ -120,10 +121,10 @@ A statement is rejected unless a rule allows it.
 
 | Rule | Allows |
 | --- | --- |
-| `Select(table, columns=None, operators=None, only=False)` | Reading the listed columns, or any column without `columns`. |
+| `Select(table, columns=None, operators=None, only=False, filter=None)` | Reading the listed columns, or any column without `columns`. |
 | `Insert(table, columns=None, extra=None)` | `INSERT ... VALUES` setting the listed columns. |
-| `Update(table, columns=None, allow_unfiltered=False, only=False)` | `UPDATE ... SET` on the listed columns. |
-| `Delete(table, allow_unfiltered=False, only=False)` | `DELETE FROM`. |
+| `Update(table, columns=None, allow_unfiltered=False, only=False, filter=None)` | `UPDATE ... SET` on the listed columns. |
+| `Delete(table, allow_unfiltered=False, only=False, filter=None)` | `DELETE FROM`. |
 
 - `table` is `name` or `schema.name`, spelled as Postgres stores it.
   An unquoted name in the SQL is folded to lower case before it is compared, as Postgres does.
@@ -140,6 +141,7 @@ A statement is rejected unless a rule allows it.
   `SIMILAR TO`).
 - `allow_unfiltered` permits an `UPDATE` or `DELETE` with no `WHERE`.
   Rejecting those catches mistakes. It is not a security control, because `WHERE true` passes.
+- `filter` restricts the rows the rule covers (see [Rows](#rows)).
 - `only` makes p14g write the table as `ONLY table` (see [Inheritance and partitions](#inheritance-and-partitions)).
   Every `Select`, `Update` and `Delete` rule for one table must agree on it.
 - `extra` is a dict, or a callable taking the `context` you pass to `rewrite()` and returning a dict, of columns p14g
@@ -181,8 +183,57 @@ With `qualify_builtins=True` the default functions are written `pg_catalog.lower
 
 ### Rows
 
-p14g does not restrict rows.
-Use a view, and list the view in the policy:
+A rule's `filter` is a condition every row read or written through the rule has to meet.
+It is a function of the `context` you pass to `rewrite()`, and returns an SQL expression and the values for its
+`:name` placeholders:
+
+```python
+def org(context):
+    return 'org = :org_id and deleted_at is null', {'org_id': context['org_id']}
+
+
+policy = Policy(
+    Select('orders', columns=['id', 'qty'], filter=org),
+    Insert('orders', columns=['qty'], extra=lambda context: {'org': context['org_id']}),
+    Update('orders', columns=['qty'], filter=org),
+    Delete('orders', filter=org),
+)
+
+print(policy.rewrite('select * from orders where qty > 1', context={'org_id': 42}).sql)
+#> SELECT orders.id, orders.qty
+#> FROM (SELECT orders.id, orders.qty FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL) AS orders
+#> WHERE orders.qty > 1
+
+print(policy.rewrite('delete from orders where id = 7 or true', context={'org_id': 42}).sql)
+#> DELETE FROM orders
+#> WHERE orders.org = 42 AND orders.deleted_at IS NULL AND (orders.id = 7 OR TRUE)
+```
+
+- p14g parses the expression itself, so it goes through the same writer as the rest of the statement.
+  Each value is written as an escaped literal, or as a parameter with `literals='params'`.
+  A value is never read as SQL, whatever it contains.
+- A list or tuple is allowed where the placeholder is the only item of an `IN (...)`.
+  A cast applies to the bound value: `created > :since::timestamptz`.
+- The filter is yours, so it is not checked against the policy.
+  It can use columns the statement may not, such as `org` above, and any function or operator.
+  It cannot contain a subquery.
+- In a `SELECT`, each use of the table becomes a subquery with the filter as its `WHERE`.
+  That holds on either side of an outer join, in a self-join and in subqueries, and Postgres flattens it when it plans
+  the query.
+- In an `UPDATE` or `DELETE`, the filter is added to the `WHERE` with `AND`.
+  An `UPDATE` that sets a column the filter uses is rejected, so a row cannot be moved out of it.
+- An `INSERT` has no rows to filter. Set the column with `extra`.
+- If the filter cannot be used, because a value is missing or the function raises, the statement is rejected.
+- A filter with no values can be a plain string: `filter='deleted_at is null'`.
+- There can be one `Delete` rule for a table.
+  Several `Select` or `Update` rules are still alternatives, each with its own filter, so one rule can allow some
+  columns of every row and another all the columns of the user's own rows.
+
+A filter is weaker than Postgres's own row controls in one way.
+Postgres may evaluate the statement's conditions on a row before the filter's, so an error such as a division by zero
+can reveal something about a row the filter excludes.
+p14g's limits on functions and operators narrow that, and do not close it.
+Row-level security, or a view declared `WITH (security_barrier = true)`, does:
 
 ```sql
 CREATE VIEW cheap_orders WITH (security_barrier = true) AS
@@ -194,8 +245,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO app_role;
 A view over one table with no aggregates is updatable, and an `UPDATE` or `DELETE` through it only touches rows that
 match its `WHERE`.
 `WITH CHECK OPTION` rejects an insert or update that would produce a row outside the view.
-`security_barrier` stops Postgres evaluating the caller's conditions before the view's, which closes error and timing
-side channels.
+List the view in the policy like a table.
 
 ### Inheritance and partitions
 

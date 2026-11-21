@@ -27,6 +27,10 @@ CREATE TABLE family_child (extra text) INHERITS (family);
 INSERT INTO family VALUES (1, 'parent'), (2, 'parent');
 INSERT INTO family_child VALUES (10, 'child', 'x'), (11, 'child', 'y'), (12, 'child', 'z');
 
+-- rows of two orgs, for rules with a filter
+CREATE TABLE scoped (id int, val text, org int, hidden text);
+INSERT INTO scoped VALUES (1, 'a', 1, 'h'), (2, 'b', 1, 'h'), (3, 'c', 2, 'h'), (4, 'd', 2, 'h'), (5, 'e', 2, 'h');
+
 INSERT INTO customers VALUES (1, 'alice', 'a@example.com'), (2, 'bob', 'b@example.com');
 INSERT INTO orders (product, qty, customer_id, tenant_id) VALUES ('tea', 2, 1, 42), ('coffee', 20, 2, 42), ('milk', 0, 1, 7);
 INSERT INTO app.events VALUES (1, 'click', 'x');
@@ -48,3 +52,4 @@ GRANT INSERT (message, tenant_id) ON audit TO p14g_test_role;
 GRANT USAGE ON SEQUENCE audit_id_seq TO p14g_test_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO p14g_test_role;
 GRANT SELECT (id, label), INSERT (id, label), UPDATE (label), DELETE ON family TO p14g_test_role;
+GRANT SELECT (id, val, org), INSERT (id, val, org), UPDATE (val), DELETE ON scoped TO p14g_test_role;

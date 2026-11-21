@@ -413,6 +413,7 @@ dev = [
     { name = "maturin" },
     { name = "pytest" },
     { name = "pytest-pretty" },
+    { name = "typing-extensions" },
 ]
 linting = [
     { name = "basedpyright" },
@@ -428,6 +429,7 @@ dev = [
     { name = "maturin", specifier = ">=1.9" },
     { name = "pytest" },
     { name = "pytest-pretty" },
+    { name = "typing-extensions" },
 ]
 linting = [
     { name = "basedpyright" },

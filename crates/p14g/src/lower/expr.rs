@@ -8,9 +8,10 @@ use crate::{
     },
     error::{Error, Location, Result},
     functions,
+    policy::FilterValue,
 };
 
-impl Lower<'_> {
+impl<'a> Lower<'a> {
     pub(super) fn expr(&mut self, expr: sp::Expr) -> Result<Expr> {
         self.nested(|this| {
             this.node()?;
@@ -122,6 +123,23 @@ impl Lower<'_> {
                 let expr = self.boxed(*expr)?;
                 match target {
                     sp::InTarget::List(list) => {
+                        // `IN (:name)` with a list bound to the name is that list
+                        if let [sp::Expr::Value(value)] = list.as_slice()
+                            && let sp::Value::Placeholder(placeholder) = &value.value
+                            && self.bindings.is_some()
+                            && let FilterValue::Many(values) = self.binding(placeholder)?
+                        {
+                            if values.is_empty() {
+                                return Err(Error::callback(format!(
+                                    "{placeholder} is an empty list, and IN () is not valid SQL"
+                                )));
+                            }
+                            return Ok(Expr::InList {
+                                expr,
+                                list: values.clone(),
+                                negated,
+                            });
+                        }
                         if list.len() > self.limits.max_in_list {
                             return Err(Error::limit(format!(
                                 "IN list has more than {} items",
@@ -337,6 +355,12 @@ impl Lower<'_> {
             }
             sp::Value::Boolean(b) => Ok(Expr::Literal(Literal::Boolean(b))),
             sp::Value::Null => Ok(Expr::Literal(Literal::Null)),
+            sp::Value::Placeholder(placeholder) if self.bindings.is_some() => match self.binding(&placeholder)? {
+                FilterValue::One(value) => Ok(value.clone()),
+                FilterValue::Many(_) => Err(Error::callback(format!(
+                    "{placeholder} is a list, which can only be used as IN ({placeholder})"
+                ))),
+            },
             sp::Value::Placeholder(placeholder) => {
                 let number = placeholder
                     .strip_prefix('$')
@@ -354,6 +378,28 @@ impl Lower<'_> {
                 span: value.span,
             })?))),
         }
+    }
+
+    /// The value bound to a `:name` placeholder of a filter.
+    fn binding(&self, placeholder: &str) -> Result<&'a FilterValue> {
+        let name = placeholder
+            .strip_prefix(':')
+            .filter(|name| {
+                let mut bytes = name.bytes();
+                bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+            .ok_or_else(|| {
+                Error::callback(format!(
+                    "the placeholder {placeholder:?} is not supported in a filter (use :name)"
+                ))
+            })?;
+        self.bindings
+            .into_iter()
+            .flatten()
+            .find(|(bound, _)| bound == name)
+            .map(|(_, value)| value)
+            .ok_or_else(|| Error::callback(format!("the filter uses :{name} but no value was given for it")))
     }
 
     fn function(&mut self, function: sp::Function) -> Result<Expr> {

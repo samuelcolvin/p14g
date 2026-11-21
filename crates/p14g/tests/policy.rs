@@ -5,7 +5,7 @@ mod common;
 use std::thread;
 
 use p14g::{
-    Delete, Dialect, Error, ErrorKind, Insert, Layout, Limits, Literals, Mapper, Op, Policy, PolicyBuilder,
+    Delete, Dialect, Error, ErrorKind, Filter, Insert, Layout, Limits, Literals, Mapper, Op, Policy, PolicyBuilder,
     QuoteIdentifiers, Select, Star, StatementKind, Update,
     ast::{Expr, Function, Ident, Literal, Table},
     functions,
@@ -1337,6 +1337,291 @@ fn qualify_builtins() {
     assert_eq!(
         rewrite(&always, "select lower(product) from orders"),
         r#"SELECT "lower"("orders"."product") FROM "orders""#
+    );
+}
+
+#[test]
+fn filters() {
+    let org = |tenant: &Tenant| Filter::new("org = :org and deleted_at is null").bind("org", tenant.id);
+    let policy: Policy<Tenant> = dense()
+        .select(
+            Select::table("orders")
+                .columns(["id", "qty", "customer_id"])
+                .filter(org),
+        )
+        .select(Select::table("customers").filter(|tenant: &Tenant| {
+            Filter::new("customers.org = :org and status in (:statuses) and created > :since::timestamptz")
+                .bind("org", tenant.id)
+                .bind("statuses", vec!["open", "o'k"])
+                .bind("since", "2026-01-01")
+        }))
+        .select(Select::table("plain"))
+        .insert(
+            Insert::table("orders")
+                .columns(["qty"])
+                .extra(|tenant: &Tenant| [("org", tenant.id)]),
+        )
+        .update(Update::table("orders").columns(["qty", "org"]).filter(org))
+        .delete(Delete::table("orders").filter(org))
+        .build()
+        .unwrap();
+    let tenant = Tenant { id: 42, schema: "" };
+    let rewrite = |sql: &str| {
+        policy
+            .rewrite(sql, &tenant)
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .sql
+    };
+    let orders = "(SELECT orders.id, orders.qty, orders.customer_id FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL)";
+
+    // a filtered table is read through a subquery that applies the filter, under the name the statement used
+    assert_eq!(
+        rewrite("select count(*) from orders where qty > 1"),
+        format!("SELECT count(*) FROM {orders} AS orders WHERE orders.qty > 1")
+    );
+    // which holds on either side of an outer join, and for a rule with all columns keeps `*`
+    assert_eq!(
+        rewrite("select o.*, c.name from orders o left join customers c on c.id = o.customer_id"),
+        format!(
+            "SELECT o.id, o.qty, o.customer_id, c.name FROM {orders} AS o LEFT JOIN (SELECT * FROM customers WHERE \
+             customers.org = 42 AND customers.status IN ('open', 'o''k') AND customers.created > CAST('2026-01-01' AS \
+             timestamp with time zone)) AS c ON c.id = o.customer_id"
+        )
+    );
+    // every use of the table is filtered: a self-join, a subquery, a CTE
+    assert_eq!(
+        rewrite("select a.id from orders a join orders b on b.id = a.id where a.id in (select id from orders)"),
+        format!(
+            "SELECT a.id FROM {orders} AS a INNER JOIN {orders} AS b ON b.id = a.id WHERE a.id IN (SELECT orders.id \
+             FROM {orders} AS orders)"
+        )
+    );
+    assert_eq!(
+        rewrite("with o as (select id from orders) select o.id, plain.x from o, plain"),
+        format!("WITH o AS (SELECT orders.id FROM {orders} AS orders) SELECT o.id, plain.x FROM o, plain")
+    );
+    // the columns the filter reads are not thereby readable by the statement
+    assert_eq!(
+        policy.rewrite("select org from orders", &tenant).unwrap_err().kind(),
+        ErrorKind::Denied
+    );
+    assert_eq!(
+        policy
+            .rewrite("select id from orders where org = 1", &tenant)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Denied
+    );
+
+    // a write takes the filter as part of its WHERE, ahead of the statement's own condition
+    assert_eq!(
+        rewrite("update orders set qty = qty + 1 where id = 7 or true returning *"),
+        "UPDATE orders SET qty = orders.qty + 1 WHERE orders.org = 42 AND orders.deleted_at IS NULL AND (orders.id = 7 \
+         OR TRUE) RETURNING orders.id, orders.qty, orders.customer_id"
+    );
+    assert_eq!(
+        rewrite("delete from orders as o where o.id = 7"),
+        "DELETE FROM orders AS o WHERE o.org = 42 AND o.deleted_at IS NULL AND o.id = 7"
+    );
+    // a subquery in the WHERE of a write is a read like any other
+    assert_eq!(
+        rewrite("delete from orders where id in (select customer_id from orders o2)"),
+        format!(
+            "DELETE FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL AND orders.id IN (SELECT \
+             o2.customer_id FROM {orders} AS o2)"
+        )
+    );
+    // a column the filter reads cannot be set, even though the rule lists it
+    let error = policy
+        .rewrite("update orders set org = 1 where id = 7", &tenant)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Denied);
+    assert_eq!(
+        error.message(),
+        "column \"org\" of table \"orders\" is used by the policy's filter and cannot be set"
+    );
+    // the guard against a write with no WHERE still asks the statement for one
+    assert_eq!(
+        policy.rewrite("delete from orders", &tenant).unwrap_err().kind(),
+        ErrorKind::Denied
+    );
+    // an insert has no rows to filter, its columns come from `extra`
+    assert_eq!(
+        rewrite("insert into orders (qty) values (1)"),
+        "INSERT INTO orders (qty, org) VALUES (1, 42)"
+    );
+
+    // the filter's columns are in the grants, since Postgres checks them like any other read
+    assert_eq!(
+        policy.grants("app", &tenant).unwrap(),
+        [
+            r#"GRANT SELECT ON "customers" TO "app""#,
+            r#"GRANT SELECT ("id", "qty", "customer_id", "deleted_at", "org") ON "orders" TO "app""#,
+            r#"GRANT INSERT ("qty", "org") ON "orders" TO "app""#,
+            r#"GRANT UPDATE ("qty", "org") ON "orders" TO "app""#,
+            r#"GRANT DELETE ON "orders" TO "app""#,
+            r#"GRANT SELECT ON "plain" TO "app""#,
+        ]
+    );
+}
+
+type MakeFilter = fn(&()) -> Filter;
+
+#[test]
+fn filter_values_and_errors() {
+    let build = |filter: fn(&()) -> Filter| -> Policy {
+        dense()
+            .select(Select::table("t").filter(filter))
+            .update(Update::table("t").allow_unfiltered(true))
+            .delete(Delete::table("t").allow_unfiltered(true).filter(filter))
+            .build()
+            .unwrap()
+    };
+    let where_ = |filter: fn(&()) -> Filter| {
+        let sql = rewrite(&build(filter), "select a from t");
+        sql.strip_prefix("SELECT t.a FROM (SELECT * FROM t WHERE ")
+            .and_then(|rest| rest.strip_suffix(") AS t"))
+            .unwrap_or_else(|| panic!("{sql}"))
+            .to_owned()
+    };
+    // values are literals whatever they contain
+    assert_eq!(
+        where_(
+            |()| Filter::new("a = :s or b = :n or c = :f or d = :t or e is not distinct from :null")
+                .bind("s", "x' OR '1'='1")
+                .bind("n", -7)
+                .bind("f", 1.5)
+                .bind("t", true)
+                .bind("null", Literal::Null)
+        ),
+        "t.a = 'x'' OR ''1''=''1' OR t.b = (- 7) OR t.c = 1.5 OR t.d = TRUE OR (t.e IS NOT DISTINCT FROM NULL)"
+    );
+    assert_eq!(
+        where_(|()| Filter::new("a = :s").bind("s", r"back\slash'")),
+        r"t.a = E'back\\slash'''"
+    );
+    // a list is the items of IN, a single value can be one item of it
+    assert_eq!(
+        where_(|()| Filter::new("a in (:xs) and b not in (:y, 3)")
+            .bind("xs", vec![1, 2, 3])
+            .bind("y", 2)),
+        "t.a IN (1, 2, 3) AND t.b NOT IN (2, 3)"
+    );
+    // the filter can use what the untrusted statement may not: any function, any operator, a qualified name
+    assert_eq!(
+        where_(|()| Filter::new("t.a ~ '^x' and pg_has_role(owner, 'member') and lower(b) = c")),
+        "(t.a ~ '^x') AND pg_has_role(t.owner, 'member') AND lower(t.b) = t.c"
+    );
+    assert_eq!(where_(|()| Filter::new("true")), "TRUE");
+    // an unused value is ignored, a name is matched exactly
+    assert_eq!(
+        where_(|()| Filter::new("a = :A").bind("A", 1).bind("a", 2).bind("unused", 3)),
+        "t.a = 1"
+    );
+
+    // with parameters, the strings a filter binds are parameters too
+    let params: Policy = dense()
+        .select(Select::table("t").filter(|()| Filter::new("a = :s and b = :n").bind("s", "x").bind("n", 1)))
+        .literals(Literals::Params)
+        .build()
+        .unwrap();
+    let safe = params.rewrite("select a from t where c = 'y' and d = $1", &()).unwrap();
+    assert_eq!(
+        safe.sql,
+        "SELECT t.a FROM (SELECT * FROM t WHERE t.a = $2 AND t.b = 1) AS t WHERE t.c = $3 AND t.d = $1"
+    );
+    assert_eq!(safe.params, ["x", "y"]);
+
+    // a filter that cannot be used rejects the statement, it is never left out
+    let cases: [(MakeFilter, &str); 10] = [
+        (
+            |()| Filter::new("a = :missing"),
+            "the filter uses :missing but no value was given for it",
+        ),
+        (
+            |()| Filter::new("a = :xs").bind("xs", vec![1]),
+            ":xs is a list, which can only be used as IN (:xs)",
+        ),
+        (
+            |()| Filter::new("a in (:xs)").bind("xs", Vec::<i32>::new()),
+            ":xs is an empty list, and IN () is not valid SQL",
+        ),
+        (
+            |()| Filter::new("a = $1"),
+            "the placeholder \"$1\" is not supported in a filter (use :name)",
+        ),
+        (
+            |()| Filter::new("a = :1").bind("1", 1),
+            "the placeholder \":1\" is not supported in a filter (use :name)",
+        ),
+        (
+            |()| Filter::new("a in (select id from other)"),
+            "a subquery in a filter is not supported",
+        ),
+        (|()| Filter::new("other.a = 1"), "other.a is a column of another table"),
+        (
+            |()| Filter::new("a = 1; drop table t"),
+            "expected one expression, found ; after it",
+        ),
+        (|()| Filter::new("a = 1 or"), "Expected: an expression, found: EOF"),
+        (|()| Filter::new(""), "Expected: an expression, found: EOF"),
+    ];
+    for (filter, message) in cases {
+        let policy = build(filter);
+        for sql in ["select a from t", "delete from t", "update t set a = 1 where a = 2"] {
+            let error = policy.rewrite(sql, &()).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Callback, "{sql}: {error}");
+            assert_eq!(
+                error.message(),
+                format!("invalid filter for table \"t\": {message}"),
+                "{sql}"
+            );
+        }
+        assert_eq!(policy.grants("r", &()).unwrap_err().kind(), ErrorKind::Callback);
+    }
+    let failing: Policy = dense()
+        .select(Select::table("t").try_filter(|()| Err(Error::callback("no org"))))
+        .build()
+        .unwrap();
+    assert_eq!(failing.rewrite("select a from t", &()).unwrap_err().message(), "no org");
+
+    // two delete rules for one table would be two filters with nothing to choose between them
+    config_error(
+        dense::<()>()
+            .delete(Delete::table("t"))
+            .delete(Delete::table("t").allow_unfiltered(true))
+            .build(),
+    );
+}
+
+#[test]
+fn filters_and_alternative_rules() {
+    // everyone may read the public columns of any row, and all the columns of their own
+    let policy: Policy<Tenant> = dense()
+        .select(Select::table("docs").columns(["id", "title"]))
+        .select(
+            Select::table("docs")
+                .columns(["id", "title", "body"])
+                .filter(|tenant: &Tenant| Filter::new("owner = :owner").bind("owner", tenant.id)),
+        )
+        .update(Update::table("docs").columns(["title"]))
+        .build()
+        .unwrap();
+    let tenant = Tenant { id: 9, schema: "" };
+    let rewrite = |sql: &str| policy.rewrite(sql, &tenant).unwrap().sql;
+    assert_eq!(rewrite("select title from docs"), "SELECT docs.title FROM docs");
+    assert_eq!(
+        rewrite("select title, body from docs"),
+        "SELECT docs.title, docs.body FROM (SELECT docs.id, docs.title, docs.body FROM docs WHERE docs.owner = 9) AS docs"
+    );
+    // a write is held to the filter of the rule its WHERE was read under
+    assert_eq!(
+        rewrite("update docs set title = 'x' where id = 1"),
+        "UPDATE docs SET title = 'x' WHERE docs.id = 1"
+    );
+    assert_eq!(
+        rewrite("update docs set title = 'x' where body like '%secret%'"),
+        "UPDATE docs SET title = 'x' WHERE docs.owner = 9 AND docs.body LIKE '%secret%'"
     );
 }
 

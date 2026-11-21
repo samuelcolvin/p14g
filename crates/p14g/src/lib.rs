@@ -18,15 +18,17 @@
 //! # Ok::<(), p14g::Error>(())
 //! ```
 //!
-//! p14g restricts tables, columns, operators and functions. It does not restrict rows: do that with a
-//! view (ideally `security_barrier`, `WITH CHECK OPTION`) and list the view in the policy. It is one layer
-//! of defence, to be used with a least-privilege database role and a `statement_timeout`.
+//! p14g restricts tables, columns, operators and functions, and rows through a rule's `filter`. A filter
+//! does not stop errors or timing from telling the author something about the rows it excludes; row-level
+//! security or a `security_barrier` view does. p14g is one layer of defence, to be used with a
+//! least-privilege database role and a `statement_timeout`.
 
 pub mod ast;
 mod backend;
 mod check;
 mod dialect;
 mod error;
+mod filter;
 pub mod functions;
 mod lower;
 mod map;
@@ -38,5 +40,7 @@ pub use crate::{
     dialect::Dialect,
     error::{Error, ErrorKind, Location, Result},
     map::Mapper,
-    policy::{Delete, Insert, Limits, Literals, Op, Policy, PolicyBuilder, SafeSql, Select, Star, Update},
+    policy::{
+        Delete, Filter, FilterValue, Insert, Limits, Literals, Op, Policy, PolicyBuilder, SafeSql, Select, Star, Update,
+    },
 };

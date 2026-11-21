@@ -20,6 +20,7 @@ from p14g import (
     Update,
     mapper,
 )
+from typing_extensions import LiteralString
 
 # every statement on one line, which is easier to compare against
 DensePolicy = partial(Policy, layout='dense')
@@ -1127,3 +1128,155 @@ def test_qualify_builtins():
     )
     with pytest.raises(TypeError):
         Policy(qualify_builtins='yes')  # pyright: ignore[reportArgumentType]
+
+
+def test_filter():
+    def org(context: dict[str, Any]) -> tuple[LiteralString, dict[str, Any]]:
+        return 'org = :org_id and deleted_at is null', {'org_id': context['org_id']}
+
+    policy = DensePolicy(
+        Select('orders', columns=['id', 'qty'], filter=org),
+        Select('customers'),
+        Insert('orders', columns=['qty'], extra=lambda context: {'org': context['org_id']}),
+        Update('orders', columns=['qty', 'org'], filter=org),
+        Delete('orders', filter=org),
+    )
+    context = {'org_id': 42}
+    orders = '(SELECT orders.id, orders.qty FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL)'
+    # a filtered table is read through a subquery that applies the filter
+    assert policy.rewrite('select * from orders where qty > 1', context=context).sql == (
+        f'SELECT orders.id, orders.qty FROM {orders} AS orders WHERE orders.qty > 1'
+    )
+    assert policy.rewrite('select c.name from customers c left join orders o on o.id = c.id', context=context).sql == (
+        f'SELECT c.name FROM customers AS c LEFT JOIN {orders} AS o ON o.id = c.id'
+    )
+    # a write takes it as part of its WHERE
+    assert policy.rewrite('update orders set qty = 1 where id = 7 or true', context=context).sql == (
+        'UPDATE orders SET qty = 1 WHERE orders.org = 42 AND orders.deleted_at IS NULL AND (orders.id = 7 OR TRUE)'
+    )
+    assert policy.rewrite('delete from orders where id = 7', context=context).sql == (
+        'DELETE FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL AND orders.id = 7'
+    )
+    assert policy.rewrite('insert into orders (qty) values (1)', context=context).sql == (
+        'INSERT INTO orders (qty, org) VALUES (1, 42)'
+    )
+    # the filter's columns are not the statement's to read or to set
+    with pytest.raises(P14gError, match='column "org" is not allowed'):
+        policy.rewrite('select org from orders', context=context)
+    with pytest.raises(P14gError, match="is used by the policy's filter and cannot be set") as exc_info:
+        policy.rewrite('update orders set org = 1 where id = 7', context=context)
+    assert exc_info.value.kind == 'denied'
+    assert policy.grants('app', context=context) == [
+        'GRANT SELECT ON "customers" TO "app"',
+        'GRANT SELECT ("id", "qty", "deleted_at", "org") ON "orders" TO "app"',
+        'GRANT INSERT ("qty", "org") ON "orders" TO "app"',
+        'GRANT UPDATE ("qty", "org") ON "orders" TO "app"',
+        'GRANT DELETE ON "orders" TO "app"',
+    ]
+
+
+def test_filter_values():
+    def where(sql: str, values: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        def filter(context: Any) -> Any:
+            return sql if values is None else (sql, values)
+
+        safe = DensePolicy(Select('t', filter=filter), **kwargs).rewrite('select a from t')
+        assert safe.sql.startswith('SELECT t.a FROM (SELECT * FROM t WHERE ') and safe.sql.endswith(') AS t')
+        where = safe.sql.removeprefix('SELECT t.a FROM (SELECT * FROM t WHERE ').removesuffix(') AS t')
+        return (where, safe.params) if kwargs else where
+
+    # values are written as literals, whatever is in them
+    assert where('a = :v', {'v': "x' OR '1'='1"}) == "t.a = 'x'' OR ''1''=''1'"
+    assert where('a = :v', {'v': 'a\\b'}) == "t.a = E'a\\\\b'"
+    assert where(
+        'a = :i and b = :f and c = :t and d is not distinct from :n', {'i': -3, 'f': 1.5, 't': True, 'n': None}
+    ) == ('t.a = (- 3) AND t.b = 1.5 AND t.c = TRUE AND (t.d IS NOT DISTINCT FROM NULL)')
+    # a list or tuple is the items of IN
+    assert where('a in (:xs) and b not in (:ys)', {'xs': [1, 2], 'ys': ('x', 'y')}) == (
+        "t.a IN (1, 2) AND t.b NOT IN ('x', 'y')"
+    )
+    # a cast applies to the bound value
+    assert where('created > :since::timestamptz', {'since': '2026-01-01'}) == (
+        "t.created > CAST('2026-01-01' AS timestamp with time zone)"
+    )
+    # a filter with nothing to bind can be returned, or given, as a string
+    assert where('deleted_at is null') == 't.deleted_at IS NULL'
+    assert DensePolicy(Select('t', filter='not archived')).rewrite('select a from t').sql == (
+        'SELECT t.a FROM (SELECT * FROM t WHERE NOT t.archived) AS t'
+    )
+    # with parameters, strings from the filter are parameters
+    assert where('a = :s and b = :n', {'s': 'x', 'n': 1}, literals='params') == ('t.a = $1 AND t.b = 1', ['x'])
+
+
+def test_filter_context():
+    seen: list[Any] = []
+
+    def filter(context: Any) -> tuple[LiteralString, dict[str, Any]]:
+        seen.append(context)
+        return 'org = :org', {'org': context}
+
+    policy = DensePolicy(Select('t', filter=filter), Delete('t', filter=filter))
+    assert policy.rewrite('select t1.a from t t1 join t t2 on true', context=5).sql == (
+        'SELECT t1.a FROM (SELECT * FROM t WHERE t.org = 5) AS t1 INNER JOIN (SELECT * FROM t WHERE t.org = 5) AS t2 ON TRUE'
+    )
+    # called for each use of the table
+    assert seen == [5, 5]
+    assert policy.rewrite('delete from t where a = 1', context=6).sql == 'DELETE FROM t WHERE t.org = 6 AND t.a = 1'
+
+
+FILTER_ERRORS: list[tuple[Any, str, type[Exception] | None]] = [
+    (('a = :x', {}), 'invalid filter for table "t": the filter uses :x but no value was given for it', None),
+    (('a = :x', {'x': [1]}), 'invalid filter for table "t": :x is a list, which can only be used as IN (:x)', None),
+    (
+        ('a in (:x)', {'x': []}),
+        'invalid filter for table "t": :x is an empty list, and IN () is not valid SQL',
+        None,
+    ),
+    (('a in (select 1)', {}), 'invalid filter for table "t": a subquery in a filter is not supported', None),
+    (('a = 1; drop table t', {}), 'invalid filter for table "t": expected one expression, found ; after it', None),
+    (('other.a = 1', {}), 'invalid filter for table "t": other.a is a column of another table', None),
+    (42, 'callback failed: TypeError: a filter must return (sql, values) or sql', TypeError),
+    (('a = 1', [1]), 'callback failed: TypeError: a filter must return (sql, values) or sql', TypeError),
+    (
+        ('a = :x', {'x': object()}),
+        'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not object',
+        TypeError,
+    ),
+    (
+        ('a = 1', {1: 2}),
+        "callback failed: TypeError: the keys of a filter's values must be placeholder names",
+        TypeError,
+    ),
+]
+
+
+@pytest.mark.parametrize('returned,message,cause', FILTER_ERRORS)
+def test_filter_errors(returned: Any, message: str, cause: type[Exception] | None):
+    policy = DensePolicy(
+        Select('t', filter=lambda context: returned),
+        Update('t', filter=lambda context: returned),
+        Delete('t', filter=lambda context: returned),
+    )
+    # a filter that cannot be used rejects the statement, it is never left out
+    for sql in 'select a from t', 'update t set a = 1 where b = 2', 'delete from t where b = 2':
+        with pytest.raises(P14gError) as exc_info:
+            policy.rewrite(sql)
+        assert str(exc_info.value) == message
+        assert exc_info.value.kind == 'callback'
+        assert type(exc_info.value.__cause__) is (cause or type(None))
+
+
+def test_filter_raises_and_arguments():
+    def broken(context: Any) -> Any:
+        raise KeyError('org_id')
+
+    with pytest.raises(P14gError, match="callback failed: KeyError: 'org_id'") as exc_info:
+        DensePolicy(Select('t', filter=broken)).rewrite('select a from t')
+    assert isinstance(exc_info.value.__cause__, KeyError)
+
+    for rule in Select, Update, Delete:
+        with pytest.raises(TypeError, match=r'filter must be a callable returning \(sql, values\), or a str'):
+            rule('t', filter=42)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(P14gError, match='there is more than one delete rule for table "t"') as exc_info:
+        DensePolicy(Delete('t'), Delete('t', allow_unfiltered=True))
+    assert exc_info.value.kind == 'config'

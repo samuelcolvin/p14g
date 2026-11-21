@@ -22,10 +22,10 @@ use sqlparser::{
 };
 
 use crate::{
-    ast::{Ident, Statement},
+    ast::{Expr, Ident, Statement},
     dialect::Dialect,
     error::{Error, ErrorKind, Location, Result},
-    policy::Limits,
+    policy::{FilterValue, Limits},
 };
 
 pub(crate) struct Lowered {
@@ -48,6 +48,47 @@ const STACK_PER_TOKEN: usize = 1024;
 const STACK_BASE: usize = 256 * 1024;
 
 pub(crate) fn parse(sql: &str, dialect: Dialect, limits: &Limits) -> Result<Lowered> {
+    with_parser(sql, dialect, limits, |mut parser| {
+        let mut statements = parser.parse_statements().map_err(parser_error)?;
+        let statement = match (statements.pop(), statements.is_empty()) {
+            (Some(statement), true) => statement,
+            (None, _) => return Err(Error::new(ErrorKind::Parse, "no SQL statement found")),
+            (Some(_), false) => {
+                return Err(Error::new(
+                    ErrorKind::Parse,
+                    "expected exactly one SQL statement, found several",
+                ));
+            }
+        };
+        let mut lower = Lower::new(limits, None);
+        let statement = lower.statement(statement)?;
+        Ok(Lowered {
+            statement,
+            max_placeholder: lower.max_placeholder,
+        })
+    })
+}
+
+/// Parse the expression of a rule's filter, putting `values` in place of its `:name` placeholders.
+///
+/// The values go in as nodes of the expression, so nothing in one can be read as SQL. Filters are written
+/// for Postgres whatever dialect the untrusted input is in.
+pub(crate) fn parse_filter(sql: &str, limits: &Limits, values: &[(String, FilterValue)]) -> Result<Expr> {
+    with_parser(sql, Dialect::Postgres, limits, |mut parser| {
+        let expr = parser.parse_expr().map_err(parser_error)?;
+        if parser.peek_token().token != Token::EOF {
+            return Err(Error::new(
+                ErrorKind::Parse,
+                format!("expected one expression, found {} after it", parser.peek_token().token),
+            ));
+        }
+        Lower::new(limits, Some(values)).expr(expr)
+    })
+}
+
+/// Tokenise `sql`, apply the limits that do not need a parse, and run `f` with a parser on a stack that is
+/// deep enough for whatever tree the tokens can make.
+fn with_parser<T>(sql: &str, dialect: Dialect, limits: &Limits, f: impl FnOnce(Parser<'_>) -> Result<T>) -> Result<T> {
     if sql.len() > limits.max_sql_bytes {
         return Err(Error::limit(format!(
             "SQL is {} bytes, the limit is {}",
@@ -78,41 +119,20 @@ pub(crate) fn parse(sql: &str, dialect: Dialect, limits: &Limits) -> Result<Lowe
 
     let stack = STACK_BASE + significant * STACK_PER_TOKEN;
     stacker::maybe_grow(stack, stack, || {
-        let mut statements = Parser::new(parser_dialect.as_ref())
+        let parser = Parser::new(parser_dialect.as_ref())
             .with_recursion_limit(limits.max_depth)
-            .with_tokens_with_locations(tokens)
-            .parse_statements()
-            .map_err(|e| match e {
-                ParserError::RecursionLimitExceeded => Error::limit("SQL is nested too deeply"),
-                ParserError::TokenizerError(message) | ParserError::ParserError(message) => {
-                    Error::new(ErrorKind::Parse, message)
-                }
-            })?;
-        let statement = match (statements.pop(), statements.is_empty()) {
-            (Some(statement), true) => statement,
-            (None, _) => return Err(Error::new(ErrorKind::Parse, "no SQL statement found")),
-            (Some(_), false) => {
-                return Err(Error::new(
-                    ErrorKind::Parse,
-                    "expected exactly one SQL statement, found several",
-                ));
-            }
-        };
-        let mut lower = Lower {
-            limits,
-            nodes: 0,
-            depth: 0,
-            joins: 0,
-            subqueries: 0,
-            set_operations: 0,
-            max_placeholder: 0,
-        };
-        let statement = lower.statement(statement)?;
-        Ok(Lowered {
-            statement,
-            max_placeholder: lower.max_placeholder,
-        })
+            .with_tokens_with_locations(tokens);
+        f(parser)
     })
+}
+
+fn parser_error(error: ParserError) -> Error {
+    match error {
+        ParserError::RecursionLimitExceeded => Error::limit("SQL is nested too deeply"),
+        ParserError::TokenizerError(message) | ParserError::ParserError(message) => {
+            Error::new(ErrorKind::Parse, message)
+        }
+    }
 }
 
 struct Lower<'a> {
@@ -123,6 +143,8 @@ struct Lower<'a> {
     subqueries: usize,
     set_operations: usize,
     max_placeholder: u32,
+    /// Set when lowering a rule's filter: the values for its `:name` placeholders.
+    bindings: Option<&'a [(String, FilterValue)]>,
 }
 
 fn location(span: Span) -> Option<Location> {
@@ -163,7 +185,20 @@ impl Absent for bool {
     }
 }
 
-impl Lower<'_> {
+impl<'a> Lower<'a> {
+    fn new(limits: &'a Limits, bindings: Option<&'a [(String, FilterValue)]>) -> Self {
+        Self {
+            limits,
+            nodes: 0,
+            depth: 0,
+            joins: 0,
+            subqueries: 0,
+            set_operations: 0,
+            max_placeholder: 0,
+            bindings,
+        }
+    }
+
     fn statement(&mut self, statement: sp::Statement) -> Result<Statement> {
         match statement {
             sp::Statement::Query(query) => Ok(Statement::Query(self.query(*query)?)),
@@ -202,6 +237,10 @@ impl Lower<'_> {
     }
 
     fn count_subquery(&mut self) -> Result<()> {
+        if self.bindings.is_some() {
+            // the columns of a filter are all bound to the rule's table, which a subquery would break
+            return Err(Error::unsupported("a subquery in a filter"));
+        }
         self.subqueries += 1;
         if self.subqueries > self.limits.max_subqueries {
             Err(Error::limit(format!(
