@@ -12,7 +12,7 @@
 //!     .build()?;
 //!
 //! let safe = policy.rewrite("select id from orders where qty < 3", &())?;
-//! assert_eq!(safe.sql, r#"SELECT "orders"."id" FROM "orders" WHERE ("orders"."qty" < 3)"#);
+//! assert_eq!(safe.sql, "SELECT orders.id\nFROM orders\nWHERE orders.qty < 3");
 //!
 //! assert!(policy.rewrite("select * from pg_shadow", &()).is_err());
 //! # Ok::<(), pgsafe::Error>(())
@@ -34,7 +34,7 @@ mod policy;
 
 pub use crate::{
     ast::StatementKind,
-    backend::Backend,
+    backend::{Backend, Layout, QuoteIdentifiers},
     dialect::Dialect,
     error::{Error, ErrorKind, Location, Result},
     map::Mapper,

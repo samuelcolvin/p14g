@@ -1,10 +1,12 @@
 //! Writing the IR out as SQL.
 //!
 //! The statement writer here is shared; a backend supplies the pieces that differ between databases
-//! through [`Syntax`]. Output is fully parenthesised and every token is separated by a space, so operator
-//! precedence never matters and two tokens can never run together into something else (`- -1` into a
-//! comment, for example).
+//! through [`Syntax`]. An expression that is an operand of another is always parenthesised, and every token
+//! is separated by a space, so operator precedence never matters and two tokens can never run together
+//! into something else (`- -1` into a comment, for example). The two exceptions are an expression with a
+//! clause to itself, and chains of `AND` or of `OR`, which read the same however they are grouped.
 
+mod keywords;
 mod postgres;
 
 use std::mem;
@@ -32,14 +34,66 @@ pub(crate) struct Written {
     pub params: Vec<String>,
 }
 
-pub(crate) fn write(
-    backend: Backend,
-    statement: &Statement,
-    literals: Literals,
-    max_placeholder: u32,
-) -> Result<Written> {
+/// Which identifiers are written in double quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuoteIdentifiers {
+    /// Only the ones that need it: anything that is not a lower case name made of letters, digits and
+    /// underscores, and every Postgres keyword.
+    #[default]
+    Minimal,
+    /// All of them.
+    Always,
+}
+
+impl QuoteIdentifiers {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "minimal" => Ok(Self::Minimal),
+            "always" => Ok(Self::Always),
+            _ => Err(Error::config(format!("unknown quote_identifiers {s:?}"))),
+        }
+    }
+}
+
+/// How the output is laid out. It is the same statement either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    /// Each clause of the statement on its own line. Subqueries stay on one line.
+    #[default]
+    Multiline,
+    /// Everything on one line.
+    Dense,
+}
+
+impl Layout {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "multiline" => Ok(Self::Multiline),
+            "dense" => Ok(Self::Dense),
+            _ => Err(Error::config(format!("unknown layout {s:?}"))),
+        }
+    }
+}
+
+/// The choices that change how a statement is written but not what it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Style {
+    pub literals: Literals,
+    pub quote: QuoteIdentifiers,
+    pub layout: Layout,
+    /// Write builtin functions with their schema.
+    pub qualify_builtins: bool,
+}
+
+pub(crate) fn write(backend: Backend, statement: &Statement, style: Style, max_placeholder: u32) -> Result<Written> {
     match backend {
-        Backend::Postgres => Writer::new(&postgres::Postgres, literals, max_placeholder).finish(statement),
+        Backend::Postgres => {
+            let syntax = postgres::Postgres {
+                quote: style.quote,
+                qualify_builtins: style.qualify_builtins,
+            };
+            Writer::new(&syntax, style, max_placeholder).finish(statement)
+        }
     }
 }
 
@@ -47,25 +101,34 @@ pub(crate) fn write(
 pub(crate) fn quote_ident(backend: Backend, ident: &Ident) -> String {
     let mut out = String::new();
     match backend {
-        Backend::Postgres => postgres::Postgres.ident(&mut out, ident),
+        Backend::Postgres => postgres::Postgres {
+            quote: QuoteIdentifiers::Always,
+            qualify_builtins: true,
+        }
+        .ident(&mut out, ident),
     }
     out
 }
 
 /// What differs between databases.
 pub(crate) trait Syntax {
+    /// Write a name that stands on its own or starts a qualified name.
     fn ident(&self, out: &mut String, ident: &Ident);
+    /// Write a name that follows a `.`. Nothing is a keyword in that position, so fewer names need quoting.
+    fn member(&self, out: &mut String, ident: &Ident);
     /// Write a string literal. Only called once the value is known to have no NUL byte.
     fn string(&self, out: &mut String, value: &str);
     fn placeholder(&self, out: &mut String, number: u32);
     fn data_type(&self, out: &mut String, data_type: DataType);
-    /// Write the name of a function in the catalog, qualified as far as the backend can.
+    /// Write the name of a function in the catalog.
     fn function_name(&self, out: &mut String, schema: Option<&Ident>, name: &Ident);
 }
 
 struct Writer<'a, S> {
     syntax: &'a S,
-    literals: Literals,
+    style: Style,
+    /// How many subqueries deep the writer is. Only the outermost statement is laid out over several lines.
+    nested: usize,
     /// Finished text. A new segment starts after each parameter pgsafe adds, because their numbers are
     /// only known once the highest placeholder in the statement is.
     segments: Vec<String>,
@@ -98,10 +161,11 @@ fn valid_number(number: &str) -> bool {
 }
 
 impl<'a, S: Syntax> Writer<'a, S> {
-    fn new(syntax: &'a S, literals: Literals, max_placeholder: u32) -> Self {
+    fn new(syntax: &'a S, style: Style, max_placeholder: u32) -> Self {
         Self {
             syntax,
-            literals,
+            style,
+            nested: 0,
             segments: Vec::new(),
             out: String::new(),
             params: Vec::new(),
@@ -137,8 +201,29 @@ impl<'a, S: Syntax> Writer<'a, S> {
         self.out.push_str(text);
     }
 
+    /// Start a clause: on a new line for the outermost statement in the multiline layout, else after a space.
+    fn clause(&mut self, keyword: &str) {
+        let multiline = self.style.layout == Layout::Multiline && self.nested == 0;
+        self.push(if multiline { "\n" } else { " " });
+        self.push(keyword);
+    }
+
+    /// Write a query that is inside another statement.
+    fn subquery(&mut self, query: &Query) -> Result<()> {
+        self.nested += 1;
+        let result = self.query(query);
+        self.nested -= 1;
+        result
+    }
+
     fn ident(&mut self, ident: &Ident) {
         self.syntax.ident(&mut self.out, ident);
+    }
+
+    /// Write `.name`.
+    fn member(&mut self, ident: &Ident) {
+        self.push(".");
+        self.syntax.member(&mut self.out, ident);
     }
 
     /// Write `items` separated by `, `.
@@ -165,21 +250,21 @@ impl<'a, S: Syntax> Writer<'a, S> {
             self.list(with, |w, cte| {
                 w.ident(&cte.name);
                 w.push(" AS (");
-                w.query(&cte.query)?;
+                w.subquery(&cte.query)?;
                 w.push(")");
                 Ok(())
             })?;
-            self.push(" ");
+            self.clause("");
         }
         self.set_expr(body, false)?;
         self.order_by(order_by)?;
         if let Some(limit) = limit {
-            self.push(" LIMIT ");
-            self.expr(limit)?;
+            self.clause("LIMIT ");
+            self.top(limit)?;
         }
         if let Some(offset) = offset {
-            self.push(" OFFSET ");
-            self.expr(offset)?;
+            self.clause("OFFSET ");
+            self.top(offset)?;
         }
         Ok(())
     }
@@ -190,25 +275,29 @@ impl<'a, S: Syntax> Writer<'a, S> {
             SetExpr::Select(select) if !operand => self.select(select),
             SetExpr::Query(query) => {
                 self.push("(");
-                self.query(query)?;
+                self.subquery(query)?;
                 self.push(")");
                 Ok(())
             }
             SetExpr::SetOperation { op, all, left, right } if !operand => {
                 self.set_expr(left, true)?;
-                self.push(match op {
-                    SetOperator::Union => " UNION ",
-                    SetOperator::Except => " EXCEPT ",
-                    SetOperator::Intersect => " INTERSECT ",
+                self.clause(match (op, all) {
+                    (SetOperator::Union, false) => "UNION",
+                    (SetOperator::Union, true) => "UNION ALL",
+                    (SetOperator::Except, false) => "EXCEPT",
+                    (SetOperator::Except, true) => "EXCEPT ALL",
+                    (SetOperator::Intersect, false) => "INTERSECT",
+                    (SetOperator::Intersect, true) => "INTERSECT ALL",
                 });
-                if *all {
-                    self.push("ALL ");
-                }
+                self.clause("");
                 self.set_expr(right, true)
             }
             SetExpr::Select(_) | SetExpr::SetOperation { .. } => {
                 self.push("(");
-                self.set_expr(body, false)?;
+                self.nested += 1;
+                let result = self.set_expr(body, false);
+                self.nested -= 1;
+                result?;
                 self.push(")");
                 Ok(())
             }
@@ -227,23 +316,23 @@ impl<'a, S: Syntax> Writer<'a, S> {
         self.push(if *distinct { "SELECT DISTINCT " } else { "SELECT " });
         self.select_items(projection)?;
         if !from.is_empty() {
-            self.push(" FROM ");
+            self.clause("FROM ");
             self.list(from, |w, table| {
                 w.factor(&table.relation)?;
                 table.joins.iter().try_for_each(|join| w.join(join))
             })?;
         }
         if let Some(selection) = selection {
-            self.push(" WHERE ");
-            self.expr(selection)?;
+            self.clause("WHERE ");
+            self.top(selection)?;
         }
         if !group_by.is_empty() {
-            self.push(" GROUP BY ");
+            self.clause("GROUP BY ");
             self.list(group_by, |w, key| w.key(key, "GROUP BY"))?;
         }
         if let Some(having) = having {
-            self.push(" HAVING ");
-            self.expr(having)?;
+            self.clause("HAVING ");
+            self.top(having)?;
         }
         Ok(())
     }
@@ -255,7 +344,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
         self.list(items, |w, item| {
             match item {
                 SelectItem::Expr { expr, alias } => {
-                    w.expr(expr)?;
+                    w.top(expr)?;
                     if let Some(alias) = alias {
                         w.push(" AS ");
                         w.ident(alias);
@@ -281,11 +370,13 @@ impl<'a, S: Syntax> Writer<'a, S> {
         if *only {
             self.push("ONLY ");
         }
-        if let Some(schema) = schema {
-            self.ident(schema);
-            self.push(".");
+        match schema {
+            Some(schema) => {
+                self.ident(schema);
+                self.member(name);
+            }
+            None => self.ident(name),
         }
-        self.ident(name);
         if let Some(alias) = alias {
             self.push(" AS ");
             self.ident(alias);
@@ -297,7 +388,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
             TableFactor::Table(table) => self.table(table),
             TableFactor::Derived { subquery, alias } => {
                 self.push("(");
-                self.query(subquery)?;
+                self.subquery(subquery)?;
                 self.push(") AS ");
                 self.ident(alias);
             }
@@ -307,12 +398,12 @@ impl<'a, S: Syntax> Writer<'a, S> {
 
     fn join(&mut self, join: &Join) -> Result<()> {
         let Join { kind, relation, on } = join;
-        self.push(match kind {
-            JoinKind::Inner => " INNER JOIN ",
-            JoinKind::Left => " LEFT JOIN ",
-            JoinKind::Right => " RIGHT JOIN ",
-            JoinKind::Full => " FULL JOIN ",
-            JoinKind::Cross => " CROSS JOIN ",
+        self.clause(match kind {
+            JoinKind::Inner => "INNER JOIN ",
+            JoinKind::Left => "LEFT JOIN ",
+            JoinKind::Right => "RIGHT JOIN ",
+            JoinKind::Full => "FULL JOIN ",
+            JoinKind::Cross => "CROSS JOIN ",
         });
         self.factor(relation)?;
         match (kind, on) {
@@ -320,7 +411,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
             (JoinKind::Cross, Some(_)) => Err(invalid("a CROSS JOIN cannot have a condition")),
             (_, Some(on)) => {
                 self.push(" ON ");
-                self.expr(on)
+                self.top(on)
             }
             (_, None) => Err(invalid("a join needs a condition")),
         }
@@ -331,7 +422,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
         if order_by.is_empty() {
             return Ok(());
         }
-        self.push(" ORDER BY ");
+        self.clause("ORDER BY ");
         self.list(order_by, |w, item| {
             let OrderBy {
                 key,
@@ -358,7 +449,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
             KeyExpr::Expr(Expr::Literal(_)) => Err(invalid(format!(
                 "a constant that is not a column position in {clause} is not supported"
             ))),
-            KeyExpr::Expr(expr) => self.expr(expr),
+            KeyExpr::Expr(expr) => self.top(expr),
         }
     }
 
@@ -374,7 +465,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 descending,
                 nulls_first,
             } = item;
-            w.expr(expr)?;
+            w.top(expr)?;
             w.direction(*descending, *nulls_first);
             Ok(())
         })
@@ -397,7 +488,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
         if returning.is_empty() {
             return Ok(());
         }
-        self.push(" RETURNING ");
+        self.clause("RETURNING ");
         self.select_items(returning)
     }
 
@@ -422,13 +513,14 @@ impl<'a, S: Syntax> Writer<'a, S> {
             w.ident(column);
             Ok(())
         })?;
-        self.push(") VALUES ");
+        self.push(")");
+        self.clause("VALUES ");
         self.list(rows, |w, row| {
             if row.len() != columns.len() {
                 return Err(invalid("an INSERT row does not match the column list"));
             }
             w.push("(");
-            w.list(row, Self::expr)?;
+            w.list(row, Self::top)?;
             w.push(")");
             Ok(())
         })?;
@@ -447,15 +539,15 @@ impl<'a, S: Syntax> Writer<'a, S> {
         }
         self.push("UPDATE ");
         self.table(table);
-        self.push(" SET ");
+        self.clause("SET ");
         self.list(assignments, |w, assignment| {
             w.ident(&assignment.column);
             w.push(" = ");
-            w.expr(&assignment.value)
+            w.top(&assignment.value)
         })?;
         if let Some(selection) = selection {
-            self.push(" WHERE ");
-            self.expr(selection)?;
+            self.clause("WHERE ");
+            self.top(selection)?;
         }
         self.returning(returning)
     }
@@ -469,8 +561,8 @@ impl<'a, S: Syntax> Writer<'a, S> {
         self.push("DELETE FROM ");
         self.table(table);
         if let Some(selection) = selection {
-            self.push(" WHERE ");
-            self.expr(selection)?;
+            self.clause("WHERE ");
+            self.top(selection)?;
         }
         self.returning(returning)
     }
@@ -490,7 +582,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 if value.contains('\0') {
                     return Err(invalid("string literals may not contain NUL"));
                 }
-                match self.literals {
+                match self.style.literals {
                     Literals::Inline => self.syntax.string(&mut self.out, value),
                     Literals::Params => {
                         self.params.push(value.clone());
@@ -503,22 +595,70 @@ impl<'a, S: Syntax> Writer<'a, S> {
         Ok(())
     }
 
-    /// Write `(` open … `)` around whatever `inner` writes.
-    fn parens(&mut self, inner: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
-        self.push("(");
+    /// Write what `inner` writes, inside `(` … `)` if `parens`.
+    fn group(&mut self, parens: bool, inner: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        if parens {
+            self.push("(");
+        }
         inner(self)?;
-        self.push(")");
+        if parens {
+            self.push(")");
+        }
         Ok(())
     }
 
+    /// Write an expression as an operand of something else: in parentheses unless it is a single term, so
+    /// that operator precedence never decides how the output is read.
     fn expr(&mut self, expr: &Expr) -> Result<()> {
+        self.write_expr(expr, true)
+    }
+
+    /// Write an expression that has a clause, a list item or a function argument to itself. Nothing is
+    /// beside it to bind to, so it needs no parentheses of its own.
+    fn top(&mut self, expr: &Expr) -> Result<()> {
+        self.write_expr(expr, false)
+    }
+
+    /// Write an operand of `AND` or `OR`, leaving out the parentheses in two cases.
+    ///
+    /// A nested use of the same operator joins the chain: both are associative, so the grouping does not
+    /// matter. A single comparison or test stands as it is: `a = 1 AND b IS NULL` relies on `AND` and `OR`
+    /// binding more loosely than every comparison, which is the one piece of operator precedence the
+    /// output depends on. The operands of the comparison itself are still parenthesised.
+    fn chained(&mut self, operand: &Expr, chain: BinaryOperator) -> Result<()> {
+        let bare = match operand {
+            Expr::Binary { op, .. } => {
+                *op == chain
+                    || matches!(
+                        op,
+                        BinaryOperator::Eq
+                            | BinaryOperator::NotEq
+                            | BinaryOperator::Lt
+                            | BinaryOperator::LtEq
+                            | BinaryOperator::Gt
+                            | BinaryOperator::GtEq
+                    )
+            }
+            Expr::Is { .. }
+            | Expr::InList { .. }
+            | Expr::InSubquery { .. }
+            | Expr::Like { .. }
+            | Expr::Exists { negated: false, .. } => true,
+            _ => false,
+        };
+        self.write_expr(operand, !bare)
+    }
+
+    fn write_expr(&mut self, expr: &Expr, parens: bool) -> Result<()> {
         match expr {
             Expr::Column(Column { table, name }) => {
-                if let Some(table) = table {
-                    self.ident(table);
-                    self.push(".");
+                match table {
+                    Some(table) => {
+                        self.ident(table);
+                        self.member(name);
+                    }
+                    None => self.ident(name),
                 }
-                self.ident(name);
                 Ok(())
             }
             Expr::Literal(literal) => self.literal(literal),
@@ -530,7 +670,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 self.syntax.placeholder(&mut self.out, *number);
                 Ok(())
             }
-            Expr::Unary { op, expr } => self.parens(|w| {
+            Expr::Unary { op, expr } => self.group(parens, |w| {
                 w.push(match op {
                     UnaryOperator::Not => "NOT ",
                     UnaryOperator::Minus => "- ",
@@ -538,12 +678,18 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 });
                 w.expr(expr)
             }),
-            Expr::Binary { left, op, right } => self.parens(|w| {
-                w.expr(left)?;
-                w.push(binary_operator(*op));
-                w.expr(right)
+            Expr::Binary { left, op, right } => self.group(parens, |w| {
+                if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
+                    w.chained(left, *op)?;
+                    w.push(binary_operator(*op));
+                    w.chained(right, *op)
+                } else {
+                    w.expr(left)?;
+                    w.push(binary_operator(*op));
+                    w.expr(right)
+                }
             }),
-            Expr::Is { expr, test, negated } => self.parens(|w| {
+            Expr::Is { expr, test, negated } => self.group(parens, |w| {
                 w.expr(expr)?;
                 w.push(if *negated { " IS NOT " } else { " IS " });
                 w.push(match test {
@@ -554,7 +700,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 });
                 Ok(())
             }),
-            Expr::IsDistinctFrom { left, right, negated } => self.parens(|w| {
+            Expr::IsDistinctFrom { left, right, negated } => self.group(parens, |w| {
                 w.expr(left)?;
                 w.push(if *negated {
                     " IS NOT DISTINCT FROM "
@@ -567,10 +713,10 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 if list.is_empty() {
                     return Err(invalid("an empty IN list cannot be written"));
                 }
-                self.parens(|w| {
+                self.group(parens, |w| {
                     w.expr(expr)?;
                     w.push(if *negated { " NOT IN (" } else { " IN (" });
-                    w.list(list, Self::expr)?;
+                    w.list(list, Self::top)?;
                     w.push(")");
                     Ok(())
                 })
@@ -579,10 +725,10 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 expr,
                 subquery,
                 negated,
-            } => self.parens(|w| {
+            } => self.group(parens, |w| {
                 w.expr(expr)?;
                 w.push(if *negated { " NOT IN (" } else { " IN (" });
-                w.query(subquery)?;
+                w.subquery(subquery)?;
                 w.push(")");
                 Ok(())
             }),
@@ -591,7 +737,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 low,
                 high,
                 negated,
-            } => self.parens(|w| {
+            } => self.group(parens, |w| {
                 w.expr(expr)?;
                 w.push(if *negated { " NOT BETWEEN " } else { " BETWEEN " });
                 w.expr(low)?;
@@ -604,7 +750,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 pattern,
                 escape,
                 negated,
-            } => self.parens(|w| {
+            } => self.group(parens, |w| {
                 w.expr(expr)?;
                 if *negated {
                     w.push(" NOT");
@@ -629,21 +775,21 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 if branches.is_empty() {
                     return Err(invalid("a CASE needs at least one WHEN"));
                 }
-                self.parens(|w| {
+                self.group(parens, |w| {
                     w.push("CASE");
                     if let Some(operand) = operand {
                         w.push(" ");
-                        w.expr(operand)?;
+                        w.top(operand)?;
                     }
                     for (condition, result) in branches {
                         w.push(" WHEN ");
-                        w.expr(condition)?;
+                        w.top(condition)?;
                         w.push(" THEN ");
-                        w.expr(result)?;
+                        w.top(result)?;
                     }
                     if let Some(else_result) = else_result {
                         w.push(" ELSE ");
-                        w.expr(else_result)?;
+                        w.top(else_result)?;
                     }
                     w.push(" END");
                     Ok(())
@@ -651,7 +797,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
             }
             Expr::Cast { expr, data_type } => {
                 self.push("CAST(");
-                self.expr(expr)?;
+                self.top(expr)?;
                 self.push(" AS ");
                 self.syntax.data_type(&mut self.out, *data_type);
                 self.push(")");
@@ -661,7 +807,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 self.push("EXTRACT(");
                 self.push(date_field(*field));
                 self.push(" FROM ");
-                self.expr(expr)?;
+                self.top(expr)?;
                 self.push(")");
                 Ok(())
             }
@@ -672,19 +818,19 @@ impl<'a, S: Syntax> Writer<'a, S> {
                     VariadicFunction::Greatest => "GREATEST(",
                     VariadicFunction::Least => "LEAST(",
                 });
-                self.expr(first)?;
+                self.top(first)?;
                 for arg in rest {
                     self.push(", ");
-                    self.expr(arg)?;
+                    self.top(arg)?;
                 }
                 self.push(")");
                 Ok(())
             }
             Expr::NullIf { left, right } => {
                 self.push("NULLIF(");
-                self.expr(left)?;
+                self.top(left)?;
                 self.push(", ");
-                self.expr(right)?;
+                self.top(right)?;
                 self.push(")");
                 Ok(())
             }
@@ -711,13 +857,14 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 self.push(")");
                 Ok(())
             }
-            Expr::Exists { subquery, negated } => self.parens(|w| {
+            Expr::Exists { subquery, negated } => self.group(parens, |w| {
                 w.push(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
-                w.query(subquery)?;
+                w.subquery(subquery)?;
                 w.push(")");
                 Ok(())
             }),
-            Expr::Subquery(subquery) => self.parens(|w| w.query(subquery)),
+            // a subquery is always in parentheses, they are part of it
+            Expr::Subquery(subquery) => self.group(true, |w| w.subquery(subquery)),
         }
     }
 
@@ -741,7 +888,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 if *distinct {
                     self.push("DISTINCT ");
                 }
-                self.list(args, Self::expr)?;
+                self.list(args, Self::top)?;
                 if !args.is_empty() && !order_by.is_empty() {
                     self.push(" ");
                 }
@@ -751,14 +898,14 @@ impl<'a, S: Syntax> Writer<'a, S> {
         self.push(")");
         if let Some(filter) = filter {
             self.push(" FILTER (WHERE ");
-            self.expr(filter)?;
+            self.top(filter)?;
             self.push(")");
         }
         if let Some(window) = over {
             self.push(" OVER (");
             if !window.partition_by.is_empty() {
                 self.push("PARTITION BY ");
-                self.list(&window.partition_by, Self::expr)?;
+                self.list(&window.partition_by, Self::top)?;
                 if !window.order_by.is_empty() {
                     self.push(" ");
                 }

@@ -29,15 +29,22 @@ The output is only as safe as the text the writer produces. Ask:
     Every string in the IR is an `Ident`, a `Literal`, or chosen from a fixed table.
     A new IR node or field holding free text, or a `push`/`format!` of a value that came from the input, is a finding.
 - **Are the three escapers still right?**
-    `Syntax::ident` (double `"`), `Syntax::string` (double `'`, `E'...'` with doubled backslashes when the value has
-    one) and `valid_number`. A string must read the same with `standard_conforming_strings` on and off. `Ident::new` must
+    `Syntax::ident` and `Syntax::member` (double `"`), `Syntax::string` (double `'`, `E'...'` with doubled backslashes
+    when the value has one) and `valid_number`. A string must read the same with `standard_conforming_strings` on and off. `Ident::new` must
     still reject NUL, empty names and names over 63 bytes.
+- **Is a name left unquoted that Postgres would read differently?**
+    With `quote_identifiers='minimal'` a name is bare only if it is plain lower case and, unless it follows a `.`, not
+    in `backend/keywords.rs`. A new place a name is written must use `ident` unless it really is after a dot.
+    `keywords_and_quoting` in `tests/postgres.rs` checks the list against the server.
 - **Can two tokens run together or change precedence?**
-    Nested expressions are parenthesised and tokens are separated by spaces. Look for a new construct written without
-    either (`- -1` becoming a comment, `a OR b AND c` regrouping).
+    Operands are parenthesised and tokens are separated by spaces. The exceptions are `Writer::top`, for an expression
+    with a clause or list item to itself, and `Writer::chained`, for comparisons inside an `AND`/`OR` chain. A new
+    caller of `top` must be a position where the grammar takes a whole expression, and a new kind of operand left bare
+    by `chained` must bind tighter than `AND` and `OR` in Postgres. Look for a new construct written without spaces
+    (`- -1` becoming a comment).
 - **Is anything written unqualified that Postgres could resolve to something else?**
-    Columns are written `"table"."column"`, default functions `pg_catalog.name`, and tables with their schema when the
-    rule or `default_schema` gives one. The bare forms that exist (insert columns, `SET` targets, `KeyExpr::Output`,
+    Columns are written `table.column`, default functions `pg_catalog.name` when `qualify_builtins` is set, and
+    tables with their schema when the rule or `default_schema` gives one. The bare forms that exist (insert columns, `SET` targets, `KeyExpr::Output`,
     `KeyExpr::Position`) each need a reason they cannot name something unchecked.
 - **Can the IR hold something Postgres's grammar does not have?**
     Prefer a type that cannot represent it over a check: `f(*)` has no `DISTINCT`, `NULLIF` has two arguments,

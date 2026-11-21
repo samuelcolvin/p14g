@@ -12,7 +12,7 @@ mod common;
 use std::env;
 
 use common::{accept_cases, params_policy, policy};
-use pgsafe::{Literals, Policy};
+use pgsafe::{Layout, Literals, Policy, QuoteIdentifiers, Select, functions};
 use postgres::{Client, Config, NoTls, SimpleQueryMessage, error::SqlState};
 
 const ROLE: &str = "pgsafe_test_role";
@@ -128,6 +128,8 @@ fn postgres_agrees() {
     only_leaves_out_children(&mut client);
     default_schema_is_not_shadowed(&mut client);
     generated_grants(&mut client);
+    keywords_and_quoting(&mut client);
+    function_names(&mut client);
 }
 
 const NASTY: &[&str] = &[
@@ -247,7 +249,7 @@ fn star_allow(client: &mut Client) {
         .build()
         .unwrap();
     let safe = policy.rewrite("select * from v", &()).unwrap();
-    assert_eq!(safe.sql, r#"SELECT * FROM "v""#);
+    assert_eq!(safe.sql, "SELECT * FROM v");
     assert_eq!(run(client, &safe.sql, &[]).unwrap(), 3);
     assert!(policy.rewrite("select * from orders", &()).is_err());
 }
@@ -271,6 +273,7 @@ fn only_leaves_out_children(client: &mut Client) {
     let policy = policy();
     let mut rows = |sql: &str| {
         let safe = policy.rewrite(sql, &()).unwrap();
+        // `family` is a keyword in Postgres, so it stays quoted
         assert!(safe.sql.contains(r#"ONLY "family""#), "{}", safe.sql);
         run(client, &safe.sql, &[]).unwrap()
     };
@@ -311,7 +314,7 @@ fn default_schema_is_not_shadowed(client: &mut Client) {
         "delete from orders where id = 1 returning id",
     ] {
         let safe = qualified.rewrite(sql, &()).unwrap();
-        assert!(safe.sql.contains(r#""public"."orders""#), "{}", safe.sql);
+        assert!(safe.sql.contains("public.orders"), "{}", safe.sql);
         assert_eq!(run(client, &safe.sql, &[]).unwrap(), 1, "{}", safe.sql);
     }
 }
@@ -362,5 +365,127 @@ fn generated_grants(client: &mut Client) {
         }
         let safe = policy.rewrite(case.sql, &()).unwrap();
         run_as(client, &safe.sql).unwrap_or_else(|e| panic!("line {}: {}\n  {}", case.line, safe.sql, describe(&e)));
+    }
+}
+
+/// Minimal quoting leaves a name bare only when Postgres reads it back as the same name. That depends on
+/// pgsafe's keyword list being the server's, and on Postgres taking any word after a `.`.
+fn keywords_and_quoting(client: &mut Client) {
+    let server: Vec<String> = client
+        .query("SELECT word FROM pg_get_keywords() ORDER BY word", &[])
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(server.len() > 400);
+
+    // Every keyword, as a column name and as an alias, in both quoting modes, comes back as itself. A
+    // keyword missing from pgsafe's list would be written bare where it is an alias, and Postgres would
+    // read something else or refuse it.
+    for quote in [QuoteIdentifiers::Minimal, QuoteIdentifiers::Always] {
+        let policy: Policy = Policy::builder()
+            .select(Select::table("t"))
+            .quote_identifiers(quote)
+            .layout(Layout::Dense)
+            .build()
+            .unwrap();
+        for word in &server {
+            let sql = format!(r#"with t as (select 2 as "{word}") select t."{word}", 1 as "{word}" from t"#);
+            let safe = policy.rewrite(&sql, &()).unwrap_or_else(|e| panic!("{sql}: {e}"));
+            let row = client
+                .query_one(&safe.sql, &[])
+                .unwrap_or_else(|e| panic!("{}: {}", safe.sql, describe(&e)));
+            assert_eq!(row.columns()[0].name(), word, "{}", safe.sql);
+            assert_eq!(row.columns()[1].name(), word, "{}", safe.sql);
+            assert_eq!((row.get::<_, i32>(0), row.get::<_, i32>(1)), (2, 1), "{}", safe.sql);
+            if quote == QuoteIdentifiers::Minimal {
+                // after a dot nothing is quoted, on its own every keyword is
+                assert!(safe.sql.starts_with(&format!(
+                    r#"WITH t AS (SELECT 2 AS "{word}") SELECT t.{word}, 1 AS "{word}""#
+                )));
+            }
+        }
+    }
+
+    // names that are not plain lower case are quoted wherever they are
+    let policy: Policy = Policy::builder().layout(Layout::Dense).build().unwrap();
+    for name in [
+        "MiXed",
+        "with space",
+        "1starts_with_digit",
+        "a\"b",
+        "caf\u{e9}",
+        "dollar$",
+    ] {
+        let quoted = name.replace('"', "\"\"");
+        let sql = format!(r#"with t as (select 2 as "{quoted}") select t."{quoted}", 1 as "{quoted}" from t"#);
+        let safe = policy.rewrite(&sql, &()).unwrap();
+        assert!(safe.sql.contains(&format!(r#"t."{quoted}""#)), "{}", safe.sql);
+        let row = client
+            .query_one(&safe.sql, &[])
+            .unwrap_or_else(|e| panic!("{}: {e}", safe.sql));
+        assert_eq!((row.columns()[0].name(), row.columns()[1].name()), (name, name));
+    }
+}
+
+/// A function name is written bare unless Postgres would not read it as one. For every keyword on the
+/// server, a call to a function of that name must get as far as "no such function", in both quoting modes
+/// and with and without the schema: a syntax error means the name needed quotes it did not get.
+fn function_names(client: &mut Client) {
+    let keywords: Vec<String> = client
+        .query("SELECT word FROM pg_get_keywords() ORDER BY word", &[])
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    for quote in [QuoteIdentifiers::Minimal, QuoteIdentifiers::Always] {
+        let policy: Policy = Policy::builder()
+            .functions(keywords.iter().map(|word| format!("nowhere.{word}")))
+            .functions(keywords.iter().filter(|word| !functions::is_default(word)))
+            .quote_identifiers(quote)
+            .build()
+            .unwrap();
+        for word in &keywords {
+            for call in [
+                format!(r#"select "{word}"(1, 2, 3, 4, 5)"#),
+                format!(r#"select nowhere."{word}"(1)"#),
+            ] {
+                let Ok(safe) = policy.rewrite(&call, &()) else {
+                    // the keyword forms (COALESCE and the rest) take a fixed shape, which this is not
+                    continue;
+                };
+                // these three are grammar under their own name, so the call is real and it runs
+                if safe.sql.starts_with("SELECT COALESCE(")
+                    || safe.sql.starts_with("SELECT GREATEST(")
+                    || safe.sql.starts_with("SELECT LEAST(")
+                {
+                    client.simple_query(&safe.sql).unwrap();
+                    continue;
+                }
+                let error = client.simple_query(&safe.sql).expect_err(&safe.sql);
+                let code = error.code().map(SqlState::code);
+                // 42883: no function of that name and arguments. 3F000: no schema called `nowhere`.
+                assert!(
+                    matches!(code, Some("42883" | "3F000")),
+                    "{}: {}",
+                    safe.sql,
+                    describe(&error)
+                );
+            }
+        }
+    }
+
+    // and every default function, called by name, is found
+    let plain = policy();
+    let qualified: Policy = common::builder().qualify_builtins(true).build().unwrap();
+    for case in accept_cases() {
+        if case.sql.contains('$') && !case.sql.contains("$$") && !case.sql.contains("$tag$") {
+            continue;
+        }
+        for policy in [&plain, &qualified] {
+            let safe = policy.rewrite(case.sql, &()).unwrap();
+            run(client, &safe.sql, &[])
+                .unwrap_or_else(|e| panic!("line {}: {}\n  {}", case.line, safe.sql, describe(&e)));
+        }
     }
 }

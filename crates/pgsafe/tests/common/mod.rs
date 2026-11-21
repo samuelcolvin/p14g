@@ -1,12 +1,14 @@
 //! The policy and case files shared by the test suites.
 #![allow(dead_code, reason = "each test binary uses a different part of this module")]
 
-use pgsafe::{Delete, ErrorKind, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update};
+use pgsafe::{Delete, ErrorKind, Insert, Layout, Literals, Op, Policy, PolicyBuilder, Select, Update};
 
 /// The policy the case files are written against. `cases/schema.sql` grants a database role the same
 /// access, so Postgres can be used to check pgsafe's answers.
 pub fn builder() -> PolicyBuilder {
     Policy::builder()
+        // one statement per line, as the case files need
+        .layout(Layout::Dense)
         .select(Select::table("orders").columns(["id", "product", "qty", "customer_id"]))
         .select(Select::table("customers").columns(["id", "name"]))
         .select(Select::table("v"))

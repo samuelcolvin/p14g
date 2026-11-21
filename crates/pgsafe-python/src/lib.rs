@@ -827,6 +827,9 @@ impl PyPolicy {
         operators=None,
         star_behaviour="expand",
         literals="inline",
+        quote_identifiers="minimal",
+        layout="multiline",
+        qualify_builtins=false,
         max_rows=None,
         default_schema=None,
         dialect="postgres",
@@ -843,6 +846,9 @@ impl PyPolicy {
         operators: Option<Vec<String>>,
         star_behaviour: &str,
         literals: &str,
+        quote_identifiers: &str,
+        layout: &str,
+        qualify_builtins: bool,
         max_rows: Option<u64>,
         default_schema: Option<String>,
         dialect: &str,
@@ -856,6 +862,9 @@ impl PyPolicy {
             .default_functions(default_functions)
             .star_behaviour(Star::parse(star_behaviour).map_err(config)?)
             .literals(Literals::parse(literals).map_err(config)?)
+            .quote_identifiers(pgsafe::QuoteIdentifiers::parse(quote_identifiers).map_err(config)?)
+            .layout(pgsafe::Layout::parse(layout).map_err(config)?)
+            .qualify_builtins(qualify_builtins)
             .max_rows(max_rows)
             .dialect(pgsafe::Dialect::parse(dialect).map_err(config)?);
         if let Some(default_schema) = default_schema {

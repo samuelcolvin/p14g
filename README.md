@@ -29,11 +29,14 @@ policy = Policy(
 
 safe = policy.rewrite('select * from orders where qty < 3')
 print(safe.sql)
-#> SELECT "orders"."id", "orders"."product", "orders"."qty" FROM "orders" WHERE ("orders"."qty" < 3)
+#> SELECT orders.id, orders.product, orders.qty
+#> FROM orders
+#> WHERE orders.qty < 3
 
 safe = policy.rewrite("insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42})
 print(safe.sql)
-#> INSERT INTO "orders" ("product", "qty", "tenant_id") VALUES ('tea', 2, 42)
+#> INSERT INTO orders (product, qty, tenant_id)
+#> VALUES ('tea', 2, 42)
 
 try:
     policy.rewrite('select * from pg_shadow')
@@ -76,6 +79,10 @@ It does not replace database privileges, and it cannot limit how much work a per
   Otherwise table names are written unqualified and Postgres resolves them through the `search_path`, where a
   temporary table or a table in an earlier schema with the same name is found first.
   Functions you add with `functions=[...]` are written as you name them, so give those a schema too.
+- Set `qualify_builtins=True` if that `search_path` has a schema that people you do not trust can create functions in.
+  Built-in functions are then written `pg_catalog.lower(...)`.
+  Postgres looks in `pg_catalog` first, but between functions with different argument types it picks the closest
+  match wherever it is in the path, so a `public.lower(varchar)` would be called for a `varchar` argument.
 - Restrict rows with views, not with pgsafe (see below).
 - Do not show database error messages to the author of the SQL unless you are content for them to see them.
   A unique-violation error says that a value exists.
@@ -96,11 +103,12 @@ sqlparser 0.64 prints the single literal in `SELECT 'x\'' UNION SELECT password 
 (the test `sqlparser_display_is_not_safe_to_emit` shows this).
 pgsafe's writer has no way to emit text it did not escape:
 
-- Identifiers are always double-quoted, with `"` doubled.
+- Identifiers are written in double quotes, with `"` doubled, unless they do not need them (see
+  [Output style](#output-style)).
   Names longer than 63 bytes are rejected, because Postgres truncates them.
 - String literals are written `'...'` with quotes doubled, or `E'...'` with backslashes doubled when the value contains
   a backslash. Both forms mean the same whether `standard_conforming_strings` is on or off.
-- Every nested expression is parenthesised and every token is separated by a space.
+- An expression that is an operand of another is parenthesised, and every token is separated by a space.
 - Comments are not carried over.
 
 sqlparser is not Postgres's parser, so the two can disagree about what the input means.
@@ -121,7 +129,7 @@ A statement is rejected unless a rule allows it.
 - `table` is `name` or `schema.name`, spelled as Postgres stores it.
   An unquoted name in the SQL is folded to lower case before it is compared, as Postgres does.
 - With `Policy(..., default_schema='public')`, an unqualified name in a rule or a statement means the table in that
-  schema, and is written `"public"."orders"`.
+  schema, and is written `public.orders`.
   Without it, a rule for `orders` only matches a statement that says `orders`, and the name is written unqualified.
 - Every mention of a column is a read and needs a `Select` rule: in a `WHERE`, `ORDER BY` or `JOIN`, in `RETURNING`,
   and on the right of a `SET`.
@@ -144,7 +152,7 @@ A statement is rejected unless a rule allows it.
 pgsafe has no access to your schema.
 A table has the columns its rules list, or an unknown set of columns when a rule allows all of them.
 
-Every column reference is written fully qualified, `"table"."column"`.
+Every column reference is written fully qualified, `table.column`.
 If Postgres would have resolved a name differently from pgsafe, the rewritten query fails in the database.
 An unqualified name that could belong to more than one table in the statement is rejected; qualify it.
 
@@ -153,7 +161,7 @@ column.
 
 `star_behaviour` controls `*`:
 
-- `expand` (default): `*` becomes the columns the rule lists. For a rule that allows all columns it becomes `"t".*`.
+- `expand` (default): `*` becomes the columns the rule lists. For a rule that allows all columns it becomes `t.*`.
 - `reject`: `*` is an error.
 - `allow`: `*` is left as it is, and is an error on a table whose rule lists columns.
 
@@ -169,8 +177,8 @@ That leaves out, among others, `repeat`, `lpad`, `format`, `regexp_*`, `generate
 `nextval`, `pg_sleep` and everything else named `pg_*`.
 `substring` is in the defaults, and `substring(text, text)` is a regular expression match.
 
-Default functions are written `pg_catalog.name(...)`, so a function of the same name earlier in the `search_path`
-is not called instead.
+Functions are written by name, as `lower(...)`.
+With `qualify_builtins=True` the default functions are written `pg_catalog.lower(...)`.
 
 ### Rows
 
@@ -203,7 +211,8 @@ pgsafe then writes `ONLY table` wherever a statement reads, updates or deletes i
 ```python
 policy = Policy(Select('family', columns=['id'], only=True))
 print(policy.rewrite('select * from family').sql)
-#> SELECT "family"."id" FROM ONLY "family"
+#> SELECT "family".id
+#> FROM ONLY "family"
 ```
 
 Do not set `only` for a partitioned table: the parent holds no rows of its own, so `ONLY` returns nothing.
@@ -227,6 +236,42 @@ A parameter has no type until Postgres infers one, which differs from an inline 
 - Postgres cannot infer a type for an argument of a function that takes any type, such as `concat(a, $1)`, and reports
   `could not determine data type of parameter`. The author has to write `'x'::text`.
 
+### Output style
+
+The output is written from pgsafe's own representation of the statement, so it does not keep the layout, comments or
+spelling of the input.
+Two options change how it looks without changing what it means.
+
+`layout='multiline'`, the default, puts each clause of the statement on its own line.
+Subqueries stay on one line.
+`layout='dense'` writes everything on one line.
+
+`quote_identifiers='minimal'`, the default, quotes a name only when it needs it:
+
+- when it is not made of lower case letters, digits and underscores, or starts with a digit;
+- when it is one of the 494 words `pg_get_keywords()` lists on Postgres 18, and does not follow a `.`.
+  Unquoted, `user` is the current role and `current_date` is a function call.
+  After a `.` Postgres takes any word as a name, so `o.user` needs no quotes.
+
+The name of a function is quoted when it is a keyword, except for `left`, `right` and `replace`: some keywords are
+grammar before a `(`, as in `position(a IN b)`.
+
+`quote_identifiers='always'` quotes every name.
+Use it if you run a Postgres version newer than pgsafe has been tested with: a keyword added later is not on the list.
+
+Parentheses are added so that the output never depends on operator precedence, with two exceptions.
+An expression that has a clause, a select item or a function argument to itself has none.
+A chain of `AND`, or of `OR`, has none around a comparison or test such as `a = 1`, `b IS NULL` or `c IN (...)`: that
+relies on `AND` and `OR` binding more loosely than comparisons.
+
+```python
+policy = Policy(Select('orders'))
+print(policy.rewrite('select id, "user" as "user" from orders where (qty + 1) * 2 > 4 and (a = 1 or b is null)').sql)
+#> SELECT orders.id, orders.user AS "user"
+#> FROM orders
+#> WHERE ((orders.qty + 1) * 2) > 4 AND (orders.a = 1 OR orders.b IS NULL)
+```
+
 ### Mappers
 
 A mapper replaces a node of a statement that has passed the policy.
@@ -243,7 +288,8 @@ def per_tenant(table: Table, context):
 
 policy = Policy(Select('events'), mappers=[per_tenant])
 print(policy.rewrite('select id from events', context=42).sql)
-#> SELECT "events"."id" FROM "tenants"."events_42" AS "events"
+#> SELECT events.id
+#> FROM tenants.events_42 AS events
 ```
 
 There are mappers for `Table`, `Column`, `Function` and `Literal`.

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     ast::{Column, Expr, Function, Ident, Literal, StatementKind, Table},
-    backend::{self, Backend},
+    backend::{self, Backend, Layout, QuoteIdentifiers, Style},
     check,
     dialect::Dialect,
     error::{Error, Result},
@@ -508,6 +508,9 @@ pub struct PolicyBuilder<C = ()> {
     operators: Option<Vec<Op>>,
     star: Star,
     literals: Literals,
+    quote_identifiers: QuoteIdentifiers,
+    layout: Layout,
+    qualify_builtins: bool,
     limits: Limits,
     max_rows: Option<u64>,
     default_schema: Option<String>,
@@ -529,6 +532,9 @@ impl<C> Default for PolicyBuilder<C> {
             operators: None,
             star: Star::default(),
             literals: Literals::default(),
+            quote_identifiers: QuoteIdentifiers::default(),
+            layout: Layout::default(),
+            qualify_builtins: false,
             limits: Limits::default(),
             max_rows: None,
             default_schema: None,
@@ -603,6 +609,31 @@ impl<C> PolicyBuilder<C> {
     #[must_use]
     pub fn literals(mut self, literals: Literals) -> Self {
         self.literals = literals;
+        self
+    }
+
+    /// Which identifiers are written in double quotes. The default is only the ones that need it.
+    #[must_use]
+    pub fn quote_identifiers(mut self, quote_identifiers: QuoteIdentifiers) -> Self {
+        self.quote_identifiers = quote_identifiers;
+        self
+    }
+
+    /// Whether each clause of the output goes on its own line, the default, or everything on one.
+    #[must_use]
+    pub fn layout(mut self, layout: Layout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Write the default functions as `pg_catalog.name(...)`. Off by default.
+    ///
+    /// Postgres looks in `pg_catalog` first, but among functions with different argument types it picks the
+    /// best match wherever it is in the `search_path`. Turn this on if the role's `search_path` has a schema
+    /// that people you do not trust can create functions in.
+    #[must_use]
+    pub fn qualify_builtins(mut self, qualify_builtins: bool) -> Self {
+        self.qualify_builtins = qualify_builtins;
         self
     }
 
@@ -789,6 +820,9 @@ impl<C> PolicyBuilder<C> {
             default_operators,
             star: self.star,
             literals: self.literals,
+            quote_identifiers: self.quote_identifiers,
+            layout: self.layout,
+            qualify_builtins: self.qualify_builtins,
             limits: self.limits,
             max_rows: self.max_rows,
             default_schema: default_schema.clone(),
@@ -854,6 +888,9 @@ pub struct Policy<C = ()> {
     pub(crate) default_operators: OpSet,
     pub(crate) star: Star,
     literals: Literals,
+    quote_identifiers: QuoteIdentifiers,
+    layout: Layout,
+    qualify_builtins: bool,
     limits: Limits,
     max_rows: Option<u64>,
     /// The schema unqualified table names are given before they are looked up and written.
@@ -987,7 +1024,13 @@ impl<C> Policy<C> {
             check::apply_max_rows(&mut statement, max_rows)?;
         }
         map::apply(&self.mappers, &mut statement, context)?;
-        let written = backend::write(self.backend, &statement, self.literals, lowered.max_placeholder)?;
+        let style = Style {
+            literals: self.literals,
+            quote: self.quote_identifiers,
+            layout: self.layout,
+            qualify_builtins: self.qualify_builtins,
+        };
+        let written = backend::write(self.backend, &statement, style, lowered.max_placeholder)?;
         Ok(SafeSql {
             sql: written.sql,
             params: written.params,

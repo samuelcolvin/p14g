@@ -11,7 +11,9 @@ policy = Policy(Select('orders', columns=['id', 'product', 'qty']))
 
 safe = policy.rewrite('select id from orders where qty < 3')
 print(safe.sql)
-#> SELECT "orders"."id" FROM "orders" WHERE ("orders"."qty" < 3)
+#> SELECT orders.id
+#> FROM orders
+#> WHERE orders.qty < 3
 
 policy.rewrite('select * from pg_shadow')
 #> pgsafe.PgSafeError: reading from table "pg_shadow" is not allowed

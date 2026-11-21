@@ -33,10 +33,9 @@ fn assert_within_policy(sql: &str, line: usize) {
         );
     }
     for function in parsed.functions() {
-        let name = function
-            .strip_prefix("pg_catalog.")
-            .unwrap_or_else(|| panic!("line {line}: unqualified function {function:?} in {sql}"));
-        // `like_escape` is what Postgres's grammar turns `LIKE ... ESCAPE` into
+        // builtins are written by name unless the policy sets `qualify_builtins`; the grammar qualifies the
+        // ones it produces itself, `btrim` for `TRIM` and `like_escape` for `LIKE ... ESCAPE`
+        let name = function.strip_prefix("pg_catalog.").unwrap_or(&function);
         assert!(
             functions::is_default(name) || name == "btrim" || name == "like_escape",
             "line {line}: Postgres sees function {function:?} in {sql}"

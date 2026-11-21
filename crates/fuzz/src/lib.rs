@@ -148,9 +148,9 @@ pub fn check(sql: &str) {
             );
         }
         for function in parsed.functions() {
-            let allowed = function
-                .strip_prefix("pg_catalog.")
-                .is_some_and(|name| functions::is_default(name) || name == "btrim" || name == "like_escape");
+            // builtins are written by name; the grammar qualifies the ones it produces itself
+            let name = function.strip_prefix("pg_catalog.").unwrap_or(&function);
+            let allowed = functions::is_default(name) || name == "btrim" || name == "like_escape";
             assert!(
                 allowed,
                 "Postgres sees function {function:?}\n input: {sql}\noutput: {}",
