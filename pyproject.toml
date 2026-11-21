@@ -1,0 +1,59 @@
+[project]
+name = "pgsafe-workspace"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9",
+    "pytest",
+    "pytest-pretty",
+    "dirty-equals",
+]
+linting = [
+    "ruff",
+    "basedpyright",
+    # for `python -m mypy.stubtest`, which checks pgsafe.pyi against the built module
+    "mypy",
+]
+
+[tool.uv]
+package = false
+# only use package versions that have been published for at least 7 days
+exclude-newer = "7 days"
+
+[tool.uv.workspace]
+members = ["crates/pgsafe-python"]
+
+[tool.uv.sources]
+pgsafe = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["crates/pgsafe-python/tests"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = [
+    "Q",      # https://docs.astral.sh/ruff/rules/#flake8-quotes-q
+    "RUF100", # https://docs.astral.sh/ruff/rules/unused-noqa/
+    "I",      # https://docs.astral.sh/ruff/rules/#isort-i
+    "FA",     # https://docs.astral.sh/ruff/rules/#flake8-future-annotations-fa
+    "UP",     # https://docs.astral.sh/ruff/rules/#pyupgrade-up
+]
+flake8-quotes = { inline-quotes = "single", multiline-quotes = "double" }
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.basedpyright]
+include = ["crates/pgsafe-python/pgsafe.pyi", "crates/pgsafe-python/tests"]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+reportMissingModuleSource = false

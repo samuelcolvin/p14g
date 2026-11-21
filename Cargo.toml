@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pgsafe"]
+members = ["crates/pgsafe", "crates/pgsafe-python"]
 exclude = ["crates/fuzz"]
 resolver = "3"
 
