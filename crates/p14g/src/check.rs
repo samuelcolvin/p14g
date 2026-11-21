@@ -48,6 +48,13 @@ pub(crate) fn apply_max_rows(statement: &mut Statement, max_rows: u64) -> Result
     let Statement::Query(query) = statement else {
         return Ok(());
     };
+    // Postgres reads `(q) LIMIT n` as `q` with the `LIMIT` added, and refuses it when `q` has a `LIMIT` of its
+    // own, so the limit to lower is the one on the outermost query in a chain of parentheses that has one
+    let query = if chain_has_limit(query) {
+        limited_query(query)
+    } else {
+        query
+    };
     let cap = || Some(Expr::Literal(Literal::Number(max_rows.to_string())));
     match &query.limit {
         None => query.limit = cap(),
@@ -62,6 +69,24 @@ pub(crate) fn apply_max_rows(statement: &mut Statement, max_rows: u64) -> Result
         }
     }
     Ok(())
+}
+
+/// Whether `query`, or a parenthesised query that is its whole body, has a `LIMIT`.
+fn chain_has_limit(query: &Query) -> bool {
+    query.limit.is_some() || matches!(&query.body, SetExpr::Query(inner) if chain_has_limit(inner))
+}
+
+/// The outermost query with a `LIMIT` in `query` and the parenthesised queries that are its whole body, or the
+/// innermost of them when none has one.
+fn limited_query(query: &mut Query) -> &mut Query {
+    // decided before borrowing the body, which the borrow checker cannot see is given back on the other path
+    if query.limit.is_some() || !matches!(query.body, SetExpr::Query(_)) {
+        return query;
+    }
+    let SetExpr::Query(inner) = &mut query.body else {
+        unreachable!("the body was a query a line above")
+    };
+    limited_query(inner)
 }
 
 /// One table, view, subquery or CTE in a `FROM` clause, or the target of a write.

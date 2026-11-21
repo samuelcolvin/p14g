@@ -621,6 +621,28 @@ fn max_rows() {
         "(SELECT orders.id FROM orders) UNION (SELECT orders.id FROM orders) LIMIT 100"
     );
     assert_eq!(kind(&policy, "select id from orders limit $1"), ErrorKind::Denied);
+
+    // Postgres reads `(q) LIMIT n` as `q` with the `LIMIT` added, and refuses it when `q` has one already, so
+    // the limit inside the parentheses is the one lowered
+    assert_eq!(
+        rewrite(&policy, "(select id from orders limit 500)"),
+        "(SELECT orders.id FROM orders LIMIT 100)"
+    );
+    assert_eq!(
+        rewrite(&policy, "((select id from orders limit 5)) order by id"),
+        "((SELECT orders.id FROM orders LIMIT 5)) ORDER BY id"
+    );
+    assert_eq!(
+        rewrite(&policy, "(select id from orders)"),
+        "(SELECT orders.id FROM orders) LIMIT 100"
+    );
+    assert_eq!(
+        rewrite(
+            &policy,
+            "(select id from orders limit 500) union (select id from orders)"
+        ),
+        "(SELECT orders.id FROM orders LIMIT 500) UNION (SELECT orders.id FROM orders) LIMIT 100"
+    );
 }
 
 #[test]

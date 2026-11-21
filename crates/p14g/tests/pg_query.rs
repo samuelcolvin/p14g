@@ -7,7 +7,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{accept_cases, params_policy, policy};
+use common::{accept_cases, builder, params_policy, policy};
 use p14g::functions;
 
 const TABLES: &[&str] = &[
@@ -47,9 +47,12 @@ fn assert_within_policy(sql: &str, line: usize) {
 fn postgres_parser_agrees() {
     let inline = policy();
     let params = params_policy();
+    // the `LIMIT` that `max_rows` adds must leave every statement one that Postgres accepts
+    let capped = builder().max_rows(Some(10)).build().unwrap();
     for case in accept_cases() {
         assert_within_policy(&inline.rewrite(case.sql, &()).unwrap().sql, case.line);
         assert_within_policy(&params.rewrite(case.sql, &()).unwrap().sql, case.line);
+        assert_within_policy(&capped.rewrite(case.sql, &()).unwrap().sql, case.line);
     }
 }
 

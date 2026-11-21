@@ -151,6 +151,13 @@ select id from orders union select id from customers intersect select id from or
 (select id from orders order by id limit 1) union (select id from customers) order by 1
 => (SELECT orders.id FROM orders ORDER BY orders.id LIMIT 1) UNION (SELECT customers.id FROM customers) ORDER BY 1
 
+-- a whole statement in parentheses: Postgres reads clauses outside them as part of the query inside
+(select id from orders limit 3)
+=> (SELECT orders.id FROM orders LIMIT 3)
+
+((select id from orders limit 3)) order by id
+=> ((SELECT orders.id FROM orders LIMIT 3)) ORDER BY id
+
 select o.id from orders o where o.qty > (select avg(o2.qty) from orders o2 where o2.customer_id = o.customer_id)
 => SELECT o.id FROM orders AS o WHERE o.qty > (SELECT avg(o2.qty) FROM orders AS o2 WHERE o2.customer_id = o.customer_id)
 

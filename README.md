@@ -383,6 +383,8 @@ p14g does not recurse down such a tree beyond the nesting limit, but freeing it 
 to 1 KiB per token before parsing when the thread has less than that left.
 
 `max_rows` adds a `LIMIT` to a `SELECT` that has none and lowers one that is larger.
+For a statement in parentheses, such as `(select id from orders limit 500)`, it lowers the `LIMIT` inside them,
+since Postgres refuses a second one outside.
 Postgres has no `LIMIT` for `UPDATE` or `DELETE`: to cap the rows a write touches, run it in a transaction and check
 the row count before committing.
 
