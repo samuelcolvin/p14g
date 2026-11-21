@@ -1,0 +1,275 @@
+# pgsafe
+
+Check untrusted SQL against an allowlist and rewrite it so it is safe to run on Postgres.
+
+pgsafe is for running SQL written by someone you do not trust, such as an LLM or an end user, directly against a
+Postgres database.
+You give it rules for which tables, columns, operators and functions may be used.
+It parses each statement with [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs), checks it against the
+rules, and writes out new SQL for you to run.
+It never connects to a database.
+
+It is a Rust library, `pgsafe`, with a Python package of the same name built with PyO3.
+
+```python
+from pgsafe import Delete, Insert, PgSafeError, Policy, Select, Update
+
+
+def add_tenant(context):
+    return {'tenant_id': context['tenant_id']}
+
+
+policy = Policy(
+    Select('orders', columns=['id', 'product', 'qty']),
+    Insert('orders', columns=['product', 'qty'], extra=add_tenant),
+    Update('orders', columns=['qty']),
+    Delete('orders'),
+)
+
+safe = policy.check('select * from orders where qty < 3')
+print(safe.sql)
+#> SELECT "orders"."id", "orders"."product", "orders"."qty" FROM "orders" WHERE ("orders"."qty" < 3)
+
+safe = policy.check("insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42})
+print(safe.sql)
+#> INSERT INTO "orders" ("product", "qty", "tenant_id") VALUES ('tea', 2, 42)
+
+try:
+    policy.check('select * from pg_shadow')
+except PgSafeError as e:
+    print(e.kind, e)
+    #> denied reading from table "pg_shadow" is not allowed
+```
+
+The same policy in Rust:
+
+```rust
+use pgsafe::{Delete, Insert, Policy, Select, Update};
+
+struct Request { tenant_id: i64 }
+
+let policy: Policy<Request> = Policy::builder()
+    .select(Select::table("orders").columns(["id", "product", "qty"]))
+    .insert(Insert::table("orders").columns(["product", "qty"]).extra(|r: &Request| [("tenant_id", r.tenant_id)]))
+    .update(Update::table("orders").columns(["qty"]))
+    .delete(Delete::table("orders"))
+    .build()?;
+
+let safe = policy.check("select * from orders where qty < 3", &Request { tenant_id: 42 })?;
+```
+
+## What you must also do
+
+pgsafe is one layer of defence.
+It does not replace database privileges, and it cannot limit how much work a permitted query does.
+
+- Connect as a role that has been granted only what the policy allows.
+  `crates/pgsafe/tests/cases/schema.sql` shows grants that match a policy.
+- Set `statement_timeout` and `lock_timeout` for that role.
+  A cross join of two large tables you allowed is a valid query.
+- Use a UTF-8 `client_encoding`, or set `literals='params'`.
+  Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
+  a character.
+- Restrict rows with views, not with pgsafe (see below).
+- Do not show database error messages to the author of the SQL unless you are content for them to see them.
+  A unique-violation error says that a value exists.
+
+## How it works
+
+1. Parse the input with sqlparser. Exactly one statement is accepted.
+2. Lower sqlparser's AST into pgsafe's own representation (`pgsafe::ast`).
+   Only `SELECT`, `INSERT`, `UPDATE` and `DELETE`, and a subset of their syntax, can be represented.
+   Everything else is rejected with an `unsupported` error.
+3. Bind every column reference to a table in the statement and check it against the rules.
+4. Run your mappers, if any.
+5. Write the statement out from pgsafe's representation.
+
+pgsafe does not print sqlparser's AST back out.
+sqlparser 0.64 prints the single literal in `SELECT 'x\'' UNION SELECT password FROM secrets --'` as
+`'x\' UNION SELECT password FROM secrets --'`, which Postgres reads as a string, a `UNION` and a comment
+(the test `sqlparser_display_is_not_safe_to_emit` shows this).
+pgsafe's writer has no way to emit text it did not escape:
+
+- Identifiers are always double-quoted, with `"` doubled.
+  Names longer than 63 bytes are rejected, because Postgres truncates them.
+- String literals are written `'...'` with quotes doubled, or `E'...'` with backslashes doubled when the value contains
+  a backslash. Both forms mean the same whether `standard_conforming_strings` is on or off.
+- Every nested expression is parenthesised and every token is separated by a space.
+- Comments are not carried over.
+
+sqlparser is not Postgres's parser, so the two can disagree about what the input means.
+That does not matter for safety: what pgsafe checks is its own representation, and what Postgres runs is text written
+from that representation.
+
+## Rules
+
+A statement is rejected unless a rule allows it.
+
+| Rule | Allows |
+| --- | --- |
+| `Select(table, columns=None, operators=None)` | Reading the listed columns, or any column without `columns`. |
+| `Insert(table, columns=None, extra=None)` | `INSERT ... VALUES` setting the listed columns. |
+| `Update(table, columns=None, allow_unfiltered=False)` | `UPDATE ... SET` on the listed columns. |
+| `Delete(table, allow_unfiltered=False)` | `DELETE FROM`. |
+
+- `table` is `name` or `schema.name`, spelled as Postgres stores it.
+  An unquoted name in the SQL is folded to lower case before it is compared, as Postgres does.
+- Every mention of a column is a read and needs a `Select` rule: in a `WHERE`, `ORDER BY` or `JOIN`, in `RETURNING`,
+  and on the right of a `SET`.
+  A table with an `Insert` rule and no `Select` rule can be inserted into and nothing else.
+- Several rules for one table are alternatives.
+  Each use of the table must be allowed in full by one of them; their columns and operators are not combined.
+- `operators` lists what may be applied to the table's columns.
+  Without it the policy's `operators` apply, which default to everything except regular expressions (`~` and
+  `SIMILAR TO`).
+- `allow_unfiltered` permits an `UPDATE` or `DELETE` with no `WHERE`.
+  Rejecting those catches mistakes. It is not a security control, because `WHERE true` passes.
+- `extra` is a dict, or a callable taking the `context` you pass to `check()` and returning a dict, of columns pgsafe
+  adds to every inserted row.
+  A statement that sets one of those columns itself is rejected.
+
+### Columns
+
+pgsafe has no access to your schema.
+A table has the columns its rules list, or an unknown set of columns when a rule allows all of them.
+
+Every column reference is written fully qualified, `"table"."column"`.
+If Postgres would have resolved a name differently from pgsafe, the rewritten query fails in the database.
+An unqualified name that could belong to more than one table in the statement is rejected; qualify it.
+
+Whole-row references such as `SELECT orders FROM orders` or `row_to_json(o)` are rejected, because `orders` is not a
+column.
+
+`star_behaviour` controls `*`:
+
+- `expand` (default): `*` becomes the columns the rule lists. For a rule that allows all columns it becomes `"t".*`.
+- `reject`: `*` is an error.
+- `allow`: `*` is left as it is, and is an error on a table whose rule lists columns.
+
+### Functions
+
+Functions are matched by name, so every overload of an allowed name is allowed.
+`pgsafe.DEFAULT_FUNCTIONS` (`pgsafe::functions` in Rust) is allowed unless you pass `default_functions=False`.
+`functions=[...]` adds names and `deny_functions=[...]` removes them.
+
+The defaults have no side effects, read nothing but their arguments, and cannot be made to allocate much more than
+their input.
+That leaves out, among others, `repeat`, `lpad`, `format`, `regexp_*`, `generate_series`, `current_setting`,
+`nextval`, `pg_sleep` and everything else named `pg_*`.
+`substring` is in the defaults, and `substring(text, text)` is a regular expression match.
+
+Default functions are written `pg_catalog.name(...)`, so a function of the same name earlier in the `search_path`
+is not called instead.
+
+### Rows
+
+pgsafe does not restrict rows.
+Use a view, and list the view in the policy:
+
+```sql
+CREATE VIEW cheap_orders WITH (security_barrier = true) AS
+    SELECT id, product, qty FROM orders WHERE qty < 10
+    WITH CHECK OPTION;
+GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO app_role;
+```
+
+A view over one table with no aggregates is updatable, and an `UPDATE` or `DELETE` through it only touches rows that
+match its `WHERE`.
+`WITH CHECK OPTION` rejects an insert or update that would produce a row outside the view.
+`security_barrier` stops Postgres evaluating the caller's conditions before the view's, which closes error and timing
+side channels.
+
+### Literals and parameters
+
+`check()` returns `SafeSql(sql, params, kind, tables)`.
+
+With `literals='inline'`, the default, string literals are escaped into `sql` and `params` is empty.
+
+With `literals='params'`, each string literal becomes a placeholder and its value is appended to `params`.
+Numbers, booleans and `NULL` stay inline.
+Placeholders already in the input keep their numbers and pgsafe's are numbered after the highest of them, so append
+`params` to your own parameters.
+
+A parameter has no type until Postgres infers one, which differs from an inline literal in two ways:
+
+- Drivers that send parameters as text (psycopg) behave as inline does.
+  Drivers that encode by inferred type (asyncpg) refuse a `str` for a `date` or `integer` parameter.
+- Postgres cannot infer a type for an argument of a function that takes any type, such as `concat(a, $1)`, and reports
+  `could not determine data type of parameter`. The author has to write `'x'::text`.
+
+### Mappers
+
+A mapper replaces a node of a statement that has passed the policy.
+It is called with the node and the `context`.
+
+```python
+from pgsafe import Policy, Select, Table, mapper
+
+
+@mapper(Table)
+def per_tenant(table: Table, context):
+    return Table(f'{table.name}_{context}', schema='tenants', alias=table.alias)
+
+
+policy = Policy(Select('events'), mappers=[per_tenant])
+print(policy.check('select id from events', context=42).sql)
+#> SELECT "events"."id" FROM "tenants"."events_42" AS "events"
+```
+
+There are mappers for `Table`, `Column`, `Function` and `Literal`.
+What a mapper returns is not checked against the policy, so a mapper is trusted code.
+It is written by the same writer as the rest of the statement, so it cannot produce unescaped SQL.
+
+## Supported SQL
+
+- `SELECT` with `DISTINCT`, joins with `ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT` and `OFFSET`.
+- Subqueries, derived tables with an alias, non-recursive CTEs, `UNION`, `INTERSECT` and `EXCEPT`.
+- Comparison, arithmetic and boolean operators, `LIKE`, `ILIKE`, `IN`, `BETWEEN`, `IS`, `CASE`, `CAST` and `::` to a
+  fixed list of types, `EXTRACT`, the JSON operators `->`, `->>`, `#>`, `#>>`, `@>` and `<@`.
+- Function calls with `DISTINCT`, `ORDER BY`, `FILTER` and `OVER (PARTITION BY ... ORDER BY ...)`.
+- `INSERT INTO t (columns) VALUES ...`, `UPDATE t SET ... WHERE ...` and `DELETE FROM t WHERE ...`, each with
+  `RETURNING`.
+
+Not supported, and rejected: every other kind of statement, `SELECT INTO`, `FOR UPDATE`, `JOIN ... USING`,
+`NATURAL JOIN`, `LATERAL`, table functions, `TABLESAMPLE`, `WITH RECURSIVE`, data-modifying CTEs, `DISTINCT ON`,
+`GROUPING SETS`, window frames, arrays and row constructors, `COLLATE`, `AT TIME ZONE`, `ANY`/`ALL`,
+`OPERATOR(...)` and custom operators, `INSERT ... SELECT`, `ON CONFLICT`, `DEFAULT`, `UPDATE ... FROM` and
+`DELETE ... USING`.
+
+`crates/pgsafe/tests/cases/accept.sql` and `reject.sql` list examples of both, with the SQL each accepted statement
+becomes.
+
+## Limits
+
+`Limits` bounds the input before any rule is checked: 64 KiB of SQL, 10,000 tokens, nesting 50 deep, 8 joins,
+16 subqueries, 8 set operations, 1,000 items in an `IN` list, 200 select items and 1,000 inserted rows by default.
+
+sqlparser builds chains such as `1+1+1+...` with a loop, so the parsed tree can be half as deep as the statement has
+tokens whatever the nesting limit is.
+pgsafe does not recurse down such a tree beyond the nesting limit, but freeing it is recursive, so the stack is grown
+to 1 KiB per token before parsing when the thread has less than that left.
+
+`max_rows` adds a `LIMIT` to a `SELECT` that has none and lowers one that is larger.
+Postgres has no `LIMIT` for `UPDATE` or `DELETE`: to cap the rows a write touches, run it in a transaction and check
+the row count before committing.
+
+## Development
+
+```bash
+make install        # python environment and pre-commit hooks
+make test           # rust tests
+make postgres       # start Postgres 18 in Docker for the tests below
+make test-postgres  # rust tests, including the ones that run pgsafe's output on Postgres
+make python-test    # build the python package and run its tests
+make lint           # rustfmt, clippy, ruff, basedpyright, stubtest
+make fuzz-mutate    # fuzz with mutations of accepted statements
+```
+
+The Postgres tests create a role whose grants match the test policy and run every accepted statement as that role.
+A permission error or a syntax error from Postgres fails the test.
+The fuzz targets check the same thing with [libpg_query](https://github.com/pganalyze/libpg_query), Postgres's parser
+as a library.
+
+## License
+
+MIT

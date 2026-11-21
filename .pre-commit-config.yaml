@@ -1,0 +1,39 @@
+fail_fast: true
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: no-commit-to-branch # prevent direct commits to main branch
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        # expected output in the case files can end in a space or contain a tab
+        exclude: 'tests/cases/.*\.sql'
+      - id: check-added-large-files
+
+  - repo: https://github.com/google/yamlfmt
+    rev: v0.21.0
+    hooks:
+      - id: yamlfmt
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.23.1
+    hooks:
+      - id: zizmor
+
+  - repo: local
+    hooks:
+      - id: lint-rs
+        name: Lint Rust
+        entry: make lint-rs
+        types: [rust]
+        language: system
+        pass_filenames: false
+      - id: lint-py
+        name: Lint Python
+        entry: make lint-py
+        types_or: [python, pyi]
+        language: system
+        pass_filenames: false
