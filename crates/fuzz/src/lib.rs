@@ -4,12 +4,12 @@
 //!
 //! * Postgres's own parser (`libpg_query`) must parse the output as one statement that only names tables and
 //!   functions the policy allows;
-//! * pgsafe reading its own output back must produce the same SQL again;
-//! * if `PGSAFE_TEST_DATABASE_URL` is set, Postgres itself must be willing to plan the output for a role
+//! * p14g reading its own output back must produce the same SQL again;
+//! * if `P14G_TEST_DATABASE_URL` is set, Postgres itself must be willing to plan the output for a role
 //!   that has been granted exactly what the policy allows.
 //!
 //! The last is the only one that sees columns. `EXPLAIN` runs Postgres's permission checks without running
-//! the statement, so a column, table or whole-row reference that pgsafe let through but the grants do not
+//! the statement, so a column, table or whole-row reference that p14g let through but the grants do not
 //! cover comes back as "permission denied".
 
 use std::{
@@ -18,7 +18,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use pgsafe::{Delete, ErrorKind, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update, functions};
+use p14g::{Delete, ErrorKind, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update, functions};
 use postgres::{Client, Config, NoTls, error::SqlState};
 
 /// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
@@ -45,7 +45,7 @@ const TABLES: &[&str] = &["orders", "customers", "v", "app.events", "limited", "
 static INLINE: LazyLock<Policy> = LazyLock::new(|| builder().build().unwrap());
 static PARAMS: LazyLock<Policy> = LazyLock::new(|| builder().literals(Literals::Params).build().unwrap());
 
-const ROLE: &str = "pgsafe_fuzz_role";
+const ROLE: &str = "p14g_fuzz_role";
 
 /// Tables for the fuzz policy, each with columns the policy does not allow, and one table it does not
 /// name at all. Every statement can be repeated, because fuzz processes share the database.
@@ -60,22 +60,22 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS limited (a int, b int, c int);
     CREATE TABLE IF NOT EXISTS audit (id int, message text, tenant_id int);
     CREATE TABLE IF NOT EXISTS secrets (id int, password text);
-    DO $$ BEGIN CREATE ROLE pgsafe_fuzz_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    DO $$ BEGIN CREATE ROLE p14g_fuzz_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ";
 
 /// A connection acting as a role with the grants the fuzz policy generates, or `None` without a database.
 static DATABASE: LazyLock<Option<Mutex<Client>>> = LazyLock::new(|| {
-    let url = env::var("PGSAFE_TEST_DATABASE_URL").ok()?;
+    let url = env::var("P14G_TEST_DATABASE_URL").ok()?;
     let mut config: Config = url
         .parse()
-        .expect("PGSAFE_TEST_DATABASE_URL is not a valid connection string");
+        .expect("P14G_TEST_DATABASE_URL is not a valid connection string");
     let mut admin = config
         .connect(NoTls)
-        .expect("cannot connect to PGSAFE_TEST_DATABASE_URL");
-    if let Err(e) = admin.batch_execute("CREATE DATABASE pgsafe_fuzz") {
+        .expect("cannot connect to P14G_TEST_DATABASE_URL");
+    if let Err(e) = admin.batch_execute("CREATE DATABASE p14g_fuzz") {
         assert_eq!(e.code(), Some(&SqlState::DUPLICATE_DATABASE), "{e}");
     }
-    config.dbname("pgsafe_fuzz");
+    config.dbname("p14g_fuzz");
     let mut client = config.connect(NoTls).unwrap();
     // other fuzz processes may be doing the same setup, and concurrent GRANTs on one table fail
     client.batch_execute("SELECT pg_advisory_lock(7347)").unwrap();
@@ -93,7 +93,7 @@ static DATABASE: LazyLock<Option<Mutex<Client>>> = LazyLock::new(|| {
 /// Ask Postgres to plan `output` as the restricted role.
 ///
 /// Most errors mean nothing here: the fuzzer writes statements that are allowed but wrong, such as a text
-/// column added to a number, and the view `v` accepts any column name. Three do mean pgsafe got it wrong.
+/// column added to a number, and the view `v` accepts any column name. Three do mean p14g got it wrong.
 fn explain(input: &str, output: &str) {
     let Some(database) = &*DATABASE else {
         return;

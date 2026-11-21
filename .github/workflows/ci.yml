@@ -70,7 +70,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # the tests in crates/pgsafe/tests/postgres.rs run pgsafe's output on a real database
+    # the tests in crates/p14g/tests/postgres.rs run p14g's output on a real database
     services:
       postgres:
         image: postgres:18
@@ -85,7 +85,7 @@ jobs:
           --health-retries 10
 
     env:
-      PGSAFE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      P14G_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,10 +104,10 @@ jobs:
           lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-on-failure: true
 
-      - run: cargo test -p samuelcolvin-pgsafe
+      - run: cargo test -p p14g
 
       # without the test dependencies, to check the library alone builds on this version of rust
-      - run: cargo check -p samuelcolvin-pgsafe -p pgsafe-python
+      - run: cargo check -p p14g -p p14g-python
 
   test-python:
     name: test python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -175,7 +175,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # with a database the fuzz targets also ask Postgres to plan what pgsafe emits, as a role with the policy's grants
+    # with a database the fuzz targets also ask Postgres to plan what p14g emits, as a role with the policy's grants
     services:
       postgres:
         image: postgres:18
@@ -190,7 +190,7 @@ jobs:
           --health-retries 10
 
     env:
-      PGSAFE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      P14G_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -271,7 +271,7 @@ jobs:
         with:
           command: sdist
           args: --out dist
-          working-directory: crates/pgsafe-python
+          working-directory: crates/p14g-python
 
       # CPython wheels use the stable ABI (`abi3-py310` in Cargo.toml), so one wheel covers
       # every CPython version >= 3.10. Free-threaded builds don't support abi3, so maturin
@@ -282,14 +282,14 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --out dist --interpreter 3.10 3.14t
-          working-directory: crates/pgsafe-python
+          working-directory: crates/p14g-python
 
-      - run: ${{ matrix.ls || 'ls -lh' }} crates/pgsafe-python/dist/
+      - run: ${{ matrix.ls || 'ls -lh' }} crates/p14g-python/dist/
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pypi_files_${{ matrix.os }}_${{ matrix.target }}_${{ matrix.manylinux }}
-          path: crates/pgsafe-python/dist
+          path: crates/p14g-python/dist
 
   test-builds:
     name: test build on ${{ matrix.os }}
@@ -321,11 +321,11 @@ jobs:
       # install the built wheel, not the source tree, and run the tests against it
       - run: uv venv --no-project test-env
 
-      - run: uv pip install --python test-env --no-index --find-links dist pgsafe
+      - run: uv pip install --python test-env --no-index --find-links dist p14g
 
       - run: uv pip install --python test-env pytest
 
-      - run: uv run --no-project --python test-env pytest crates/pgsafe-python/tests
+      - run: uv run --no-project --python test-env pytest crates/p14g-python/tests
 
   # Used for branch protection checks, see https://github.com/marketplace/actions/alls-green#why
   check:
@@ -365,7 +365,7 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: auth
 
-      - run: cargo publish -p samuelcolvin-pgsafe
+      - run: cargo publish -p p14g
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

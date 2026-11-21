@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pgsafe", "crates/pgsafe-python"]
+members = ["crates/p14g", "crates/p14g-python"]
 exclude = ["crates/fuzz"]
 resolver = "3"
 
@@ -10,7 +10,7 @@ edition = "2024"
 license = "MIT"
 keywords = ["sql", "postgres", "security", "sandbox"]
 categories = ["database", "parser-implementations"]
-repository = "https://github.com/samuelcolvin/pgsafe/"
+repository = "https://github.com/samuelcolvin/p14g/"
 rust-version = "1.88"
 
 [workspace.dependencies]

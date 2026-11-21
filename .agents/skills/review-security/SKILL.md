@@ -5,7 +5,7 @@ description: Security review of the current branch against its merge base — SQ
 
 # Security review
 
-pgsafe takes SQL from an untrusted, potentially malicious author and returns SQL that the caller runs on their
+p14g takes SQL from an untrusted, potentially malicious author and returns SQL that the caller runs on their
 database. Review this branch on that basis.
 
 ```bash
@@ -112,7 +112,7 @@ Ask what the SQL author can now read, write or call that no rule names:
     `unwrap`, `expect`, indexing or slicing reachable from the input, integer overflow feeding a length or a
     placeholder number. In the Python package a panic becomes a `PanicException` that callers will not be catching.
 
-## The Python bindings (`crates/pgsafe-python`)
+## The Python bindings (`crates/p14g-python`)
 
 - **Can Python construct IR that skips validation?**
     Names must go through `Ident::new`; numbers must reach the writer as text that `valid_number` checks.
@@ -128,14 +128,14 @@ A claim that something is safe needs a test that would fail if it were not:
 
 - A statement in `tests/cases/accept.sql` or `reject.sql` for each new piece of syntax, allowed and refused.
 - `make test-postgres`: every accepted statement runs as a role whose grants mirror the test policy, so a permission
-    or syntax error from Postgres is a pgsafe bug. Extend `schema.sql` when the change needs a new kind of object.
+    or syntax error from Postgres is a p14g bug. Extend `schema.sql` when the change needs a new kind of object.
 - `make fuzz-mutate` for a few minutes after any change to lowering, the check or the writer, with
-    `PGSAFE_TEST_DATABASE_URL` set: without a database the fuzzer checks tables and functions but not columns. Add new syntax to
+    `P14G_TEST_DATABASE_URL` set: without a database the fuzzer checks tables and functions but not columns. Add new syntax to
     `SEEDS` or `FRAGMENTS` in `crates/fuzz/src/lib.rs` so the fuzzer reaches it.
 
 ## Report
 
-Per finding: the attack, `file:line`, the SQL (and policy) that triggers it, the SQL pgsafe emits, and the impact.
+Per finding: the attack, `file:line`, the SQL (and policy) that triggers it, the SQL p14g emits, and the impact.
 Demonstrate with a test or a run against Postgres rather than asserting where you can. Say which areas you checked and
 found clean; coverage matters as much as findings.
 

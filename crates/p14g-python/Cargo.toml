@@ -1,0 +1,26 @@
+[package]
+name = "p14g-python"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+repository = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+
+[dependencies]
+pyo3 = { workspace = true, features = ["abi3-py310", "generate-import-lib"] }
+p14g = { path = "../p14g" }
+
+[features]
+# make extensions visible to cargo vendor
+extension-module = []
+
+[lib]
+name = "p14g_python"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true

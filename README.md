@@ -1,19 +1,18 @@
-# pgsafe
+# Parental Guidance (p14g)
 
 Check untrusted SQL against an allowlist and rewrite it so it is safe to run on Postgres.
 
-pgsafe is for running SQL written by someone you do not trust, such as an LLM or an end user, directly against a
-Postgres database.
+Parental Guidance (p14g) is for running SQL written by someone you do not trust, such as an LLM or an end user,
+directly against a Postgres database.
 You give it rules for which tables, columns, operators and functions may be used.
 It parses each statement with [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs), checks it against the
 rules, and writes out new SQL for you to run.
 It never connects to a database.
 
-It is a Rust library, `pgsafe`, with a Python package of the same name built with PyO3.
-The crate is published as `samuelcolvin-pgsafe`, because `pgsafe` on crates.io is an unrelated project.
+It is a Rust library, `p14g`, with a Python package of the same name built with PyO3.
 
 ```python
-from pgsafe import Delete, Insert, PgSafeError, Policy, Select, Update
+from p14g import Delete, Insert, P14gError, Policy, Select, Update
 
 
 def add_tenant(context):
@@ -40,7 +39,7 @@ print(safe.sql)
 
 try:
     policy.rewrite('select * from pg_shadow')
-except PgSafeError as e:
+except P14gError as e:
     print(e.kind, e)
     #> denied reading from table "pg_shadow" is not allowed
 ```
@@ -48,7 +47,7 @@ except PgSafeError as e:
 The same policy in Rust:
 
 ```rust
-use pgsafe::{Delete, Insert, Policy, Select, Update};
+use p14g::{Delete, Insert, Policy, Select, Update};
 
 struct Request { tenant_id: i64 }
 
@@ -64,7 +63,7 @@ let safe = policy.rewrite("select * from orders where qty < 3", &Request { tenan
 
 ## What you must also do
 
-pgsafe is one layer of defence.
+p14g is one layer of defence.
 It does not replace database privileges, and it cannot limit how much work a permitted query does.
 
 - Connect as a role that has been granted only what the policy allows.
@@ -83,25 +82,25 @@ It does not replace database privileges, and it cannot limit how much work a per
   Built-in functions are then written `pg_catalog.lower(...)`.
   Postgres looks in `pg_catalog` first, but between functions with different argument types it picks the closest
   match wherever it is in the path, so a `public.lower(varchar)` would be called for a `varchar` argument.
-- Restrict rows with views, not with pgsafe (see below).
+- Restrict rows with views, not with p14g (see below).
 - Do not show database error messages to the author of the SQL unless you are content for them to see them.
   A unique-violation error says that a value exists.
 
 ## How it works
 
 1. Parse the input with sqlparser. Exactly one statement is accepted.
-2. Lower sqlparser's AST into pgsafe's own representation (`pgsafe::ast`).
+2. Lower sqlparser's AST into p14g's own representation (`p14g::ast`).
    Only `SELECT`, `INSERT`, `UPDATE` and `DELETE`, and a subset of their syntax, can be represented.
    Everything else is rejected with an `unsupported` error.
 3. Bind every column reference to a table in the statement and check it against the rules.
 4. Run your mappers, if any.
-5. Write the statement out from pgsafe's representation.
+5. Write the statement out from p14g's representation.
 
-pgsafe does not print sqlparser's AST back out.
+p14g does not print sqlparser's AST back out.
 sqlparser 0.64 prints the single literal in `SELECT 'x\'' UNION SELECT password FROM secrets --'` as
 `'x\' UNION SELECT password FROM secrets --'`, which Postgres reads as a string, a `UNION` and a comment
 (the test `sqlparser_display_is_not_safe_to_emit` shows this).
-pgsafe's writer has no way to emit text it did not escape:
+p14g's writer has no way to emit text it did not escape:
 
 - Identifiers are written in double quotes, with `"` doubled, unless they do not need them (see
   [Output style](#output-style)).
@@ -112,7 +111,7 @@ pgsafe's writer has no way to emit text it did not escape:
 - Comments are not carried over.
 
 sqlparser is not Postgres's parser, so the two can disagree about what the input means.
-That does not matter for safety: what pgsafe checks is its own representation, and what Postgres runs is text written
+That does not matter for safety: what p14g checks is its own representation, and what Postgres runs is text written
 from that representation.
 
 ## Rules
@@ -141,19 +140,19 @@ A statement is rejected unless a rule allows it.
   `SIMILAR TO`).
 - `allow_unfiltered` permits an `UPDATE` or `DELETE` with no `WHERE`.
   Rejecting those catches mistakes. It is not a security control, because `WHERE true` passes.
-- `only` makes pgsafe write the table as `ONLY table` (see [Inheritance and partitions](#inheritance-and-partitions)).
+- `only` makes p14g write the table as `ONLY table` (see [Inheritance and partitions](#inheritance-and-partitions)).
   Every `Select`, `Update` and `Delete` rule for one table must agree on it.
-- `extra` is a dict, or a callable taking the `context` you pass to `rewrite()` and returning a dict, of columns pgsafe
+- `extra` is a dict, or a callable taking the `context` you pass to `rewrite()` and returning a dict, of columns p14g
   adds to every inserted row.
   A statement that sets one of those columns itself is rejected.
 
 ### Columns
 
-pgsafe has no access to your schema.
+p14g has no access to your schema.
 A table has the columns its rules list, or an unknown set of columns when a rule allows all of them.
 
 Every column reference is written fully qualified, `table.column`.
-If Postgres would have resolved a name differently from pgsafe, the rewritten query fails in the database.
+If Postgres would have resolved a name differently from p14g, the rewritten query fails in the database.
 An unqualified name that could belong to more than one table in the statement is rejected; qualify it.
 
 Whole-row references such as `SELECT orders FROM orders` or `row_to_json(o)` are rejected, because `orders` is not a
@@ -168,7 +167,7 @@ column.
 ### Functions
 
 Functions are matched by name, so every overload of an allowed name is allowed.
-`pgsafe.DEFAULT_FUNCTIONS` (`pgsafe::functions` in Rust) is allowed unless you pass `default_functions=False`.
+`p14g.DEFAULT_FUNCTIONS` (`p14g::functions` in Rust) is allowed unless you pass `default_functions=False`.
 `functions=[...]` adds names and `deny_functions=[...]` removes them.
 
 The defaults have no side effects, read nothing but their arguments, and cannot be made to allocate much more than
@@ -182,7 +181,7 @@ With `qualify_builtins=True` the default functions are written `pg_catalog.lower
 
 ### Rows
 
-pgsafe does not restrict rows.
+p14g does not restrict rows.
 Use a view, and list the view in the policy:
 
 ```sql
@@ -206,7 +205,7 @@ and privileges are checked on the parent alone, so a role with no grant on a chi
 Only the parent's columns are reachable.
 
 If a table has inheritance children the policy should not reach, set `only=True` on its rules.
-pgsafe then writes `ONLY table` wherever a statement reads, updates or deletes it.
+p14g then writes `ONLY table` wherever a statement reads, updates or deletes it.
 
 ```python
 policy = Policy(Select('family', columns=['id'], only=True))
@@ -226,7 +225,7 @@ With `literals='inline'`, the default, string literals are escaped into `sql` an
 
 With `literals='params'`, each string literal becomes a placeholder and its value is appended to `params`.
 Numbers, booleans and `NULL` stay inline.
-Placeholders already in the input keep their numbers and pgsafe's are numbered after the highest of them, so append
+Placeholders already in the input keep their numbers and p14g's are numbered after the highest of them, so append
 `params` to your own parameters.
 
 A parameter has no type until Postgres infers one, which differs from an inline literal in two ways:
@@ -238,7 +237,7 @@ A parameter has no type until Postgres infers one, which differs from an inline 
 
 ### Output style
 
-The output is written from pgsafe's own representation of the statement, so it does not keep the layout, comments or
+The output is written from p14g's own representation of the statement, so it does not keep the layout, comments or
 spelling of the input.
 Two options change how it looks without changing what it means.
 
@@ -257,7 +256,7 @@ The name of a function is quoted when it is a keyword, except for `left`, `right
 grammar before a `(`, as in `position(a IN b)`.
 
 `quote_identifiers='always'` quotes every name.
-Use it if you run a Postgres version newer than pgsafe has been tested with: a keyword added later is not on the list.
+Use it if you run a Postgres version newer than p14g has been tested with: a keyword added later is not on the list.
 
 Parentheses are added so that the output never depends on operator precedence, with two exceptions.
 An expression that has a clause, a select item or a function argument to itself has none.
@@ -278,7 +277,7 @@ A mapper replaces a node of a statement that has passed the policy.
 It is called with the node and the `context`.
 
 ```python
-from pgsafe import Policy, Select, Table, mapper
+from p14g import Policy, Select, Table, mapper
 
 
 @mapper(Table)
@@ -315,7 +314,7 @@ Not supported, and rejected: every other kind of statement, `SELECT INTO`, `FOR 
 `OPERATOR(...)` and custom operators, `table *`, `INSERT ... SELECT`, `ON CONFLICT`, `DEFAULT`, `UPDATE ... FROM` and
 `DELETE ... USING`.
 
-`crates/pgsafe/tests/cases/accept.sql` and `reject.sql` list examples of both, with the SQL each accepted statement
+`crates/p14g/tests/cases/accept.sql` and `reject.sql` list examples of both, with the SQL each accepted statement
 becomes.
 
 ## Limits
@@ -325,7 +324,7 @@ becomes.
 
 sqlparser builds chains such as `1+1+1+...` with a loop, so the parsed tree can be half as deep as the statement has
 tokens whatever the nesting limit is.
-pgsafe does not recurse down such a tree beyond the nesting limit, but freeing it is recursive, so the stack is grown
+p14g does not recurse down such a tree beyond the nesting limit, but freeing it is recursive, so the stack is grown
 to 1 KiB per token before parsing when the thread has less than that left.
 
 `max_rows` adds a `LIMIT` to a `SELECT` that has none and lowers one that is larger.
@@ -338,7 +337,7 @@ the row count before committing.
 make install        # python environment and pre-commit hooks
 make test           # rust tests
 make postgres       # start Postgres 18 in Docker for the tests below
-make test-postgres  # rust tests, including the ones that run pgsafe's output on Postgres
+make test-postgres  # rust tests, including the ones that run p14g's output on Postgres
 make python-test    # build the python package and run its tests
 make lint           # rustfmt, clippy, ruff, basedpyright, stubtest
 make fuzz-mutate    # fuzz with mutations of accepted statements
@@ -347,10 +346,10 @@ make fuzz-mutate    # fuzz with mutations of accepted statements
 The Postgres tests create a role whose grants match the test policy and run every accepted statement as that role.
 A permission error or a syntax error from Postgres fails the test.
 
-The fuzz targets check each statement pgsafe accepts in two ways.
+The fuzz targets check each statement p14g accepts in two ways.
 [libpg_query](https://github.com/pganalyze/libpg_query), Postgres's parser as a library, must parse the output and see
 only allowed tables and functions.
-When `PGSAFE_TEST_DATABASE_URL` is set, they also run `EXPLAIN` on the output as a role granted `policy.grants()`.
+When `P14G_TEST_DATABASE_URL` is set, they also run `EXPLAIN` on the output as a role granted `policy.grants()`.
 `EXPLAIN` applies Postgres's permission checks without running the statement, so a column the policy should have
 refused is reported as a permission error.
 

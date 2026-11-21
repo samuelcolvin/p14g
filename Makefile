@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := all
-python_sources = crates/pgsafe-python/pgsafe.pyi crates/pgsafe-python/tests
+python_sources = crates/p14g-python/p14g.pyi crates/p14g-python/tests
 # where `make postgres` puts the database used by the integration tests
-PGSAFE_TEST_DATABASE_URL ?= postgres://postgres:postgres@127.0.0.1:54329/postgres
+P14G_TEST_DATABASE_URL ?= postgres://postgres:postgres@127.0.0.1:54329/postgres
 
 .PHONY: .uv
 .uv: ## Check that uv is installed
@@ -39,39 +39,39 @@ lint-py: python-dev ## Lint Python code with ruff, basedpyright and stubtest
 	uv run --group linting ruff check $(python_sources)
 	uv run --group linting basedpyright
 	# stubtest compares the stubs with the built module, hence python-dev
-	uv run --group linting python -m mypy.stubtest pgsafe --allowlist crates/pgsafe-python/stubtest-allowlist.txt
+	uv run --group linting python -m mypy.stubtest p14g --allowlist crates/p14g-python/stubtest-allowlist.txt
 
 .PHONY: lint
 lint: lint-rs lint-py ## Lint everything
 
 .PHONY: test
-test: ## Run the Rust tests. The ones that need Postgres are skipped unless PGSAFE_TEST_DATABASE_URL is set
+test: ## Run the Rust tests. The ones that need Postgres are skipped unless P14G_TEST_DATABASE_URL is set
 	cargo test --workspace
 
 .PHONY: postgres
 postgres: ## Start a throwaway Postgres in Docker for the integration tests
-	docker run -d --rm --name pgsafe-test -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:54329:5432 postgres:18
-	@echo 'stop it with: docker stop pgsafe-test'
+	docker run -d --rm --name p14g-test -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:54329:5432 postgres:18
+	@echo 'stop it with: docker stop p14g-test'
 
 .PHONY: test-postgres
 test-postgres: ## Run the Rust tests including the ones against Postgres (see `make postgres`)
-	PGSAFE_TEST_DATABASE_URL=$(PGSAFE_TEST_DATABASE_URL) cargo test --workspace
+	P14G_TEST_DATABASE_URL=$(P14G_TEST_DATABASE_URL) cargo test --workspace
 
 .PHONY: python-dev
 python-dev: .uv ## Build the python package into the virtualenv
-	uv run maturin develop --uv -m crates/pgsafe-python/Cargo.toml
+	uv run maturin develop --uv -m crates/p14g-python/Cargo.toml
 
 .PHONY: python-test
 python-test: python-dev ## Build the python package and run its tests
-	uv run pytest crates/pgsafe-python/tests
+	uv run pytest crates/p14g-python/tests
 
 .PHONY: testcov
 testcov: ## Run the Rust tests with coverage and print a summary
 	@cargo llvm-cov --version > /dev/null 2>&1 || echo 'Please run: `cargo install cargo-llvm-cov`'
 	cargo llvm-cov --workspace --summary-only
 
-# The fuzz targets also check their output against Postgres when PGSAFE_TEST_DATABASE_URL is set, see `make postgres`:
-#     PGSAFE_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/postgres make fuzz-mutate
+# The fuzz targets also check their output against Postgres when P14G_TEST_DATABASE_URL is set, see `make postgres`:
+#     P14G_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/postgres make fuzz-mutate
 .PHONY: fuzz
 fuzz: ## Fuzz `rewrite` with arbitrary input
 	cargo +nightly fuzz run --fuzz-dir crates/fuzz rewrite --release

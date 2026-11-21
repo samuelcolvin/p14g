@@ -1,2 +1,0 @@
-# the compiled module, which the package re-exports everything from
-pgsafe\.pgsafe

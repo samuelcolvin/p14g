@@ -1,5 +1,5 @@
 [project]
-name = "pgsafe-workspace"
+name = "p14g-workspace"
 version = "0.1.0"
 requires-python = ">=3.10"
 
@@ -13,7 +13,7 @@ dev = [
 linting = [
     "ruff",
     "basedpyright",
-    # for `python -m mypy.stubtest`, which checks pgsafe.pyi against the built module
+    # for `python -m mypy.stubtest`, which checks p14g.pyi against the built module
     "mypy",
 ]
 
@@ -23,13 +23,13 @@ package = false
 exclude-newer = "7 days"
 
 [tool.uv.workspace]
-members = ["crates/pgsafe-python"]
+members = ["crates/p14g-python"]
 
 [tool.uv.sources]
-pgsafe = { workspace = true }
+p14g = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["crates/pgsafe-python/tests"]
+testpaths = ["crates/p14g-python/tests"]
 filterwarnings = ["error"]
 
 [tool.ruff]
@@ -53,7 +53,7 @@ combine-as-imports = true
 quote-style = "single"
 
 [tool.basedpyright]
-include = ["crates/pgsafe-python/pgsafe.pyi", "crates/pgsafe-python/tests"]
+include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 reportMissingModuleSource = false

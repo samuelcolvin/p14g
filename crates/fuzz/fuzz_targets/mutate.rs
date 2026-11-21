@@ -1,5 +1,5 @@
 //! Random bytes rarely parse, so this target starts from statements the policy accepts and splices in
-//! fragments chosen by the input: forbidden names, quoting, and syntax pgsafe has no representation for.
+//! fragments chosen by the input: forbidden names, quoting, and syntax p14g has no representation for.
 #![no_main]
 
 use fuzz::{FRAGMENTS, SEEDS};
