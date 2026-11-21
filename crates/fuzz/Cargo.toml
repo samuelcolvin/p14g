@@ -15,7 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.7"
-pgsafe = { path = "../pgsafe" }
+samuelcolvin-pgsafe = { path = "../pgsafe" }
 # Postgres's own parser, to check what pgsafe emits
 pg_query = "6"
 # a real Postgres, when PGSAFE_TEST_DATABASE_URL is set, to check privileges on what pgsafe emits

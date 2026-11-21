@@ -102,10 +102,10 @@ jobs:
           lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-on-failure: true
 
-      - run: cargo test -p pgsafe
+      - run: cargo test -p samuelcolvin-pgsafe
 
       # without the test dependencies, to check the library alone builds on this version of rust
-      - run: cargo check -p pgsafe -p pgsafe-python
+      - run: cargo check -p samuelcolvin-pgsafe -p pgsafe-python
 
   test-python:
     name: test python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -351,6 +351,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
 
+    # crates.io trusted publishing: the crate's trusted publisher must name this workflow file (ci.yml)
+    # and this environment (release)
+    permissions:
+      id-token: write
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -362,9 +367,12 @@ jobs:
         with:
           toolchain: stable
 
-      - run: cargo publish -p pgsafe
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+
+      - run: cargo publish -p samuelcolvin-pgsafe
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   release-python:
     name: release to PyPI

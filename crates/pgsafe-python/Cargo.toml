@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 pyo3 = { workspace = true, features = ["abi3-py310", "generate-import-lib"] }
-pgsafe = { path = "../pgsafe" }
+samuelcolvin-pgsafe = { path = "../pgsafe" }
 
 [features]
 # make extensions visible to cargo vendor

@@ -10,6 +10,7 @@ rules, and writes out new SQL for you to run.
 It never connects to a database.
 
 It is a Rust library, `pgsafe`, with a Python package of the same name built with PyO3.
+The crate is published as `samuelcolvin-pgsafe`, because `pgsafe` on crates.io is an unrelated project.
 
 ```python
 from pgsafe import Delete, Insert, PgSafeError, Policy, Select, Update
@@ -312,7 +313,8 @@ It builds wheels on every run and tests the built wheel on Linux, macOS and Wind
 
 Pushing a tag publishes the crate to crates.io and the wheels to PyPI, once those jobs pass.
 The tag must match `version` in the root `Cargo.toml`.
-The `release` job needs a `CARGO_REGISTRY_TOKEN` secret in a GitHub environment called `release`.
+The `release` job uses crates.io trusted publishing, so the crate needs a trusted publisher for this
+repository with workflow `ci.yml` and environment `release`.
 The `release-python` job uses PyPI trusted publishing from an environment called `release-python`.
 
 ## License

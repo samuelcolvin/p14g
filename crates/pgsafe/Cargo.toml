@@ -1,5 +1,5 @@
 [package]
-name = "pgsafe"
+name = "samuelcolvin-pgsafe"
 description = "Check untrusted SQL against an allowlist and rewrite it so it is safe to run on Postgres"
 readme = "../../README.md"
 version = { workspace = true }
@@ -10,6 +10,10 @@ keywords = { workspace = true }
 categories = { workspace = true }
 repository = { workspace = true }
 rust-version = { workspace = true }
+
+# the package name has a prefix because `pgsafe` is taken on crates.io, the library is still `pgsafe`
+[lib]
+name = "pgsafe"
 
 [dependencies]
 sqlparser = { workspace = true }
