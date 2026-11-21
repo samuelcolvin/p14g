@@ -64,7 +64,8 @@ pgsafe is one layer of defence.
 It does not replace database privileges, and it cannot limit how much work a permitted query does.
 
 - Connect as a role that has been granted only what the policy allows.
-  `crates/pgsafe/tests/cases/schema.sql` shows grants that match a policy.
+  `policy.grants('app_role')` returns the `GRANT` statements for a policy's tables and columns.
+  It does not cover sequences that inserted rows take defaults from, or tables a mapper renames statements to.
 - Set `statement_timeout` and `lock_timeout` for that role.
   A cross join of two large tables you allowed is a valid query.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
@@ -295,8 +296,13 @@ make fuzz-mutate    # fuzz with mutations of accepted statements
 
 The Postgres tests create a role whose grants match the test policy and run every accepted statement as that role.
 A permission error or a syntax error from Postgres fails the test.
-The fuzz targets check the same thing with [libpg_query](https://github.com/pganalyze/libpg_query), Postgres's parser
-as a library.
+
+The fuzz targets check each statement pgsafe accepts in two ways.
+[libpg_query](https://github.com/pganalyze/libpg_query), Postgres's parser as a library, must parse the output and see
+only allowed tables and functions.
+When `PGSAFE_TEST_DATABASE_URL` is set, they also run `EXPLAIN` on the output as a role granted `policy.grants()`.
+`EXPLAIN` applies Postgres's permission checks without running the statement, so a column the policy should have
+refused is reported as a permission error.
 
 ### Releasing
 

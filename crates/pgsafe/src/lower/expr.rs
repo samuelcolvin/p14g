@@ -433,6 +433,11 @@ impl Lower<'_> {
             }
         };
 
+        // `f(*)` is its own grammar rule in Postgres, which takes neither DISTINCT nor ORDER BY
+        if matches!(args, FunctionArgs::Star) && (distinct || !order_by.is_empty()) {
+            return Err(Error::unsupported("DISTINCT or ORDER BY with * as the argument"));
+        }
+
         // functions that are really grammar can only be written one way, so anything else is rejected here
         if schema.is_none() {
             let plain = !distinct && order_by.is_empty() && filter.is_none() && over.is_none();

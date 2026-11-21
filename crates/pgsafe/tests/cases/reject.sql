@@ -209,6 +209,13 @@ unsupported: select [id] from orders
 denied: select *
 denied: select customers.* from orders
 denied: select count(*) from orders order by 2
+unsupported: select id from orders order by ''
+unsupported: select id from orders order by null, id
+unsupported: select id from orders order by (true)
+unsupported: select count(*) from orders group by 'x'
+unsupported: select count(*) from orders group by null
+denied: select id from orders order by 1.5
+denied: select id from orders union select id from customers order by 'x'
 
 -- select syntax pgsafe has no representation for
 unsupported: select id from orders for update
@@ -251,6 +258,8 @@ unsupported: select lower(product => 'x') from orders
 unsupported: select count(*) filter (where qty > 0) over () from orders where exists (table secrets)
 unsupported: select coalesce(distinct qty, 1) from orders
 unsupported: select nullif(qty) from orders
+unsupported: select count(distinct *) from orders
+unsupported: select count(* order by id) from orders
 unsupported: select nullif(qty, 1, 2) from orders
 unsupported: select coalesce() from orders
 unsupported: select greatest() from orders

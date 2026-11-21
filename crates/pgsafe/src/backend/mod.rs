@@ -43,6 +43,15 @@ pub(crate) fn write(
     }
 }
 
+/// Quote an identifier for the backend, for SQL that pgsafe writes outside of a statement.
+pub(crate) fn quote_ident(backend: Backend, ident: &Ident) -> String {
+    let mut out = String::new();
+    match backend {
+        Backend::Postgres => postgres::Postgres.ident(&mut out, ident),
+    }
+    out
+}
+
 /// How a function call starts, up to but not including its arguments.
 pub(crate) enum FunctionHead {
     /// Written as is, with no argument list at all.
@@ -671,6 +680,9 @@ impl<'a, S: Syntax> Writer<'a, S> {
         }
         match args {
             FunctionArgs::Niladic => return Err(invalid("this function needs an argument list")),
+            FunctionArgs::Star if *distinct || !order_by.is_empty() => {
+                return Err(invalid("f(*) cannot have DISTINCT or ORDER BY"));
+            }
             FunctionArgs::Star => self.push("*"),
             FunctionArgs::List(args) => self.list(args, Self::expr)?,
         }

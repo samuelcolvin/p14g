@@ -311,6 +311,7 @@ impl<'p, C> Checker<'p, C> {
                 Expr::Literal(Literal::Number(number)) => {
                     item.expr = Expr::Ordinal(checked_ordinal(number, projection.len(), has_wildcard)?);
                 }
+                Expr::Literal(_) => return Err(constant_in("ORDER BY")),
                 _ => self.expr(&mut item.expr, refs)?,
             }
         }
@@ -332,6 +333,7 @@ impl<'p, C> Checker<'p, C> {
                 *expr = Expr::Ordinal(checked_ordinal(number, columns, has_wildcard)?);
                 Ok(())
             }
+            Expr::Literal(_) => Err(constant_in("GROUP BY")),
             Expr::Column(Column { table: None, name }) => {
                 let Some((index, _)) = aliases.iter().find(|(_, alias)| alias == name) else {
                     return self.expr(expr, refs);
@@ -1073,6 +1075,12 @@ fn checked_ordinal(number: &str, columns: usize, has_wildcard: bool) -> Result<u
         ));
     }
     ordinal(number, columns)
+}
+
+/// Postgres reads a bare constant in `ORDER BY` or `GROUP BY` as a column position, and rejects one that is
+/// not an integer as a syntax error.
+fn constant_in(clause: &str) -> Error {
+    Error::unsupported(format!("a constant that is not a column position in {clause}"))
 }
 
 /// A position in the select list, written as a number in `ORDER BY` or `GROUP BY`.

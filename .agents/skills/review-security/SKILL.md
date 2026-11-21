@@ -117,7 +117,8 @@ A claim that something is safe needs a test that would fail if it were not:
 - A statement in `tests/cases/accept.sql` or `reject.sql` for each new piece of syntax, allowed and refused.
 - `make test-postgres`: every accepted statement runs as a role whose grants mirror the test policy, so a permission
     or syntax error from Postgres is a pgsafe bug. Extend `schema.sql` when the change needs a new kind of object.
-- `make fuzz-mutate` for a few minutes after any change to lowering, the check or the writer. Add new syntax to
+- `make fuzz-mutate` for a few minutes after any change to lowering, the check or the writer, with
+    `PGSAFE_TEST_DATABASE_URL` set: without a database the fuzzer checks tables and functions but not columns. Add new syntax to
     `SEEDS` or `FRAGMENTS` in `crates/fuzz/src/lib.rs` so the fuzzer reaches it.
 
 ## Report

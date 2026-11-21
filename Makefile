@@ -70,6 +70,8 @@ testcov: ## Run the Rust tests with coverage and print a summary
 	@cargo llvm-cov --version > /dev/null 2>&1 || echo 'Please run: `cargo install cargo-llvm-cov`'
 	cargo llvm-cov --workspace --summary-only
 
+# The fuzz targets also check their output against Postgres when PGSAFE_TEST_DATABASE_URL is set, see `make postgres`:
+#     PGSAFE_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/postgres make fuzz-mutate
 .PHONY: fuzz
 fuzz: ## Fuzz `rewrite` with arbitrary input
 	cargo +nightly fuzz run --fuzz-dir crates/fuzz rewrite --release

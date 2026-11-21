@@ -330,6 +330,16 @@ class Policy:
         limits: Limits | None = None,
         mappers: Sequence[Mapper] | None = None,
     ) -> Policy: ...
+    def grants(self, role: str, *, context: Any = None) -> list[str]:
+        """The `GRANT` statements that give `role` the table access this policy allows.
+
+        Run them once as the owner of the tables, for the role that will run pgsafe's output, so that the database
+        enforces the same rules. `context` is passed to `extra` callables to learn which columns they set.
+
+        Grants cannot say everything a policy does, so they allow somewhat more: the columns of several rules for
+        one table are combined, functions and operators are not restricted, and `only` has no equivalent.
+        `USAGE` on sequences that inserted rows take defaults from is not included.
+        """
     def rewrite(self, sql: str, *, context: Any = None, allow: Sequence[_Kind] | None = None) -> SafeSql:
         """Check one SQL statement against the policy and return it rewritten so it is safe to run.
 

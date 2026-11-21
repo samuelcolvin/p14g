@@ -976,6 +976,74 @@ fn default_schema() {
     assert_eq!(kind(&plain, "select id from public.orders"), ErrorKind::Denied);
 }
 
+#[test]
+fn grants() {
+    let policy: Policy<Tenant> = Policy::builder()
+        .select(Select::table("orders").columns(["id", "qty"]))
+        .select(Select::table("orders").columns(["id", "product"]))
+        .select(Select::table("v"))
+        .select(Select::table("app.events").columns(["id"]))
+        .select(Select::table("we\"ird").columns(["a b"]))
+        .insert(
+            Insert::table("orders")
+                .columns(["product", "qty"])
+                .extra(|tenant: &Tenant| [("tenant_id", tenant.id)]),
+        )
+        .insert(Insert::table("audit"))
+        .update(Update::table("orders").columns(["qty"]))
+        .update(Update::table("app.events"))
+        .delete(Delete::table("orders"))
+        .delete(Delete::table("only_delete"))
+        .build()
+        .unwrap();
+    let tenant = Tenant { id: 1, schema: "" };
+    assert_eq!(
+        policy.grants("app_role", &tenant).unwrap(),
+        [
+            r#"GRANT USAGE ON SCHEMA "app" TO "app_role""#,
+            r#"GRANT INSERT ON "audit" TO "app_role""#,
+            r#"GRANT DELETE ON "only_delete" TO "app_role""#,
+            // the columns of the two select rules are combined: a grant cannot say "one or the other"
+            r#"GRANT SELECT ("id", "qty", "product") ON "orders" TO "app_role""#,
+            r#"GRANT INSERT ("product", "qty", "tenant_id") ON "orders" TO "app_role""#,
+            r#"GRANT UPDATE ("qty") ON "orders" TO "app_role""#,
+            r#"GRANT DELETE ON "orders" TO "app_role""#,
+            r#"GRANT SELECT ON "v" TO "app_role""#,
+            r#"GRANT SELECT ("a b") ON "we""ird" TO "app_role""#,
+            r#"GRANT SELECT ("id") ON "app"."events" TO "app_role""#,
+            r#"GRANT UPDATE ON "app"."events" TO "app_role""#,
+        ]
+    );
+    assert_eq!(
+        policy.grants("Odd \"Role\"", &tenant).unwrap()[0],
+        r#"GRANT USAGE ON SCHEMA "app" TO "Odd ""Role""""#
+    );
+    assert_eq!(policy.grants("", &tenant).unwrap_err().kind(), ErrorKind::Config);
+
+    // tables are named as the policy resolves them
+    let qualified: Policy = Policy::builder()
+        .select(orders())
+        .default_schema("public")
+        .build()
+        .unwrap();
+    assert_eq!(
+        qualified.grants("r", &()).unwrap(),
+        [
+            r#"GRANT USAGE ON SCHEMA "public" TO "r""#,
+            r#"GRANT SELECT ("id", "product", "qty") ON "public"."orders" TO "r""#,
+        ]
+    );
+    let empty: Policy = Policy::builder().build().unwrap();
+    assert_eq!(empty.grants("r", &()).unwrap(), Vec::<String>::new());
+
+    // a failing `extra` fails the call rather than leaving a column out
+    let failing: Policy = Policy::builder()
+        .insert(Insert::table("t").try_extra(|()| Err(Error::callback("no context"))))
+        .build()
+        .unwrap();
+    assert_eq!(failing.grants("r", &()).unwrap_err().kind(), ErrorKind::Callback);
+}
+
 /// sqlparser builds chains of operators with a loop, so they can be thousands of levels deep whatever its
 /// recursion limit says. These are the deepest trees each kind of chain can make within the default
 /// limits, run on a thread with a small stack: nothing may recurse down them unguarded, including drop.

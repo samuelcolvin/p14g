@@ -1,12 +1,25 @@
 //! The properties both fuzz targets check.
 //!
-//! Whatever the input, `Policy::rewrite` must not panic. When it accepts a statement, Postgres's own parser
-//! must agree with pgsafe about what the output is: it parses as one statement, it only touches tables
-//! and functions the policy allows, and pgsafe reading its own output back gets the same SQL again.
+//! Whatever the input, `Policy::rewrite` must not panic. When it accepts a statement:
+//!
+//! * Postgres's own parser (`libpg_query`) must parse the output as one statement that only names tables and
+//!   functions the policy allows;
+//! * pgsafe reading its own output back must produce the same SQL again;
+//! * if `PGSAFE_TEST_DATABASE_URL` is set, Postgres itself must be willing to plan the output for a role
+//!   that has been granted exactly what the policy allows.
+//!
+//! The last is the only one that sees columns. `EXPLAIN` runs Postgres's permission checks without running
+//! the statement, so a column, table or whole-row reference that pgsafe let through but the grants do not
+//! cover comes back as "permission denied".
 
-use std::{collections::BTreeSet, sync::LazyLock};
+use std::{
+    collections::BTreeSet,
+    env,
+    sync::{LazyLock, Mutex},
+};
 
 use pgsafe::{Delete, ErrorKind, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update, functions};
+use postgres::{Client, Config, NoTls, error::SqlState};
 
 /// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
 /// table, a rule with few operators, and writes.
@@ -31,6 +44,75 @@ const TABLES: &[&str] = &["orders", "customers", "v", "app.events", "limited", "
 
 static INLINE: LazyLock<Policy> = LazyLock::new(|| builder().build().unwrap());
 static PARAMS: LazyLock<Policy> = LazyLock::new(|| builder().literals(Literals::Params).build().unwrap());
+
+const ROLE: &str = "pgsafe_fuzz_role";
+
+/// Tables for the fuzz policy, each with columns the policy does not allow, and one table it does not
+/// name at all. Every statement can be repeated, because fuzz processes share the database.
+const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS customers (id int, name text, email text);
+    CREATE TABLE IF NOT EXISTS orders (
+        id int, product text, qty int, customer_id int, tenant_id int, secret text, created timestamptz, data jsonb
+    );
+    CREATE OR REPLACE VIEW v AS SELECT id, product, qty, created, data FROM orders;
+    CREATE SCHEMA IF NOT EXISTS app;
+    CREATE TABLE IF NOT EXISTS app.events (id int, kind text, hidden text);
+    CREATE TABLE IF NOT EXISTS limited (a int, b int, c int);
+    CREATE TABLE IF NOT EXISTS audit (id int, message text, tenant_id int);
+    CREATE TABLE IF NOT EXISTS secrets (id int, password text);
+    DO $$ BEGIN CREATE ROLE pgsafe_fuzz_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+";
+
+/// A connection acting as a role with the grants the fuzz policy generates, or `None` without a database.
+static DATABASE: LazyLock<Option<Mutex<Client>>> = LazyLock::new(|| {
+    let url = env::var("PGSAFE_TEST_DATABASE_URL").ok()?;
+    let mut config: Config = url
+        .parse()
+        .expect("PGSAFE_TEST_DATABASE_URL is not a valid connection string");
+    let mut admin = config
+        .connect(NoTls)
+        .expect("cannot connect to PGSAFE_TEST_DATABASE_URL");
+    if let Err(e) = admin.batch_execute("CREATE DATABASE pgsafe_fuzz") {
+        assert_eq!(e.code(), Some(&SqlState::DUPLICATE_DATABASE), "{e}");
+    }
+    config.dbname("pgsafe_fuzz");
+    let mut client = config.connect(NoTls).unwrap();
+    // other fuzz processes may be doing the same setup, and concurrent GRANTs on one table fail
+    client.batch_execute("SELECT pg_advisory_lock(7347)").unwrap();
+    client.batch_execute(SCHEMA).unwrap();
+    for grant in INLINE.grants(ROLE, &()).unwrap() {
+        client.batch_execute(&grant).unwrap();
+    }
+    client.batch_execute("SELECT pg_advisory_unlock(7347)").unwrap();
+    client
+        .batch_execute(&format!("SET ROLE {ROLE}; SET statement_timeout = '2s'"))
+        .unwrap();
+    Some(Mutex::new(client))
+});
+
+/// Ask Postgres to plan `output` as the restricted role.
+///
+/// Most errors mean nothing here: the fuzzer writes statements that are allowed but wrong, such as a text
+/// column added to a number, and the view `v` accepts any column name. Three do mean pgsafe got it wrong.
+fn explain(input: &str, output: &str) {
+    let Some(database) = &*DATABASE else {
+        return;
+    };
+    let mut client = database.lock().unwrap();
+    let Err(error) = client.simple_query(&format!("EXPLAIN {output}")) else {
+        return;
+    };
+    let Some(db_error) = error.as_db_error() else {
+        panic!("lost the connection to Postgres: {error}");
+    };
+    let problem = match db_error.code() {
+        code if *code == SqlState::INSUFFICIENT_PRIVILEGE => "Postgres refused something the policy allowed",
+        code if *code == SqlState::SYNTAX_ERROR => "Postgres cannot parse the output",
+        code if *code == SqlState::UNDEFINED_TABLE => "the output names a table that does not exist",
+        _ => return,
+    };
+    panic!("{problem}: {}\n input: {input}\noutput: {output}", db_error.message());
+}
 
 /// Run every check on one input.
 pub fn check(sql: &str) {
@@ -76,6 +158,11 @@ pub fn check(sql: &str) {
             );
         }
 
+        // parameters are placeholders with no values here, so only the inline form can be planned
+        if safe.params.is_empty() {
+            explain(sql, &safe.sql);
+        }
+
         match policy.rewrite(&safe.sql, &()) {
             Ok(again) => {
                 // in params mode the literals are already placeholders, so there is nothing new to bind
@@ -117,6 +204,11 @@ pub const SEEDS: &[&str] = &[
 pub const FRAGMENTS: &[&str] = &[
     " secrets ",
     " secret ",
+    " email ",
+    " hidden ",
+    " tenant_id ",
+    " password ",
+    " limited.c ",
     " pg_shadow ",
     " pg_catalog.pg_class ",
     " information_schema.tables ",

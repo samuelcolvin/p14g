@@ -869,6 +869,101 @@ impl<C> Policy<C> {
         PolicyBuilder::default()
     }
 
+    /// The `GRANT` statements that give `role` the table access this policy allows.
+    ///
+    /// Run them once as the owner of the tables, for the role that will run pgsafe's output, so that the
+    /// database enforces the same rules. `context` is passed to [`Insert::extra`] callbacks to learn which
+    /// columns they set.
+    ///
+    /// Grants cannot say everything a policy does, so they allow somewhat more:
+    ///
+    /// * several rules for one table are alternatives in the policy, here their columns are combined;
+    /// * functions, operators and cast types are not restricted;
+    /// * `only` has no equivalent, a grant on a parent table always covers its children's rows.
+    ///
+    /// Not included: `USAGE` on sequences that inserted rows take defaults from, and anything for tables
+    /// that a mapper renames statements to.
+    pub fn grants(&self, role: &str, context: &C) -> Result<Vec<String>> {
+        #[derive(Default)]
+        struct Columns {
+            all: bool,
+            listed: Vec<Ident>,
+        }
+
+        impl Columns {
+            fn add(&mut self, columns: Option<&[Ident]>) {
+                match columns {
+                    None => self.all = true,
+                    Some(columns) => {
+                        for column in columns {
+                            if !self.listed.contains(column) {
+                                self.listed.push(column.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let quote = |ident: &Ident| backend::quote_ident(self.backend, ident);
+        let role = Ident::new(role).map_err(|e| Error::config(format!("invalid role {role:?}: {}", e.message())))?;
+        let role = quote(&role);
+        let table_name = |key: &TableKey| match &key.schema {
+            Some(schema) => format!("{}.{}", quote(schema), quote(&key.name)),
+            None => quote(&key.name),
+        };
+
+        let mut tables: BTreeMap<&TableKey, [Columns; 3]> = BTreeMap::new();
+        for (key, rules) in &self.selects {
+            for rule in rules {
+                tables.entry(key).or_default()[0].add(rule.columns.as_deref());
+            }
+        }
+        for (key, rules) in &self.inserts {
+            for rule in rules {
+                let columns = &mut tables.entry(key).or_default()[1];
+                columns.add(rule.columns.as_deref());
+                if let Some(extra) = &rule.extra {
+                    for (column, _) in extra(context)? {
+                        let column = Ident::new(column.as_str()).map_err(|e| {
+                            Error::callback(format!("extra returned an invalid column {column:?}: {}", e.message()))
+                        })?;
+                        columns.add(Some(&[column]));
+                    }
+                }
+            }
+        }
+        for (key, rules) in &self.updates {
+            for rule in rules {
+                tables.entry(key).or_default()[2].add(rule.columns.as_deref());
+            }
+        }
+        for key in self.deletes.keys() {
+            tables.entry(key).or_default();
+        }
+
+        let mut statements = Vec::new();
+        let schemas: BTreeSet<&Ident> = tables.keys().filter_map(|key| key.schema.as_ref()).collect();
+        for schema in schemas {
+            statements.push(format!("GRANT USAGE ON SCHEMA {} TO {role}", quote(schema)));
+        }
+        for (key, columns) in &tables {
+            let table = table_name(key);
+            for (privilege, columns) in ["SELECT", "INSERT", "UPDATE"].into_iter().zip(columns) {
+                if columns.all {
+                    statements.push(format!("GRANT {privilege} ON {table} TO {role}"));
+                } else if !columns.listed.is_empty() {
+                    let list = columns.listed.iter().map(&quote).collect::<Vec<_>>().join(", ");
+                    statements.push(format!("GRANT {privilege} ({list}) ON {table} TO {role}"));
+                }
+            }
+            if self.deletes.contains_key(*key) {
+                statements.push(format!("GRANT DELETE ON {table} TO {role}"));
+            }
+        }
+        Ok(statements)
+    }
+
     /// Check one SQL statement against the policy and return it rewritten so it is safe to run.
     pub fn rewrite(&self, sql: &str, context: &C) -> Result<SafeSql> {
         self.rewrite_kinds(sql, context, None)

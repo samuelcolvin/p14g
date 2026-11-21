@@ -127,6 +127,7 @@ fn postgres_agrees() {
     star_allow(&mut client);
     only_leaves_out_children(&mut client);
     default_schema_is_not_shadowed(&mut client);
+    generated_grants(&mut client);
 }
 
 const NASTY: &[&str] = &[
@@ -312,5 +313,54 @@ fn default_schema_is_not_shadowed(client: &mut Client) {
         let safe = qualified.rewrite(sql, &()).unwrap();
         assert!(safe.sql.contains(r#""public"."orders""#), "{}", safe.sql);
         assert_eq!(run(client, &safe.sql, &[]).unwrap(), 1, "{}", safe.sql);
+    }
+}
+
+/// The grants `Policy::grants` writes give a fresh role what the policy allows and no more: every accepted
+/// statement runs as that role, and the statements the hand-written role was refused are refused again.
+fn generated_grants(client: &mut Client) {
+    const GENERATED: &str = "pgsafe_generated_role";
+    let policy = policy();
+    client
+        .batch_execute(&format!("DROP ROLE IF EXISTS {GENERATED}; CREATE ROLE {GENERATED}"))
+        .unwrap();
+    for grant in policy.grants(GENERATED, &()).unwrap() {
+        client.batch_execute(&grant).unwrap_or_else(|e| panic!("{grant}: {e}"));
+    }
+    // not derivable from the policy: the sequences behind the serial columns
+    client
+        .batch_execute(&format!(
+            "GRANT USAGE ON SEQUENCE orders_id_seq, audit_id_seq TO {GENERATED}"
+        ))
+        .unwrap();
+
+    let run_as = |client: &mut Client, sql: &str| -> Result<(), postgres::Error> {
+        let mut transaction = client.transaction()?;
+        transaction.batch_execute(&format!("SET LOCAL ROLE {GENERATED}"))?;
+        transaction.simple_query(sql)?;
+        transaction.rollback()
+    };
+    for forbidden in [
+        "SELECT secret FROM orders",
+        "SELECT tenant_id FROM orders",
+        "SELECT * FROM secrets",
+        "SELECT email FROM customers",
+        "UPDATE orders SET product = 'x' WHERE id = 1",
+        "INSERT INTO customers (id, name) VALUES (9, 'x')",
+        "INSERT INTO orders (secret) VALUES ('x')",
+        "SELECT hidden FROM app.events",
+        "SELECT id FROM audit",
+        "DELETE FROM customers",
+        "SELECT c FROM limited",
+    ] {
+        let error = run_as(client, forbidden).expect_err(forbidden);
+        assert_eq!(error.code().map(SqlState::code), Some("42501"), "{forbidden}");
+    }
+    for case in accept_cases() {
+        if case.sql.contains('$') && !case.sql.contains("$$") && !case.sql.contains("$tag$") {
+            continue;
+        }
+        let safe = policy.rewrite(case.sql, &()).unwrap();
+        run_as(client, &safe.sql).unwrap_or_else(|e| panic!("line {}: {}\n  {}", case.line, safe.sql, describe(&e)));
     }
 }

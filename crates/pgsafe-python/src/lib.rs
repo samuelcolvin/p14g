@@ -855,6 +855,15 @@ impl PyPolicy {
         builder.build().map(Self).map_err(config)
     }
 
+    /// The `GRANT` statements that give `role` the table access this policy allows.
+    ///
+    /// `context` is passed to `extra` callables to learn which columns they set.
+    #[pyo3(signature = (role, *, context=None))]
+    fn grants(&self, py: Python<'_>, role: &str, context: Option<Py<PyAny>>) -> PyResult<Vec<String>> {
+        let context = context.unwrap_or_else(|| py.None());
+        self.0.grants(role, &context).map_err(|e| to_py_err(py, e))
+    }
+
     /// Check one SQL statement against the policy and return it rewritten so it is safe to run.
     ///
     /// Raises `PgSafeError` if the statement is not allowed.

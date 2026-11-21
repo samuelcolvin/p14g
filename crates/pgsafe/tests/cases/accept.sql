@@ -176,6 +176,12 @@ select customer_id, sum(qty) as total from orders group by customer_id order by 
 select product from orders order by qty * 2 asc nulls last
 => SELECT "orders"."product" FROM "orders" ORDER BY ("orders"."qty" * 2) ASC NULLS LAST
 
+select count(*) over (order by 'x') from orders order by 'x'::text, 1 + 1
+=> SELECT pg_catalog."count"(*) OVER (ORDER BY 'x') FROM "orders" ORDER BY CAST('x' AS text), (1 + 1)
+
+select string_agg(product, ',' order by 'x') from orders group by 'x'::text
+=> SELECT pg_catalog."string_agg"("orders"."product", ',' ORDER BY 'x') FROM "orders" GROUP BY CAST('x' AS text)
+
 -- placeholders
 select id from orders where qty = $1 and product = $2
 => SELECT "orders"."id" FROM "orders" WHERE (("orders"."qty" = $1) AND ("orders"."product" = $2))

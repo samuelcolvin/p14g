@@ -977,3 +977,34 @@ def test_default_schema():
 
     Policy(Select('orders'), default_schema='app', mappers=[record]).rewrite('select id from orders')
     assert seen == [Table('orders', schema='app')]
+
+
+def test_grants():
+    policy = Policy(
+        Select('orders', columns=['id', 'qty']),
+        Select('app.events'),
+        Insert('orders', columns=['qty'], extra=add_tenant),
+        Update('orders', columns=['qty']),
+        Delete('orders'),
+    )
+    assert policy.grants('app_role', context={'tenant_id': 1, 'user': 'sam'}) == [
+        'GRANT USAGE ON SCHEMA "app" TO "app_role"',
+        'GRANT SELECT ("id", "qty") ON "orders" TO "app_role"',
+        'GRANT INSERT ("qty", "tenant_id", "created_by") ON "orders" TO "app_role"',
+        'GRANT UPDATE ("qty") ON "orders" TO "app_role"',
+        'GRANT DELETE ON "orders" TO "app_role"',
+        'GRANT SELECT ON "app"."events" TO "app_role"',
+    ]
+    # `extra` is called to learn its columns, so it needs a context it can work with
+    with pytest.raises(PgSafeError) as exc_info:
+        policy.grants('app_role')
+    assert exc_info.value.kind == 'callback'
+    assert isinstance(exc_info.value.__cause__, TypeError)
+    with pytest.raises(PgSafeError, match='invalid role ""') as exc_info:
+        policy.grants('', context={'tenant_id': 1, 'user': 'sam'})
+    assert exc_info.value.kind == 'config'
+    assert Policy().grants('r') == []
+    assert Policy(Select('t'), default_schema='s').grants('we"ird') == [
+        'GRANT USAGE ON SCHEMA "s" TO "we""ird"',
+        'GRANT SELECT ON "s"."t" TO "we""ird"',
+    ]
