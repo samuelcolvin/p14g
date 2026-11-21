@@ -1,0 +1,46 @@
+[workspace]
+members = ["crates/pgsafe"]
+exclude = ["crates/fuzz"]
+resolver = "3"
+
+[workspace.package]
+authors = ["Samuel Colvin <samuel@pydantic.dev>"]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+keywords = ["sql", "postgres", "security", "sandbox"]
+categories = ["database", "parser-implementations"]
+repository = "https://github.com/samuelcolvin/pgsafe/"
+rust-version = "1.88"
+
+[workspace.dependencies]
+pyo3 = { version = "0.30.1" }
+# pinned exactly: every sqlparser upgrade can add syntax that the lowering code must review
+sqlparser = { version = "=0.64.0", default-features = false, features = ["std", "recursive-protection"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+use_self = "warn"
+allow_attributes = "warn"
+undocumented_unsafe_blocks = "warn"
+redundant_clone = "warn"
+absolute_paths = "warn"
+
+# in general we lint against the pedantic group, but we will whitelist
+# certain lints which we don't want to enforce
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+doc_markdown = "allow"
+match_same_arms = "allow"
+missing_errors_doc = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
