@@ -1,0 +1,42 @@
+[package]
+name = "fuzz"
+# Internal-only crate (`publish = false`): keep version decoupled from release crates.
+publish = false
+version = "0.0.0"
+edition = "2024"
+authors = ["Samuel Colvin <samuel@pydantic.dev>"]
+
+[package.metadata]
+cargo-fuzz = true
+
+# not a member of the workspace to avoid upsetting maturin and fuzz profiles
+# empty workspace so fuzzing works from a worktree directory nested inside the main repo
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.7"
+pgsafe = { path = "../pgsafe" }
+# Postgres's own parser, to check what pgsafe emits
+pg_query = "6"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "check"
+path = "fuzz_targets/check.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mutate"
+path = "fuzz_targets/mutate.rs"
+test = false
+doc = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"
