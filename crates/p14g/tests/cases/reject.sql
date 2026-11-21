@@ -154,14 +154,11 @@ unsupported: select user
 denied: select id from orders where product ~ '(a+)+$'
 denied: select id from orders where product ~* 'a' or product !~ 'b' or product !~* 'c'
 denied: select id from orders where product similar to '(a+)+'
-denied: select a from limited where a < 1
-denied: select a from limited where a = 1 or b = 2
-denied: select a from limited where a in (1, 2)
-denied: select a from limited where a in (select id from orders)
-denied: select a + 1 from limited
-denied: select id from orders where id = (select a from limited where a > 0)
-denied: select id from orders where qty < (select a from limited)
-denied: select id from orders o join limited l on l.a < o.id
+denied: select id from (select id, product from orders) d where product ~ '^t'
+denied: with d as (select id, product from orders) select id from d where product similar to 't%'
+denied: select id from orders where id = (select max(o.id) from orders o where o.product ~ 'a')
+denied: select id from orders o join customers c on c.name ~ o.product
+denied: select 'a' ~ 'b'
 unsupported: select id from orders where product = 'a' OPERATOR(pg_catalog.=) 'b'
 unsupported: select id from orders where product OPERATOR(public.~~~) 'b'
 unsupported: select id from orders where qty @@ 1

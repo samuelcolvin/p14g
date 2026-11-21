@@ -62,7 +62,7 @@ class Select:
     Every mention of a column counts as a read, wherever it is: in the select list, in a `WHERE` or
     `ORDER BY`, or in the `WHERE` of an `UPDATE`.
 
-    Without `columns`, every column is allowed. Without `operators`, the policy's default operators apply.
+    Without `columns`, every column is allowed.
 
     `filter` is a condition every row read through this rule has to meet. It is a function of the context passed
     to `rewrite()` that returns an SQL expression and the values for its `:name` placeholders:
@@ -90,7 +90,6 @@ class Select:
         table: str,
         *,
         columns: Sequence[str] | None = None,
-        operators: Sequence[_Operator] | None = None,
         only: bool = False,
         filter: _Filter | None = None,
     ) -> Select: ...
@@ -98,8 +97,6 @@ class Select:
     def table(self) -> str: ...
     @property
     def columns(self) -> list[str] | None: ...
-    @property
-    def operators(self) -> list[str] | None: ...
     @property
     def only(self) -> bool: ...
 
@@ -342,7 +339,7 @@ class Policy:
         functions: Functions to allow on top of the defaults, as `name` or `schema.name`.
         deny_functions: Functions to forbid that would otherwise be allowed.
         default_functions: Whether to start from `DEFAULT_FUNCTIONS`.
-        operators: Operators for rules that do not list their own, and for expressions that touch no table.
+        operators: The operators a statement may use, on any table and on none.
             The default is everything except regular expressions (`~` and `similar to`).
         star_behaviour: What to do with `*`. `expand` replaces it with the columns the rule allows, `reject`
             refuses it, and `allow` leaves it alone but refuses it on a table whose rule lists columns.

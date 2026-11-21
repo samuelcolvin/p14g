@@ -18,22 +18,18 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use p14g::{Delete, ErrorKind, Filter, Insert, Literals, Op, Policy, PolicyBuilder, Select, Update, functions};
+use p14g::{Delete, ErrorKind, Filter, Insert, Literals, Policy, PolicyBuilder, Select, Update, functions};
 use postgres::{Client, Config, NoTls, error::SqlState};
 
 /// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
-/// table, a rule with few operators, and writes.
+/// table, and writes.
 fn builder() -> PolicyBuilder {
     Policy::builder()
         .select(Select::table("orders").columns(["id", "product", "qty", "customer_id"]))
         .select(Select::table("customers").columns(["id", "name"]))
         .select(Select::table("v"))
         .select(Select::table("app.events").columns(["id", "kind"]))
-        .select(
-            Select::table("limited")
-                .columns(["a", "b"])
-                .operators([Op::Eq, Op::And]),
-        )
+        .select(Select::table("limited").columns(["a", "b"]))
         .insert(Insert::table("orders").columns(["product", "qty"]))
         .insert(Insert::table("audit").columns(["message"]))
         .update(Update::table("orders").columns(["qty"]))

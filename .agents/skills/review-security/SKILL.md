@@ -80,7 +80,7 @@ Ask what the SQL author can now read, write or call that no rule names:
     Scopes, CTE shadowing, derived tables, correlated subqueries, aliases, unqualified names beside an all-columns
     table. A wrong binding must fail in the database, not read another column.
 - **Are rules still alternatives?**
-    One rule must cover all the columns and operators used on a table instance; combining two rules is a bypass.
+    One rule must cover all the columns used on a table instance; combining two rules is a bypass.
 - **Whole rows and system columns?**
     `SELECT t FROM t`, `t.*` in an expression, `row_to_json(t)`, `ctid`, `xmin`, `tableoid` must stay unreachable
     unless a rule lists them.

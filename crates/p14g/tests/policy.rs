@@ -157,8 +157,8 @@ fn star_behaviour() {
 #[test]
 fn rules_for_one_table_are_alternatives() {
     let policy: Policy = dense()
-        .select(Select::table("t").columns(["a"]).operators([Op::Eq]))
-        .select(Select::table("t").columns(["b"]).operators([Op::Lt, Op::Gt]))
+        .select(Select::table("t").columns(["a"]))
+        .select(Select::table("t").columns(["b"]))
         .build()
         .unwrap();
     assert_eq!(
@@ -169,15 +169,14 @@ fn rules_for_one_table_are_alternatives() {
         rewrite(&policy, "select b from t where b < 1"),
         "SELECT t.b FROM t WHERE t.b < 1"
     );
-    // each half is allowed by a rule, but no one rule allows both
-    assert_eq!(kind(&policy, "select a from t where a < 1"), ErrorKind::Denied);
+    // each column is allowed by a rule, but no one rule allows both
     assert_eq!(kind(&policy, "select a, b from t"), ErrorKind::Denied);
     assert_eq!(kind(&policy, "select a from t where b > 1"), ErrorKind::Denied);
     // two instances of the table can each use a different rule
     assert!(
         policy
             .rewrite("select t1.a from t t1 where t1.a = (select max(t2.b) from t t2)", &())
-            .is_err()
+            .is_ok()
     );
     assert!(
         policy
@@ -206,15 +205,24 @@ fn operators() {
         kind(&policy, "select id from orders where id = 1 or qty = 2"),
         ErrorKind::Denied
     );
-    // expressions that touch no table are held to the policy default
-    assert_eq!(kind(&policy, "select 1 + 1"), ErrorKind::Denied);
+    // the list is for the whole statement: a column that comes through a subquery or a CTE, and no column
+    for sql in [
+        "select x from (select id as x from orders) d where x < 1",
+        "with d as (select id, qty from orders) select id from d where id < 1 or qty = 2",
+        "select id from orders where id = (select max(qty) from orders o where o.qty > 0)",
+        "select id from orders union select qty from orders where qty + 1 = 2",
+        "select 1 + 1",
+    ] {
+        assert_eq!(kind(&policy, sql), ErrorKind::Denied, "{sql}");
+    }
     assert_eq!(
         kind(&policy, "select id from orders limit 1 offset 1 + 1"),
         ErrorKind::Unsupported
     );
 
     let regex: Policy = dense()
-        .select(orders().operators(Op::ALL.iter().copied()))
+        .select(orders())
+        .operators(Op::ALL.iter().copied())
         .build()
         .unwrap();
     assert_eq!(
@@ -231,6 +239,182 @@ fn operators() {
     assert_eq!(Op::parse("<>").unwrap(), Op::NotEq);
     assert_eq!(Op::parse(" LIKE ").unwrap(), Op::Like);
     assert_eq!(Op::parse("xor").unwrap_err().kind(), ErrorKind::Config);
+}
+
+/// Each operator is refused when it is the one left out of the list, and needs nothing but itself.
+#[test]
+fn every_operator_is_checked() {
+    let cases: &[(Op, &[&str])] = &[
+        (Op::Eq, &["qty = 1"]),
+        (Op::NotEq, &["qty != 1", "qty <> 1"]),
+        (Op::Lt, &["qty < 1"]),
+        (Op::LtEq, &["qty <= 1"]),
+        (Op::Gt, &["qty > 1"]),
+        (Op::GtEq, &["qty >= 1"]),
+        (Op::And, &["true and false"]),
+        (Op::Or, &["true or false"]),
+        (Op::Not, &["not true"]),
+        (Op::Plus, &["qty + 1", "+qty"]),
+        (Op::Minus, &["qty - 1", "-qty"]),
+        (Op::Multiply, &["qty * 2"]),
+        (Op::Divide, &["qty / 2"]),
+        (Op::Modulo, &["qty % 2"]),
+        (Op::Concat, &["product || 'x'"]),
+        (
+            Op::Like,
+            &[
+                "product like 'a%'",
+                "product not like 'a%'",
+                "product like 'a!%' escape '!'",
+            ],
+        ),
+        (Op::ILike, &["product ilike 'a%'", "product not ilike 'a%'"]),
+        (
+            Op::SimilarTo,
+            &["product similar to 'a%'", "product not similar to 'a%'"],
+        ),
+        (
+            Op::Regex,
+            &["product ~ 'a'", "product ~* 'a'", "product !~ 'a'", "product !~* 'a'"],
+        ),
+        (
+            Op::In,
+            &["qty in (1, 2)", "qty not in (1, 2)", "qty in (select id from orders)"],
+        ),
+        (Op::Between, &["qty between 1 and 2", "qty not between 1 and 2"]),
+        (
+            Op::Is,
+            &[
+                "qty is null",
+                "qty is not null",
+                "(qty is null) is true",
+                "(qty is null) is not false",
+            ],
+        ),
+        (
+            Op::IsDistinctFrom,
+            &["qty is distinct from 1", "qty is not distinct from 1"],
+        ),
+        (
+            Op::Json,
+            &["product -> 'a'", "product ->> 'a'", "product #> 'a'", "product #>> 'a'"],
+        ),
+        (Op::Contains, &["product @> 'a'", "product <@ 'a'"]),
+    ];
+    let covered: Vec<Op> = cases.iter().map(|(op, _)| *op).collect();
+    assert_eq!(covered, Op::ALL, "a case for every operator, in order");
+
+    for &(op, expressions) in cases {
+        let only: Policy = dense().select(orders()).operators([op]).build().unwrap();
+        let without: Policy = dense()
+            .select(orders())
+            .operators(Op::ALL.iter().copied().filter(|other| *other != op))
+            .build()
+            .unwrap();
+        for expression in expressions {
+            let sql = format!("select {expression} from orders");
+            assert!(only.rewrite(&sql, &()).is_ok(), "{sql} needs more than {op:?}");
+            let error = without.rewrite(&sql, &()).expect_err(&sql);
+            assert_eq!(error.kind(), ErrorKind::Denied, "{sql}");
+            assert_eq!(
+                error.message(),
+                format!("operator not allowed: {}", op.as_str()),
+                "{sql}"
+            );
+        }
+    }
+
+    // syntax that is not an operator in the list needs none
+    let none: Policy = dense().select(orders()).operators([]).build().unwrap();
+    for sql in [
+        "select cast(qty as text), qty::text from orders",
+        "select case when true then 1 else 2 end from orders",
+        "select coalesce(qty, 0), lower(product), count(*) from orders group by qty, product",
+        "select id from orders where exists (select 1 from orders o)",
+    ] {
+        assert!(none.rewrite(sql, &()).is_ok(), "{sql}");
+    }
+}
+
+/// An operator is checked wherever an expression can be written.
+#[test]
+fn operators_are_checked_in_every_clause() {
+    let policy: Policy = dense()
+        .select(orders())
+        .select(Select::table("customers").columns(["id", "name"]))
+        .insert(Insert::table("orders").columns(["product", "qty"]))
+        .update(Update::table("orders").columns(["qty"]))
+        .delete(Delete::table("orders"))
+        .operators([Op::Eq, Op::And])
+        .build()
+        .unwrap();
+
+    // every statement is allowed with `=` where it has `<`
+    for sql in [
+        "select qty < 1 from orders",
+        "select id from orders where qty < 1",
+        "select id from orders where id = 1 and qty < 1",
+        "select o.id from orders o join customers c on c.id < o.id",
+        "select o.id from orders o left join customers c on c.id = o.id and c.id < 1",
+        "select count(*) from orders group by qty < 1",
+        "select qty from orders group by qty having count(*) < 1",
+        "select id from orders order by qty < 1",
+        "select case when qty < 1 then 1 else 2 end from orders",
+        "select case qty when 1 then id < 1 end from orders",
+        "select coalesce(qty < 1, true) from orders",
+        "select lower(product) < 'a' from orders",
+        "select count(*) filter (where qty < 1) from orders",
+        "select sum(qty) over (partition by qty < 1) from orders",
+        "select sum(qty) over (order by qty < 1) from orders",
+        "select string_agg(product, ',' order by qty < 1) from orders",
+        "select cast(qty < 1 as text) from orders",
+        "select nullif(qty < 1, true) from orders",
+        "select id from orders where id = 1 and (qty = 2 and (id = 3 and qty < 4))",
+        "select id from (select id from orders where qty < 1) d",
+        "select d.x from (select qty < 1 as x from orders) d",
+        "select x from (select qty as x from orders) d where x < 1",
+        "select id from orders where id = (select max(id) from orders o where o.qty < 1)",
+        "select id from orders where exists (select 1 from customers c where c.id < orders.id)",
+        "select (select c.id < 1 from customers c) from orders",
+        "with d as (select id from orders where qty < 1) select id from d",
+        "with d as (select id, qty from orders) select id from d where qty < 1",
+        "select id from orders union select id from customers where id < 1",
+        "select id from orders where qty < 1 union all select id from customers",
+        "insert into orders (product, qty) values ('a', 1 < 2)",
+        "insert into orders (product, qty) values ('a', 1) returning qty < 1",
+        "update orders set qty = qty < 1 where id = 1",
+        "update orders set qty = 1 where id < 1",
+        "update orders set qty = 1 where id = 1 returning qty < 1",
+        "update orders set qty = 1 where id = (select max(c.id) from customers c where c.id < 1)",
+        "delete from orders where id < 1",
+        "delete from orders where id = 1 returning qty < 1",
+    ] {
+        let error = policy.rewrite(sql, &()).expect_err(sql);
+        assert_eq!(error.kind(), ErrorKind::Denied, "{sql}");
+        assert_eq!(error.message(), "operator not allowed: <", "{sql}");
+        let allowed = sql.replace('<', "=");
+        assert!(policy.rewrite(&allowed, &()).is_ok(), "{allowed}");
+    }
+}
+
+/// A filter is written by the policy author, so the operator list does not apply to it.
+#[test]
+fn operators_do_not_restrict_filters() {
+    let policy: Policy = dense()
+        .select(
+            Select::table("docs")
+                .columns(["id"])
+                .filter(|()| Filter::new("org < 5 or title ~ '^a'")),
+        )
+        .operators([Op::Eq])
+        .build()
+        .unwrap();
+    assert_eq!(
+        rewrite(&policy, "select id from docs where id = 1"),
+        "SELECT docs.id FROM (SELECT docs.id FROM docs WHERE docs.org < 5 OR (docs.title ~ '^a')) AS docs \
+         WHERE docs.id = 1"
+    );
+    assert_eq!(kind(&policy, "select id from docs where id < 1"), ErrorKind::Denied);
 }
 
 #[test]

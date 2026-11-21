@@ -67,7 +67,7 @@ def test_star_is_expanded(policy: Policy):
         ('drop table orders', 'unsupported', 'only SELECT, INSERT, UPDATE and DELETE statements are supported'),
         ('select id from orders for update', 'unsupported', 'FOR UPDATE / FOR SHARE is not supported'),
         ('delete from orders', 'denied', 'DELETE from table "orders" without a WHERE clause is not allowed'),
-        ("select id from orders where product ~ 'x'", 'denied', 'operator not allowed on table "orders": ~'),
+        ("select id from orders where product ~ 'x'", 'denied', 'operator not allowed: ~'),
     ],
 )
 def test_rejected(policy: Policy, sql: str, kind: str, message: str):
@@ -230,17 +230,26 @@ def test_functions():
 
 
 def test_operators():
-    policy = DensePolicy(Select('orders', operators=['=', 'and']), Select('other'), operators=['<', '~'])
+    policy = DensePolicy(Select('orders'), operators=['=', 'and'])
     assert policy.rewrite('select id from orders where id = 1 and qty = 2').kind == 'select'
-    with pytest.raises(P14gError, match='operator not allowed on table "orders": <'):
+    with pytest.raises(P14gError, match='operator not allowed: <'):
         policy.rewrite('select id from orders where id < 1')
-    assert policy.rewrite("select id from other where id < 1 and name ~ 'x'".replace(' and ', ' < ')).kind == 'select'
+    # the same list applies to a column that comes through a subquery, and to no column at all
+    with pytest.raises(P14gError, match='operator not allowed: <'):
+        policy.rewrite('select x from (select id as x from orders) d where x < 1')
+    with pytest.raises(P14gError, match='operator not allowed: <'):
+        policy.rewrite('select 1 < 2')
+
+    with pytest.raises(P14gError, match='operator not allowed: ~'):
+        DensePolicy(Select('orders')).rewrite("select id from orders where product ~ 'x'")
+    regex = DensePolicy(Select('orders'), operators=['~'])
+    assert regex.rewrite("select id from orders where product ~ 'x'").kind == 'select'
 
     with pytest.raises(P14gError, match='unknown operator "xor"') as exc_info:
-        Select('orders', operators=['xor'])  # pyright: ignore[reportArgumentType]
-    assert exc_info.value.kind == 'config'
-    with pytest.raises(P14gError, match='unknown operator "xor"'):
         DensePolicy(operators=['xor'])  # pyright: ignore[reportArgumentType]
+    assert exc_info.value.kind == 'config'
+    with pytest.raises(TypeError, match='operators'):
+        Select('orders', operators=['='])  # pyright: ignore[reportCallIssue]
 
 
 def test_star_behaviour():
@@ -289,10 +298,10 @@ def test_max_rows_dialect_limits():
 
 
 def test_rules():
-    select = Select('orders', columns=('id', 'qty'), operators=['='])
-    assert (select.table, select.columns, select.operators) == ('orders', ['id', 'qty'], ['='])
-    assert repr(select) == 'Select("orders", columns=["id", "qty"], operators=["="], only=False)'
-    assert repr(Select('v')) == 'Select("v", columns=None, operators=None, only=False)'
+    select = Select('orders', columns=('id', 'qty'))
+    assert (select.table, select.columns) == ('orders', ['id', 'qty'])
+    assert repr(select) == 'Select("orders", columns=["id", "qty"], only=False)'
+    assert repr(Select('v')) == 'Select("v", columns=None, only=False)'
     insert = Insert('orders', columns=['id'])
     assert (insert.table, insert.columns) == ('orders', ['id'])
     assert repr(insert) == 'Insert("orders", columns=["id"])'

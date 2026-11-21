@@ -1,7 +1,7 @@
 //! The policy and case files shared by the test suites.
 #![allow(dead_code, reason = "each test binary uses a different part of this module")]
 
-use p14g::{Delete, ErrorKind, Insert, Layout, Literals, Op, Policy, PolicyBuilder, Select, Update};
+use p14g::{Delete, ErrorKind, Insert, Layout, Literals, Policy, PolicyBuilder, Select, Update};
 
 /// The policy the case files are written against. `cases/schema.sql` grants a database role the same
 /// access, so Postgres can be used to check p14g's answers.
@@ -13,11 +13,7 @@ pub fn builder() -> PolicyBuilder {
         .select(Select::table("customers").columns(["id", "name"]))
         .select(Select::table("v"))
         .select(Select::table("app.events").columns(["id", "kind"]))
-        .select(
-            Select::table("limited")
-                .columns(["a", "b"])
-                .operators([Op::Eq, Op::And]),
-        )
+        .select(Select::table("limited").columns(["a", "b"]))
         .select(Select::table("cheap_orders"))
         // a table with an inheritance child the policy must not reach
         .select(Select::table("family").columns(["id", "label"]).only(true))

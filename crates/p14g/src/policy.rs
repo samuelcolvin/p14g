@@ -131,17 +131,8 @@ impl OpSet {
         self.0 |= 1 << op as u32;
     }
 
-    pub fn contains_all(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    /// The operators in `self` that are not in `allowed`.
-    pub fn missing_from(self, allowed: Self) -> Vec<Op> {
-        Op::ALL
-            .iter()
-            .copied()
-            .filter(|&op| self.0 & (1 << op as u32) != 0 && allowed.0 & (1 << op as u32) == 0)
-            .collect()
+    pub fn contains(self, op: Op) -> bool {
+        self.0 & (1 << op as u32) != 0
     }
 
     /// Everything except regular expression matching, which can be made very slow.
@@ -255,7 +246,6 @@ impl Default for Limits {
 pub struct Select<C = ()> {
     table: String,
     columns: Option<Vec<String>>,
-    operators: Option<Vec<Op>>,
     only: bool,
     filter: Option<Box<FilterFn<C>>>,
 }
@@ -266,7 +256,6 @@ impl<C> Select<C> {
         Self {
             table: table.into(),
             columns: None,
-            operators: None,
             only: false,
             filter: None,
         }
@@ -276,14 +265,6 @@ impl<C> Select<C> {
     #[must_use]
     pub fn columns<S: Into<String>>(mut self, columns: impl IntoIterator<Item = S>) -> Self {
         self.columns = Some(columns.into_iter().map(Into::into).collect());
-        self
-    }
-
-    /// Restrict which operators may be applied to this table's columns. Without this, the policy's default
-    /// operators apply.
-    #[must_use]
-    pub fn operators(mut self, operators: impl IntoIterator<Item = Op>) -> Self {
-        self.operators = Some(operators.into_iter().collect());
         self
     }
 
@@ -615,7 +596,6 @@ fn parse_columns(columns: Option<Vec<String>>, table: &str) -> Result<Option<Vec
 
 pub(crate) struct SelectRule<C> {
     pub columns: Option<Vec<Ident>>,
-    pub operators: OpSet,
     pub filter: Option<Box<FilterFn<C>>>,
 }
 
@@ -730,7 +710,7 @@ impl<C> PolicyBuilder<C> {
         self
     }
 
-    /// Operators allowed for rules that do not list their own, and for expressions that touch no table.
+    /// The operators a statement may use, on any table and on none.
     ///
     /// The default is every operator except regular expression matching (`~` and `SIMILAR TO`).
     #[must_use]
@@ -860,7 +840,7 @@ impl<C> PolicyBuilder<C> {
     }
 
     pub fn build(self) -> Result<Policy<C>> {
-        let default_operators = self
+        let operators = self
             .operators
             .map_or_else(OpSet::default_allowed, |ops| ops.into_iter().collect());
 
@@ -892,12 +872,8 @@ impl<C> PolicyBuilder<C> {
             let key = table_key(&rule.table)?;
             agree(&key, &rule.table, rule.only)?;
             let columns = parse_columns(rule.columns, &rule.table)?;
-            let operators = rule
-                .operators
-                .map_or(default_operators, |ops| ops.into_iter().collect());
             selects.entry(key).or_default().push(SelectRule {
                 columns,
-                operators,
                 filter: rule.filter,
             });
         }
@@ -970,7 +946,7 @@ impl<C> PolicyBuilder<C> {
             updates,
             deletes,
             functions: allowed,
-            default_operators,
+            operators,
             star: self.star,
             literals: self.literals,
             quote_identifiers: self.quote_identifiers,
@@ -1038,7 +1014,7 @@ pub struct Policy<C = ()> {
     pub(crate) updates: BTreeMap<TableKey, Vec<UpdateRule<C>>>,
     pub(crate) deletes: BTreeMap<TableKey, DeleteRule<C>>,
     pub(crate) functions: BTreeSet<String>,
-    pub(crate) default_operators: OpSet,
+    pub(crate) operators: OpSet,
     pub(crate) star: Star,
     literals: Literals,
     quote_identifiers: QuoteIdentifiers,

@@ -18,7 +18,7 @@ use crate::{
     },
     error::{Error, Result},
     filter,
-    policy::{FilterFn, Op, OpSet, Policy, SelectRule, Star, TableKey, function_lookup_key},
+    policy::{FilterFn, Op, Policy, SelectRule, Star, TableKey, function_lookup_key},
 };
 
 /// Check `statement` against `policy`, rewriting it in place: columns are qualified, `*` is expanded and
@@ -40,7 +40,6 @@ pub(crate) fn check<C>(policy: &Policy<C>, statement: &mut Statement, context: &
         Statement::Update(update) => checker.update(update)?,
         Statement::Delete(delete) => checker.delete(delete)?,
     }
-    checker.finish()?;
     Ok(checker.tables.into_iter().collect())
 }
 
@@ -65,16 +64,12 @@ pub(crate) fn apply_max_rows(statement: &mut Statement, max_rows: u64) -> Result
     Ok(())
 }
 
-/// Indexes into `Checker::instances`.
-type Refs = BTreeSet<usize>;
-
 /// One table, view, subquery or CTE in a `FROM` clause, or the target of a write.
 struct Instance<'p, C> {
     /// The name its columns are qualified with.
     alias: Ident,
     kind: InstanceKind<'p, C>,
     used_columns: BTreeSet<Ident>,
-    used_operators: OpSet,
     /// The rule chosen for a base table once its scope is complete.
     rule: Option<&'p SelectRule<C>>,
 }
@@ -151,31 +146,18 @@ fn table_key(table: &Table) -> TableKey {
 }
 
 impl<'p, C> Checker<'p, C> {
-    /// Operators recorded against a table after its rule was chosen (from an enclosing query) still have
-    /// to be allowed by that rule.
-    fn finish(&self) -> Result<()> {
-        for instance in &self.instances {
-            if let (Some(rule), InstanceKind::Base { name, .. }) = (instance.rule, &instance.kind) {
-                operators_allowed(instance.used_operators, rule.operators, Some(name))?;
-            }
-        }
-        Ok(())
-    }
-
     // ---------------------------------------------------------------- queries
 
-    fn query(&mut self, query: &mut Query, barrier: bool) -> Result<(Outputs, Refs)> {
-        let mut refs = Refs::new();
+    fn query(&mut self, query: &mut Query, barrier: bool) -> Result<Outputs> {
         self.ctes.push(BTreeMap::new());
-        let result = self.query_inner(query, barrier, &mut refs);
+        let result = self.query_inner(query, barrier);
         self.ctes.pop();
-        result.map(|outputs| (outputs, refs))
+        result
     }
 
-    fn query_inner(&mut self, query: &mut Query, barrier: bool, refs: &mut Refs) -> Result<Outputs> {
+    fn query_inner(&mut self, query: &mut Query, barrier: bool) -> Result<Outputs> {
         for cte in &mut query.with {
-            let (outputs, cte_refs) = self.query(&mut cte.query, true)?;
-            refs.extend(cte_refs);
+            let outputs = self.query(&mut cte.query, true)?;
             let frame = self.ctes.last_mut().expect("query pushed a CTE frame");
             if frame
                 .insert(cte.name.clone(), (outputs.named(), outputs.open))
@@ -191,22 +173,15 @@ impl<'p, C> Checker<'p, C> {
             limit: _,
             offset: _,
         } = query;
-        self.set_expr(body, order_by, barrier, refs)
+        self.set_expr(body, order_by, barrier)
     }
 
     /// Check a query body. `order_by` is the `ORDER BY` that applies to this body directly.
-    fn set_expr(
-        &mut self,
-        body: &mut SetExpr,
-        order_by: &mut [OrderBy],
-        barrier: bool,
-        refs: &mut Refs,
-    ) -> Result<Outputs> {
+    fn set_expr(&mut self, body: &mut SetExpr, order_by: &mut [OrderBy], barrier: bool) -> Result<Outputs> {
         match body {
-            SetExpr::Select(select) => self.select(select, order_by, barrier, refs),
+            SetExpr::Select(select) => self.select(select, order_by, barrier),
             SetExpr::Query(inner) => {
-                let (outputs, inner_refs) = self.query(inner, barrier)?;
-                refs.extend(inner_refs);
+                let outputs = self.query(inner, barrier)?;
                 Self::order_by_outputs(order_by, &outputs)?;
                 Ok(outputs)
             }
@@ -216,8 +191,8 @@ impl<'p, C> Checker<'p, C> {
                 left,
                 right,
             } => {
-                let outputs = self.set_expr(left, &mut [], barrier, refs)?;
-                self.set_expr(right, &mut [], barrier, refs)?;
+                let outputs = self.set_expr(left, &mut [], barrier)?;
+                self.set_expr(right, &mut [], barrier)?;
                 Self::order_by_outputs(order_by, &outputs)?;
                 Ok(outputs)
             }
@@ -246,23 +221,17 @@ impl<'p, C> Checker<'p, C> {
         Ok(())
     }
 
-    fn select(
-        &mut self,
-        select: &mut Select,
-        order_by: &mut [OrderBy],
-        barrier: bool,
-        refs: &mut Refs,
-    ) -> Result<Outputs> {
+    fn select(&mut self, select: &mut Select, order_by: &mut [OrderBy], barrier: bool) -> Result<Outputs> {
         self.scopes.push(Scope {
             instances: Vec::new(),
             barrier,
         });
-        let result = self.select_inner(select, order_by, refs);
+        let result = self.select_inner(select, order_by);
         self.scopes.pop();
         result
     }
 
-    fn select_inner(&mut self, select: &mut Select, order_by: &mut [OrderBy], refs: &mut Refs) -> Result<Outputs> {
+    fn select_inner(&mut self, select: &mut Select, order_by: &mut [OrderBy]) -> Result<Outputs> {
         let Select {
             distinct: _,
             projection,
@@ -276,17 +245,17 @@ impl<'p, C> Checker<'p, C> {
         // them. Postgres is stricter about which are visible where, and will say so.
         let mut conditions = Vec::new();
         for table in from.iter_mut() {
-            self.add_factor(&mut table.relation, refs)?;
+            self.add_factor(&mut table.relation)?;
             for join in &mut table.joins {
-                self.add_factor(&mut join.relation, refs)?;
+                self.add_factor(&mut join.relation)?;
                 conditions.extend(join.on.as_mut());
             }
         }
         for condition in conditions {
-            self.expr(condition, refs)?;
+            self.expr(condition)?;
         }
         if let Some(selection) = selection {
-            self.expr(selection, refs)?;
+            self.expr(selection)?;
         }
 
         let has_wildcard = projection.iter().any(|item| !matches!(item, SelectItem::Expr { .. }));
@@ -301,14 +270,14 @@ impl<'p, C> Checker<'p, C> {
 
         for item in projection.iter_mut() {
             if let SelectItem::Expr { expr, alias: _ } = item {
-                self.expr(expr, refs)?;
+                self.expr(expr)?;
             }
         }
         for key in group_by.iter_mut() {
-            self.group_by(key, &aliases, projection.len(), has_wildcard, refs)?;
+            self.group_by(key, &aliases, projection.len(), has_wildcard)?;
         }
         if let Some(having) = having {
-            self.expr(having, refs)?;
+            self.expr(having)?;
         }
         for item in order_by.iter_mut() {
             match &mut item.key {
@@ -322,7 +291,7 @@ impl<'p, C> Checker<'p, C> {
                 KeyExpr::Expr(Expr::Literal(Literal::Number(number))) => {
                     item.key = KeyExpr::Position(checked_ordinal(number, projection.len(), has_wildcard)?);
                 }
-                KeyExpr::Expr(expr) => self.expr(expr, refs)?,
+                KeyExpr::Expr(expr) => self.expr(expr)?,
                 KeyExpr::Position(_) | KeyExpr::Output(_) => {}
             }
         }
@@ -425,7 +394,6 @@ impl<'p, C> Checker<'p, C> {
         aliases: &[(usize, Ident)],
         columns: usize,
         has_wildcard: bool,
-        refs: &mut Refs,
     ) -> Result<()> {
         let expr = match key {
             KeyExpr::Position(_) | KeyExpr::Output(_) => return Ok(()),
@@ -436,16 +404,16 @@ impl<'p, C> Checker<'p, C> {
             KeyExpr::Expr(expr) => expr,
         };
         let Expr::Column(Column { table: None, name }) = &*expr else {
-            return self.expr(expr, refs);
+            return self.expr(expr);
         };
         let Some((index, _)) = aliases.iter().find(|(_, alias)| alias == name) else {
-            return self.expr(expr, refs);
+            return self.expr(expr);
         };
         let scope = self.scopes.last().expect("select pushed a scope");
         let listed = scope.instances.iter().any(|&i| self.instances[i].lists(name));
         if listed {
             // a real input column of that name wins in Postgres too
-            return self.expr(expr, refs);
+            return self.expr(expr);
         }
         let any_open = scope.instances.iter().any(|&i| self.instances[i].open());
         if scope.instances.iter().all(|&i| self.instances[i].open_base_only()) {
@@ -488,17 +456,10 @@ impl<'p, C> Checker<'p, C> {
                 .as_ref()
                 .is_none_or(|columns| instance.used_columns.iter().all(|c| columns.contains(c)))
         };
-        let rule = rules
-            .iter()
-            .find(|rule| columns_fit(rule) && rule.operators.contains_all(instance.used_operators));
-        if let Some(rule) = rule {
+        if let Some(rule) = rules.iter().find(|rule| columns_fit(rule)) {
             instance.rule = Some(rule);
             Ok(())
         } else {
-            // say which half failed: with one rule, or when the columns fit some rule, it is the operators
-            if let Some(rule) = rules.iter().find(|rule| columns_fit(rule)) {
-                operators_allowed(instance.used_operators, rule.operators, Some(name))?;
-            }
             Err(Error::denied(format!(
                 "no single rule for table {name:?} allows these columns together: {}",
                 instance
@@ -613,15 +574,14 @@ impl<'p, C> Checker<'p, C> {
             alias,
             kind,
             used_columns: BTreeSet::new(),
-            used_operators: OpSet::default(),
             rule: None,
         });
         self.scopes.last_mut().expect("a scope is open").instances.push(index);
         Ok(index)
     }
 
-    fn add_factor(&mut self, factor: &mut TableFactor, refs: &mut Refs) -> Result<()> {
-        let index = match factor {
+    fn add_factor(&mut self, factor: &mut TableFactor) -> Result<()> {
+        match factor {
             TableFactor::Table(table) => {
                 let cte = if table.schema.is_none() {
                     self.ctes.iter().rev().find_map(|frame| frame.get(&table.name)).cloned()
@@ -636,7 +596,7 @@ impl<'p, C> Checker<'p, C> {
                             table.name
                         )));
                     }
-                    self.add_instance(alias, InstanceKind::Derived { columns, open })?
+                    self.add_instance(alias, InstanceKind::Derived { columns, open })?;
                 } else {
                     self.qualify(table);
                     let name = table.qualified_name();
@@ -648,34 +608,31 @@ impl<'p, C> Checker<'p, C> {
                     // the statement may ask for ONLY itself, the policy can only add it
                     table.only |= self.policy.only.contains(&table_key(table));
                     self.tables.insert(name.clone());
-                    self.add_instance(alias, InstanceKind::Base { name, rules })?
+                    self.add_instance(alias, InstanceKind::Base { name, rules })?;
                 }
             }
             TableFactor::Derived { subquery, alias } => {
-                let (outputs, inner_refs) = self.query(subquery, true)?;
-                refs.extend(inner_refs);
+                let outputs = self.query(subquery, true)?;
                 self.add_instance(
                     alias.clone(),
                     InstanceKind::Derived {
                         columns: outputs.named(),
                         open: outputs.open,
                     },
-                )?
+                )?;
             }
-        };
-        refs.insert(index);
+        }
         Ok(())
     }
 
     // ---------------------------------------------------------------- expressions
 
     /// Bind a column reference to an instance, record the use, and qualify it.
-    fn column(&mut self, column: &mut Column, refs: &mut Refs) -> Result<()> {
+    fn column(&mut self, column: &mut Column) -> Result<()> {
         let index = self.resolve(column)?;
         let instance = &mut self.instances[index];
         instance.used_columns.insert(column.name.clone());
         column.table = Some(instance.alias.clone());
-        refs.insert(index);
         Ok(())
     }
 
@@ -735,50 +692,36 @@ impl<'p, C> Checker<'p, C> {
         })
     }
 
-    /// Record that `op` is applied to an expression that reads the instances in `refs`.
-    fn operator(&mut self, op: Op, refs: &Refs) -> Result<()> {
-        if refs.is_empty() {
-            let mut used = OpSet::default();
-            used.insert(op);
-            return operators_allowed(used, self.policy.default_operators, None);
-        }
-        for &index in refs {
-            self.instances[index].used_operators.insert(op);
+    fn expr(&mut self, expr: &mut Expr) -> Result<()> {
+        // the same set for every operator in the statement, whatever its operands read: a set per table would
+        // have to follow each column through every subquery and CTE it passes through
+        if let Some(op) = self.expr_inner(expr)?
+            && !self.policy.operators.contains(op)
+        {
+            return Err(Error::denied(format!("operator not allowed: {}", op.as_str())));
         }
         Ok(())
     }
 
-    fn expr(&mut self, expr: &mut Expr, refs: &mut Refs) -> Result<()> {
-        // `inner` collects what this expression reads, so an operator is charged to exactly those tables
-        let mut inner = Refs::new();
-        let op = self.expr_inner(expr, &mut inner)?;
-        if let Some(op) = op {
-            self.operator(op, &inner)?;
-        }
-        refs.extend(inner);
-        Ok(())
+    fn exprs<'e>(&mut self, exprs: impl IntoIterator<Item = &'e mut Expr>) -> Result<()> {
+        exprs.into_iter().try_for_each(|expr| self.expr(expr))
     }
 
-    fn exprs<'e>(&mut self, exprs: impl IntoIterator<Item = &'e mut Expr>, refs: &mut Refs) -> Result<()> {
-        exprs.into_iter().try_for_each(|expr| self.expr(expr, refs))
-    }
-
-    fn subquery(&mut self, query: &mut Query, refs: &mut Refs) -> Result<()> {
-        let (_, inner) = self.query(query, false)?;
-        refs.extend(inner);
+    fn subquery(&mut self, query: &mut Query) -> Result<()> {
+        self.query(query, false)?;
         Ok(())
     }
 
     /// Check the children of `expr`, and return the operator the expression itself applies, if any.
-    fn expr_inner(&mut self, expr: &mut Expr, refs: &mut Refs) -> Result<Option<Op>> {
+    fn expr_inner(&mut self, expr: &mut Expr) -> Result<Option<Op>> {
         match expr {
             Expr::Column(column) => {
-                self.column(column, refs)?;
+                self.column(column)?;
                 Ok(None)
             }
             Expr::Literal(_) | Expr::Placeholder(_) => Ok(None),
             Expr::Unary { op, expr } => {
-                self.expr(expr, refs)?;
+                self.expr(expr)?;
                 Ok(Some(match op {
                     UnaryOperator::Not => Op::Not,
                     UnaryOperator::Minus => Op::Minus,
@@ -786,8 +729,8 @@ impl<'p, C> Checker<'p, C> {
                 }))
             }
             Expr::Binary { left, op, right } => {
-                self.expr(left, refs)?;
-                self.expr(right, refs)?;
+                self.expr(left)?;
+                self.expr(right)?;
                 Ok(Some(binary_op(*op)))
             }
             Expr::Is {
@@ -795,7 +738,7 @@ impl<'p, C> Checker<'p, C> {
                 test: _,
                 negated: _,
             } => {
-                self.expr(expr, refs)?;
+                self.expr(expr)?;
                 Ok(Some(Op::Is))
             }
             Expr::IsDistinctFrom {
@@ -803,13 +746,13 @@ impl<'p, C> Checker<'p, C> {
                 right,
                 negated: _,
             } => {
-                self.expr(left, refs)?;
-                self.expr(right, refs)?;
+                self.expr(left)?;
+                self.expr(right)?;
                 Ok(Some(Op::IsDistinctFrom))
             }
             Expr::InList { expr, list, negated: _ } => {
-                self.expr(expr, refs)?;
-                self.exprs(list, refs)?;
+                self.expr(expr)?;
+                self.exprs(list)?;
                 Ok(Some(Op::In))
             }
             Expr::InSubquery {
@@ -817,8 +760,8 @@ impl<'p, C> Checker<'p, C> {
                 subquery,
                 negated: _,
             } => {
-                self.expr(expr, refs)?;
-                self.subquery(subquery, refs)?;
+                self.expr(expr)?;
+                self.subquery(subquery)?;
                 Ok(Some(Op::In))
             }
             Expr::Between {
@@ -827,9 +770,9 @@ impl<'p, C> Checker<'p, C> {
                 high,
                 negated: _,
             } => {
-                self.expr(expr, refs)?;
-                self.expr(low, refs)?;
-                self.expr(high, refs)?;
+                self.expr(expr)?;
+                self.expr(low)?;
+                self.expr(high)?;
                 Ok(Some(Op::Between))
             }
             Expr::Like {
@@ -839,10 +782,10 @@ impl<'p, C> Checker<'p, C> {
                 escape,
                 negated: _,
             } => {
-                self.expr(expr, refs)?;
-                self.expr(pattern, refs)?;
+                self.expr(expr)?;
+                self.expr(pattern)?;
                 if let Some(escape) = escape {
-                    self.expr(escape, refs)?;
+                    self.expr(escape)?;
                 }
                 Ok(Some(match kind {
                     LikeKind::Like => Op::Like,
@@ -856,41 +799,41 @@ impl<'p, C> Checker<'p, C> {
                 else_result,
             } => {
                 if let Some(operand) = operand {
-                    self.expr(operand, refs)?;
+                    self.expr(operand)?;
                 }
                 for (condition, result) in branches {
-                    self.expr(condition, refs)?;
-                    self.expr(result, refs)?;
+                    self.expr(condition)?;
+                    self.expr(result)?;
                 }
                 if let Some(else_result) = else_result {
-                    self.expr(else_result, refs)?;
+                    self.expr(else_result)?;
                 }
                 Ok(None)
             }
             Expr::Cast { expr, data_type: _ } => {
-                self.expr(expr, refs)?;
+                self.expr(expr)?;
                 Ok(None)
             }
             Expr::Extract { field: _, expr } => {
                 self.function_allowed(None, "extract")?;
-                self.expr(expr, refs)?;
+                self.expr(expr)?;
                 Ok(None)
             }
             Expr::Function(function) => {
-                self.function(function, refs)?;
+                self.function(function)?;
                 Ok(None)
             }
             // the keyword forms are allowed and denied under their names, like any other function
             Expr::Variadic { function, first, rest } => {
                 self.function_allowed(None, function.name())?;
-                self.expr(first, refs)?;
-                self.exprs(rest, refs)?;
+                self.expr(first)?;
+                self.exprs(rest)?;
                 Ok(None)
             }
             Expr::NullIf { left, right } => {
                 self.function_allowed(None, "nullif")?;
-                self.expr(left, refs)?;
-                self.expr(right, refs)?;
+                self.expr(left)?;
+                self.expr(right)?;
                 Ok(None)
             }
             Expr::CurrentDate => self.function_allowed(None, "current_date").map(|()| None),
@@ -901,14 +844,14 @@ impl<'p, C> Checker<'p, C> {
                 characters,
             } => {
                 self.function_allowed(None, "trim")?;
-                self.expr(expr, refs)?;
+                self.expr(expr)?;
                 if let Some(characters) = characters {
-                    self.expr(characters, refs)?;
+                    self.expr(characters)?;
                 }
                 Ok(None)
             }
             Expr::Exists { subquery, negated: _ } | Expr::Subquery(subquery) => {
-                self.subquery(subquery, refs)?;
+                self.subquery(subquery)?;
                 Ok(None)
             }
         }
@@ -926,7 +869,7 @@ impl<'p, C> Checker<'p, C> {
         }
     }
 
-    fn function(&mut self, function: &mut Function, refs: &mut Refs) -> Result<()> {
+    fn function(&mut self, function: &mut Function) -> Result<()> {
         let Function {
             schema,
             name,
@@ -946,16 +889,16 @@ impl<'p, C> Checker<'p, C> {
                 distinct: _,
                 order_by,
             } => {
-                self.exprs(args, refs)?;
-                self.exprs(order_by.iter_mut().map(|o| &mut o.expr), refs)?;
+                self.exprs(args)?;
+                self.exprs(order_by.iter_mut().map(|o| &mut o.expr))?;
             }
         }
         if let Some(filter) = filter {
-            self.expr(filter, refs)?;
+            self.expr(filter)?;
         }
         if let Some(window) = over {
-            self.exprs(&mut window.partition_by, refs)?;
-            self.exprs(window.order_by.iter_mut().map(|o| &mut o.expr), refs)?;
+            self.exprs(&mut window.partition_by)?;
+            self.exprs(window.order_by.iter_mut().map(|o| &mut o.expr))?;
         }
         Ok(())
     }
@@ -991,10 +934,9 @@ impl<'p, C> Checker<'p, C> {
 
     /// Close the scope of a write, checking and expanding `RETURNING` on the way.
     fn close_write_scope(&mut self, returning: &mut Vec<SelectItem>) -> Result<()> {
-        let mut refs = Refs::new();
         for item in returning.iter_mut() {
             if let SelectItem::Expr { expr, alias: _ } = item {
-                self.expr(expr, &mut refs)?;
+                self.expr(expr)?;
             }
         }
         let result = self.close_scope(returning).map(|_| ());
@@ -1034,9 +976,8 @@ impl<'p, C> Checker<'p, C> {
             })?;
 
         // values cannot read the target table, but they may contain subqueries on other tables
-        let mut refs = Refs::new();
         for row in rows.iter_mut() {
-            self.exprs(row, &mut refs)?;
+            self.exprs(row)?;
         }
 
         if let Some(extra) = &rule.extra {
@@ -1099,13 +1040,12 @@ impl<'p, C> Checker<'p, C> {
             })?;
 
         let index = self.write_scope(table, true)?;
-        let mut refs = Refs::new();
         let result = (|| {
             for assignment in assignments.iter_mut() {
-                self.expr(&mut assignment.value, &mut refs)?;
+                self.expr(&mut assignment.value)?;
             }
             if let Some(selection) = selection {
-                self.expr(selection, &mut refs)?;
+                self.expr(selection)?;
             }
             Ok(())
         })();
@@ -1153,9 +1093,8 @@ impl<'p, C> Checker<'p, C> {
             )));
         }
         let index = self.write_scope(table, true)?;
-        let mut refs = Refs::new();
         if let Some(selection) = selection
-            && let Err(e) = self.expr(selection, &mut refs)
+            && let Err(e) = self.expr(selection)
         {
             self.scopes.pop();
             return Err(e);
@@ -1207,18 +1146,6 @@ fn binary_op(op: BinaryOperator) -> Op {
         | BinaryOperator::JsonPathText => Op::Json,
         BinaryOperator::Contains | BinaryOperator::ContainedBy => Op::Contains,
     }
-}
-
-fn operators_allowed(used: OpSet, allowed: OpSet, table: Option<&str>) -> Result<()> {
-    let missing = used.missing_from(allowed);
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let list = missing.iter().map(|op| op.as_str()).collect::<Vec<_>>().join(", ");
-    Err(Error::denied(match table {
-        Some(table) => format!("operator not allowed on table {table:?}: {list}"),
-        None => format!("operator not allowed: {list}"),
-    }))
 }
 
 /// An output position is only meaningful when p14g is not about to change the select list.

@@ -121,7 +121,7 @@ A statement is rejected unless a rule allows it.
 
 | Rule | Allows |
 | --- | --- |
-| `Select(table, columns=None, operators=None, only=False, filter=None)` | Reading the listed columns, or any column without `columns`. |
+| `Select(table, columns=None, only=False, filter=None)` | Reading the listed columns, or any column without `columns`. |
 | `Insert(table, columns=None, extra=None)` | `INSERT ... VALUES` setting the listed columns. |
 | `Update(table, columns=None, allow_unfiltered=False, only=False, filter=None)` | `UPDATE ... SET` on the listed columns. |
 | `Delete(table, allow_unfiltered=False, only=False, filter=None)` | `DELETE FROM`. |
@@ -135,10 +135,7 @@ A statement is rejected unless a rule allows it.
   and on the right of a `SET`.
   A table with an `Insert` rule and no `Select` rule can be inserted into and nothing else.
 - Several rules for one table are alternatives.
-  Each use of the table must be allowed in full by one of them; their columns and operators are not combined.
-- `operators` lists what may be applied to the table's columns.
-  Without it the policy's `operators` apply, which default to everything except regular expressions (`~` and
-  `SIMILAR TO`).
+  Each use of the table must be allowed in full by one of them; their columns are not combined.
 - `allow_unfiltered` permits an `UPDATE` or `DELETE` with no `WHERE`.
   Rejecting those catches mistakes. It is not a security control, because `WHERE true` passes.
 - `filter` restricts the rows the rule covers (see [Rows](#rows)).
@@ -165,6 +162,12 @@ column.
 - `expand` (default): `*` becomes the columns the rule lists. For a rule that allows all columns it becomes `t.*`.
 - `reject`: `*` is an error.
 - `allow`: `*` is left as it is, and is an error on a table whose rule lists columns.
+
+### Operators
+
+`Policy(operators=[...])` lists the operators a statement may use.
+The default is everything except regular expressions (`~` and `SIMILAR TO`), which a pattern can make very slow.
+The list is for the whole statement and cannot be set per table.
 
 ### Functions
 

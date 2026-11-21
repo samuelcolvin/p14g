@@ -70,8 +70,6 @@ struct PySelect {
     #[pyo3(get)]
     columns: Option<Vec<String>>,
     #[pyo3(get)]
-    operators: Option<Vec<String>>,
-    #[pyo3(get)]
     only: bool,
     filter: Option<Py<PyAny>>,
 }
@@ -79,23 +77,18 @@ struct PySelect {
 #[pymethods]
 impl PySelect {
     #[new]
-    #[pyo3(signature = (table, *, columns=None, operators=None, only=false, filter=None))]
+    #[pyo3(signature = (table, *, columns=None, only=false, filter=None))]
     fn new(
         py: Python<'_>,
         table: String,
         columns: Option<Vec<String>>,
-        operators: Option<Vec<String>>,
         only: bool,
         filter: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         check_filter(py, filter.as_ref())?;
-        if let Some(operators) = &operators {
-            parse_operators(py, operators)?;
-        }
         Ok(Self {
             table,
             columns,
-            operators,
             only,
             filter,
         })
@@ -103,10 +96,9 @@ impl PySelect {
 
     fn __repr__(&self) -> String {
         format!(
-            "Select({:?}, columns={}, operators={}, only={})",
+            "Select({:?}, columns={}, only={})",
             self.table,
             repr_list(self.columns.as_ref()),
-            repr_list(self.operators.as_ref()),
             repr_bool(self.only)
         )
     }
@@ -1010,9 +1002,6 @@ fn add_rule(
         let mut rule = p14g::Select::table(&select.table).only(select.only);
         if let Some(columns) = &select.columns {
             rule = rule.columns(columns);
-        }
-        if let Some(operators) = &select.operators {
-            rule = rule.operators(parse_operators(py, operators)?);
         }
         if let Some(filter) = &select.filter {
             let filter = filter.clone_ref(py);
