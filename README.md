@@ -26,16 +26,16 @@ policy = Policy(
     Delete('orders'),
 )
 
-safe = policy.check('select * from orders where qty < 3')
+safe = policy.rewrite('select * from orders where qty < 3')
 print(safe.sql)
 #> SELECT "orders"."id", "orders"."product", "orders"."qty" FROM "orders" WHERE ("orders"."qty" < 3)
 
-safe = policy.check("insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42})
+safe = policy.rewrite("insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42})
 print(safe.sql)
 #> INSERT INTO "orders" ("product", "qty", "tenant_id") VALUES ('tea', 2, 42)
 
 try:
-    policy.check('select * from pg_shadow')
+    policy.rewrite('select * from pg_shadow')
 except PgSafeError as e:
     print(e.kind, e)
     #> denied reading from table "pg_shadow" is not allowed
@@ -55,7 +55,7 @@ let policy: Policy<Request> = Policy::builder()
     .delete(Delete::table("orders"))
     .build()?;
 
-let safe = policy.check("select * from orders where qty < 3", &Request { tenant_id: 42 })?;
+let safe = policy.rewrite("select * from orders where qty < 3", &Request { tenant_id: 42 })?;
 ```
 
 ## What you must also do
@@ -133,7 +133,7 @@ A statement is rejected unless a rule allows it.
   Rejecting those catches mistakes. It is not a security control, because `WHERE true` passes.
 - `only` makes pgsafe write the table as `ONLY table` (see [Inheritance and partitions](#inheritance-and-partitions)).
   Every `Select`, `Update` and `Delete` rule for one table must agree on it.
-- `extra` is a dict, or a callable taking the `context` you pass to `check()` and returning a dict, of columns pgsafe
+- `extra` is a dict, or a callable taking the `context` you pass to `rewrite()` and returning a dict, of columns pgsafe
   adds to every inserted row.
   A statement that sets one of those columns itself is rejected.
 
@@ -200,7 +200,7 @@ pgsafe then writes `ONLY table` wherever a statement reads, updates or deletes i
 
 ```python
 policy = Policy(Select('family', columns=['id'], only=True))
-print(policy.check('select * from family').sql)
+print(policy.rewrite('select * from family').sql)
 #> SELECT "family"."id" FROM ONLY "family"
 ```
 
@@ -209,7 +209,7 @@ A statement may also write `ONLY` itself, on any table it is allowed to use.
 
 ### Literals and parameters
 
-`check()` returns `SafeSql(sql, params, kind, tables)`.
+`rewrite()` returns `SafeSql(sql, params, kind, tables)`.
 
 With `literals='inline'`, the default, string literals are escaped into `sql` and `params` is empty.
 
@@ -240,7 +240,7 @@ def per_tenant(table: Table, context):
 
 
 policy = Policy(Select('events'), mappers=[per_tenant])
-print(policy.check('select id from events', context=42).sql)
+print(policy.rewrite('select id from events', context=42).sql)
 #> SELECT "events"."id" FROM "tenants"."events_42" AS "events"
 ```
 

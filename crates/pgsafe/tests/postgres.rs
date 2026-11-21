@@ -93,7 +93,7 @@ fn postgres_agrees() {
         if case.sql.contains('$') && !case.sql.contains("$$") && !case.sql.contains("$tag$") {
             continue;
         }
-        let safe = inline.check(case.sql, &()).unwrap();
+        let safe = inline.rewrite(case.sql, &()).unwrap();
         let inline_rows = match run(&mut client, &safe.sql, &[]) {
             Ok(rows) => rows,
             Err(e) => {
@@ -101,7 +101,7 @@ fn postgres_agrees() {
                 continue;
             }
         };
-        let safe = params.check(case.sql, &()).unwrap();
+        let safe = params.rewrite(case.sql, &()).unwrap();
         match run(&mut client, &safe.sql, &safe.params) {
             Ok(rows) if rows == inline_rows => {}
             Ok(rows) => failures.push(format!(
@@ -165,7 +165,7 @@ fn literals_round_trip(client: &mut Client) {
         for value in NASTY {
             // dollar quoting carries any string into the input with no escaping to get wrong
             let input = format!("select $pgsafe_q${value}$pgsafe_q$");
-            let safe = inline.check(&input, &()).unwrap();
+            let safe = inline.rewrite(&input, &()).unwrap();
             let row = client
                 .query_one(&safe.sql, &[])
                 .unwrap_or_else(|e| panic!("{}: {e}", safe.sql));
@@ -173,13 +173,13 @@ fn literals_round_trip(client: &mut Client) {
 
             // and the usual quoted form, which is only the same string when backslashes are not escapes
             let input = format!("select '{}'", value.replace('\'', "''"));
-            let safe = inline.check(&input, &()).unwrap();
+            let safe = inline.rewrite(&input, &()).unwrap();
             let row = client
                 .query_one(&safe.sql, &[])
                 .unwrap_or_else(|e| panic!("{}: {e}", safe.sql));
             assert_eq!(row.get::<_, &str>(0), *value, "{} with scs={conforming}", safe.sql);
 
-            let safe = params.check(&input, &()).unwrap();
+            let safe = params.rewrite(&input, &()).unwrap();
             assert_eq!(safe.sql, "SELECT $1");
             assert_eq!(safe.params, [*value]);
         }
@@ -203,7 +203,7 @@ fn identifiers_round_trip(client: &mut Client) {
         "$1",
     ] {
         let input = format!("select 1 as \"{}\"", name.replace('"', "\"\""));
-        let safe = policy.check(&input, &()).unwrap();
+        let safe = policy.rewrite(&input, &()).unwrap();
         let row = client
             .query_one(&safe.sql, &[])
             .unwrap_or_else(|e| panic!("{}: {e}", safe.sql));
@@ -215,7 +215,7 @@ fn identifiers_round_trip(client: &mut Client) {
 fn views_enforce_rows(client: &mut Client) {
     let policy = policy();
     let run_ok = |client: &mut Client, sql: &str| {
-        let safe = policy.check(sql, &()).unwrap();
+        let safe = policy.rewrite(sql, &()).unwrap();
         run(client, &safe.sql, &[])
     };
     // only the two orders with qty < 10 are visible or writable through the view
@@ -245,10 +245,10 @@ fn star_allow(client: &mut Client) {
         .literals(Literals::Inline)
         .build()
         .unwrap();
-    let safe = policy.check("select * from v", &()).unwrap();
+    let safe = policy.rewrite("select * from v", &()).unwrap();
     assert_eq!(safe.sql, r#"SELECT * FROM "v""#);
     assert_eq!(run(client, &safe.sql, &[]).unwrap(), 3);
-    assert!(policy.check("select * from orders", &()).is_err());
+    assert!(policy.rewrite("select * from orders", &()).is_err());
 }
 
 fn describe(error: &postgres::Error) -> String {
@@ -269,7 +269,7 @@ fn only_leaves_out_children(client: &mut Client) {
 
     let policy = policy();
     let mut rows = |sql: &str| {
-        let safe = policy.check(sql, &()).unwrap();
+        let safe = policy.rewrite(sql, &()).unwrap();
         assert!(safe.sql.contains(r#"ONLY "family""#), "{}", safe.sql);
         run(client, &safe.sql, &[]).unwrap()
     };
@@ -285,7 +285,7 @@ fn default_schema_is_not_shadowed(client: &mut Client) {
     let plain = policy();
     let sql = "select id from customers";
     let rows = |client: &mut Client, policy: &Policy| {
-        let safe = policy.check(sql, &()).unwrap();
+        let safe = policy.rewrite(sql, &()).unwrap();
         let messages = client.simple_query(&safe.sql).unwrap();
         messages
             .iter()
@@ -309,7 +309,7 @@ fn default_schema_is_not_shadowed(client: &mut Client) {
         "update orders set qty = 2 where id = 1 returning *",
         "delete from orders where id = 1 returning id",
     ] {
-        let safe = qualified.check(sql, &()).unwrap();
+        let safe = qualified.rewrite(sql, &()).unwrap();
         assert!(safe.sql.contains(r#""public"."orders""#), "{}", safe.sql);
         assert_eq!(run(client, &safe.sql, &[]).unwrap(), 1, "{}", safe.sql);
     }

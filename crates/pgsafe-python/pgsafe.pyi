@@ -87,7 +87,7 @@ class Insert:
     """Allows `INSERT INTO table (columns) VALUES ...`.
 
     `extra` gives columns pgsafe sets on every inserted row: a dict, or a callable that takes the context
-    passed to `check()` and returns a dict. A statement that sets one of those columns itself is rejected.
+    passed to `rewrite()` and returns a dict. A statement that sets one of those columns itself is rejected.
     """
 
     def __new__(
@@ -257,7 +257,7 @@ class Mapper:
 def mapper(kind: type[Table]) -> Callable[[Callable[[Table, Any], Table]], Mapper]:
     """Register a function as a mapper for one kind of node.
 
-    The function is called with the node and the context passed to `check()`, and returns the node to use
+    The function is called with the node and the context passed to `rewrite()`, and returns the node to use
     in its place. A table mapper returns a `Table`; the others may return any expression, or a plain value.
 
     Mappers run after the statement has passed the policy, and what they return is not checked against it.
@@ -330,8 +330,10 @@ class Policy:
         limits: Limits | None = None,
         mappers: Sequence[Mapper] | None = None,
     ) -> Policy: ...
-    def check(self, sql: str, *, context: Any = None, allow: Sequence[_Kind] | None = None) -> SafeSql:
-        """Check one SQL statement and return SQL that is safe to run, or raise `PgSafeError`.
+    def rewrite(self, sql: str, *, context: Any = None, allow: Sequence[_Kind] | None = None) -> SafeSql:
+        """Check one SQL statement against the policy and return it rewritten so it is safe to run.
+
+        Raises `PgSafeError` if the statement is not allowed.
 
         `context` is passed on to `extra` callables and mappers. `allow` restricts the kinds of statement
         accepted by this call, for example `['select']`.

@@ -71,11 +71,11 @@ testcov: ## Run the Rust tests with coverage and print a summary
 	cargo llvm-cov --workspace --summary-only
 
 .PHONY: fuzz
-fuzz: ## Fuzz `check` with arbitrary input
-	cargo +nightly fuzz run --fuzz-dir crates/fuzz check --release
+fuzz: ## Fuzz `rewrite` with arbitrary input
+	cargo +nightly fuzz run --fuzz-dir crates/fuzz rewrite --release
 
 .PHONY: fuzz-mutate
-fuzz-mutate: ## Fuzz `check` with mutations of the test cases
+fuzz-mutate: ## Fuzz `rewrite` with mutations of the test cases
 	cargo +nightly fuzz run --fuzz-dir crates/fuzz mutate --release
 
 .PHONY: all

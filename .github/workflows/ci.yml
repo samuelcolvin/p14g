@@ -169,7 +169,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [check, mutate]
+        target: [rewrite, mutate]
 
     runs-on: ubuntu-latest
 

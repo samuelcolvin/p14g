@@ -1,6 +1,6 @@
 //! The properties both fuzz targets check.
 //!
-//! Whatever the input, `Policy::check` must not panic. When it accepts a statement, Postgres's own parser
+//! Whatever the input, `Policy::rewrite` must not panic. When it accepts a statement, Postgres's own parser
 //! must agree with pgsafe about what the output is: it parses as one statement, it only touches tables
 //! and functions the policy allows, and pgsafe reading its own output back gets the same SQL again.
 
@@ -35,7 +35,7 @@ static PARAMS: LazyLock<Policy> = LazyLock::new(|| builder().literals(Literals::
 /// Run every check on one input.
 pub fn check(sql: &str) {
     for policy in [&*INLINE, &*PARAMS] {
-        let Ok(safe) = policy.check(sql, &()) else {
+        let Ok(safe) = policy.rewrite(sql, &()) else {
             continue;
         };
         let parsed = pg_query::parse(&safe.sql).unwrap_or_else(|e| {
@@ -76,7 +76,7 @@ pub fn check(sql: &str) {
             );
         }
 
-        match policy.check(&safe.sql, &()) {
+        match policy.rewrite(&safe.sql, &()) {
             Ok(again) => {
                 // in params mode the literals are already placeholders, so there is nothing new to bind
                 assert_eq!(again.sql, safe.sql, "not idempotent\n input: {sql}");

@@ -326,7 +326,7 @@ impl<C> Insert<C> {
         self
     }
 
-    /// Columns pgsafe adds to every inserted row, computed from the context passed to `check`.
+    /// Columns pgsafe adds to every inserted row, computed from the context passed to `rewrite`.
     ///
     /// A statement that sets one of these columns itself is rejected.
     #[must_use]
@@ -841,7 +841,7 @@ pub struct SafeSql {
 
 /// A compiled set of rules. Build one with [`Policy::builder`] and reuse it for every statement.
 ///
-/// `C` is the type of the context value passed to [`Policy::check`] and handed on to mappers and
+/// `C` is the type of the context value passed to [`Policy::rewrite`] and handed on to mappers and
 /// [`Insert::extra`] callbacks.
 pub struct Policy<C = ()> {
     /// Tables that are always written `ONLY table`.
@@ -869,13 +869,13 @@ impl<C> Policy<C> {
         PolicyBuilder::default()
     }
 
-    /// Check one SQL statement against the policy and return SQL that is safe to run.
-    pub fn check(&self, sql: &str, context: &C) -> Result<SafeSql> {
-        self.check_kinds(sql, context, None)
+    /// Check one SQL statement against the policy and return it rewritten so it is safe to run.
+    pub fn rewrite(&self, sql: &str, context: &C) -> Result<SafeSql> {
+        self.rewrite_kinds(sql, context, None)
     }
 
-    /// Like [`Policy::check`], and also rejects the statement unless its kind is in `allow`.
-    pub fn check_kinds(&self, sql: &str, context: &C, allow: Option<&[StatementKind]>) -> Result<SafeSql> {
+    /// Like [`Policy::rewrite`], and also rejects the statement unless its kind is in `allow`.
+    pub fn rewrite_kinds(&self, sql: &str, context: &C, allow: Option<&[StatementKind]>) -> Result<SafeSql> {
         let lowered = lower::parse(sql, self.dialect, &self.limits)?;
         let mut statement = lowered.statement;
         let kind = statement.kind();

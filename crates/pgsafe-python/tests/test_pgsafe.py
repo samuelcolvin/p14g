@@ -37,7 +37,7 @@ def fixture_policy() -> Policy:
 
 
 def test_select(policy: Policy):
-    safe = policy.check('select id from orders where qty < 3')
+    safe = policy.rewrite('select id from orders where qty < 3')
     assert safe.sql == 'SELECT "orders"."id" FROM "orders" WHERE ("orders"."qty" < 3)'
     assert safe.params == []
     assert safe.kind == 'select'
@@ -49,10 +49,10 @@ def test_select(policy: Policy):
 
 
 def test_star_is_expanded(policy: Policy):
-    assert policy.check('select * from orders').sql == (
+    assert policy.rewrite('select * from orders').sql == (
         'SELECT "orders"."id", "orders"."product", "orders"."qty" FROM "orders"'
     )
-    assert policy.check('select * from v').sql == 'SELECT "v".* FROM "v"'
+    assert policy.rewrite('select * from v').sql == 'SELECT "v".* FROM "v"'
 
 
 @pytest.mark.parametrize(
@@ -70,7 +70,7 @@ def test_star_is_expanded(policy: Policy):
 )
 def test_rejected(policy: Policy, sql: str, kind: str, message: str):
     with pytest.raises(PgSafeError) as exc_info:
-        policy.check(sql)
+        policy.rewrite(sql)
     error = exc_info.value
     assert error.kind == kind
     assert error.message == message
@@ -80,26 +80,28 @@ def test_rejected(policy: Policy, sql: str, kind: str, message: str):
 
 def test_error_position(policy: Policy):
     with pytest.raises(PgSafeError) as exc_info:
-        policy.check("select id,\n  U&'x'\nfrom orders")
+        policy.rewrite("select id,\n  U&'x'\nfrom orders")
     error = exc_info.value
     assert str(error) == 'this kind of literal is not supported at line 2, column 3'
     assert error.message == 'this kind of literal is not supported'
     assert (error.line, error.column) == (2, 3)
 
     with pytest.raises(PgSafeError) as exc_info:
-        policy.check('select secret from orders')
+        policy.rewrite('select secret from orders')
     assert (exc_info.value.line, exc_info.value.column) == (None, None)
 
 
 def test_injection_stays_a_literal(policy: Policy):
     sql = r"select id from orders where product = 'x\'' UNION SELECT password FROM users --'"
-    assert policy.check(sql).sql == (
+    assert policy.rewrite(sql).sql == (
         r"""SELECT "orders"."id" FROM "orders" WHERE ("orders"."product" = E'x\\'' UNION SELECT password FROM users --')"""
     )
 
 
 def test_insert_extra_callable(policy: Policy):
-    safe = policy.check("insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42, 'user': 'sam'})
+    safe = policy.rewrite(
+        "insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42, 'user': 'sam'}
+    )
     assert safe.sql == (
         'INSERT INTO "orders" ("product", "qty", "tenant_id", "created_by") VALUES (\'tea\', 2, 42, \'sam\')'
     )
@@ -124,7 +126,7 @@ def test_insert_extra_dict_and_values():
             },
         )
     )
-    assert policy.check('insert into t (x) values (1), (2)').sql == (
+    assert policy.rewrite('insert into t (x) values (1), (2)').sql == (
         'INSERT INTO "t" ("x", "a", "b", "c", "d", "e", "f", "g", "h", "i") VALUES '
         "(1, NULL, TRUE, (- 5), 1.5, 'it''s', 1000000000000000000000000000000, CAST('Infinity' AS double precision), 0.0, 2.0), "
         "(2, NULL, TRUE, (- 5), 1.5, 'it''s', 1000000000000000000000000000000, CAST('Infinity' AS double precision), 0.0, 2.0)"
@@ -135,18 +137,18 @@ def test_insert_extra_collision(policy: Policy):
     context = {'tenant_id': 42, 'user': 'sam'}
     # the rule lists the columns a statement may set, and `tenant_id` is not one of them
     with pytest.raises(PgSafeError, match='inserting into these columns of table "orders" is not allowed: tenant_id'):
-        policy.check("insert into orders (product, tenant_id) values ('tea', 1)", context=context)
+        policy.rewrite("insert into orders (product, tenant_id) values ('tea', 1)", context=context)
 
     # a rule that allows any column still refuses the ones the policy sets
     open_policy = Policy(Insert('orders', extra=add_tenant))
     with pytest.raises(PgSafeError, match='is set by the policy and cannot be set by the statement') as exc_info:
-        open_policy.check("insert into orders (product, tenant_id) values ('tea', 1)", context=context)
+        open_policy.rewrite("insert into orders (product, tenant_id) values ('tea', 1)", context=context)
     assert exc_info.value.kind == 'denied'
 
 
 def test_insert_extra_raises(policy: Policy):
     with pytest.raises(PgSafeError) as exc_info:
-        policy.check("insert into orders (product, qty) values ('tea', 2)", context={})
+        policy.rewrite("insert into orders (product, qty) values ('tea', 2)", context={})
     error = exc_info.value
     assert error.kind == 'callback'
     assert str(error) == "callback failed: KeyError: 'tenant_id'"
@@ -169,7 +171,7 @@ def returns_object_values(context: Any) -> Any:
 def test_insert_extra_bad_return(extra: Any):
     policy = Policy(Insert('t', extra=extra))
     with pytest.raises(PgSafeError) as exc_info:
-        policy.check('insert into t (x) values (1)')
+        policy.rewrite('insert into t (x) values (1)')
     assert exc_info.value.kind == 'callback'
     assert isinstance(exc_info.value.__cause__, TypeError)
 
@@ -177,7 +179,7 @@ def test_insert_extra_bad_return(extra: Any):
 def test_insert_extra_bad_column():
     policy = Policy(Insert('t', extra={'': 1}))
     with pytest.raises(PgSafeError, match='extra returned an invalid column') as exc_info:
-        policy.check('insert into t (x) values (1)')
+        policy.rewrite('insert into t (x) values (1)')
     assert exc_info.value.kind == 'callback'
 
     with pytest.raises(TypeError, match='extra must be a dict or a callable returning a dict'):
@@ -185,45 +187,45 @@ def test_insert_extra_bad_column():
 
 
 def test_update_and_delete(policy: Policy):
-    safe = policy.check('update orders set qty = qty + 1 where id = 5 returning *')
+    safe = policy.rewrite('update orders set qty = qty + 1 where id = 5 returning *')
     assert safe.sql == (
         'UPDATE "orders" SET "qty" = ("orders"."qty" + 1) WHERE ("orders"."id" = 5) '
         'RETURNING "orders"."id", "orders"."product", "orders"."qty"'
     )
     assert safe.kind == 'update'
-    safe = policy.check('delete from orders where id = 1')
+    safe = policy.rewrite('delete from orders where id = 1')
     assert safe.sql == 'DELETE FROM "orders" WHERE ("orders"."id" = 1)'
     assert safe.kind == 'delete'
 
     unfiltered = Policy(Update('orders', allow_unfiltered=True), Delete('orders', allow_unfiltered=True))
-    assert unfiltered.check('update orders set qty = 1').sql == 'UPDATE "orders" SET "qty" = 1'
-    assert unfiltered.check('delete from orders').sql == 'DELETE FROM "orders"'
+    assert unfiltered.rewrite('update orders set qty = 1').sql == 'UPDATE "orders" SET "qty" = 1'
+    assert unfiltered.rewrite('delete from orders').sql == 'DELETE FROM "orders"'
 
 
 def test_allow(policy: Policy):
-    assert policy.check('select id from orders', allow=['select']).kind == 'select'
+    assert policy.rewrite('select id from orders', allow=['select']).kind == 'select'
     with pytest.raises(PgSafeError, match='DELETE statements are not allowed here'):
-        policy.check('delete from orders where id = 1', allow=['select', 'insert'])
+        policy.rewrite('delete from orders where id = 1', allow=['select', 'insert'])
     with pytest.raises(PgSafeError, match='unknown statement kind "merge"') as exc_info:
-        policy.check('select 1', allow=['merge'])  # pyright: ignore[reportArgumentType]
+        policy.rewrite('select 1', allow=['merge'])  # pyright: ignore[reportArgumentType]
     assert exc_info.value.kind == 'config'
 
 
 def test_functions():
     policy = Policy(Select('orders'), functions=['app.order_total'], deny_functions=['random', 'now'])
-    assert policy.check('select app.order_total(id), lower(product) from orders').sql == (
+    assert policy.rewrite('select app.order_total(id), lower(product) from orders').sql == (
         'SELECT "app"."order_total"("orders"."id"), pg_catalog."lower"("orders"."product") FROM "orders"'
     )
     for sql in 'select random()', 'select now()', 'select order_total(1)':
         with pytest.raises(PgSafeError, match='is not allowed'):
-            policy.check(sql)
+            policy.rewrite(sql)
 
     with pytest.raises(PgSafeError, match='cannot deny function "pg_sleep": it is not an allowed function'):
         Policy(deny_functions=['pg_sleep'])
 
     bare = Policy(Select('orders'), default_functions=False)
     with pytest.raises(PgSafeError, match='function "count" is not allowed'):
-        bare.check('select count(*) from orders')
+        bare.rewrite('select count(*) from orders')
 
     assert 'count' in pgsafe.DEFAULT_FUNCTIONS
     assert 'pg_sleep' not in pgsafe.DEFAULT_FUNCTIONS
@@ -232,10 +234,10 @@ def test_functions():
 
 def test_operators():
     policy = Policy(Select('orders', operators=['=', 'and']), Select('other'), operators=['<', '~'])
-    assert policy.check('select id from orders where id = 1 and qty = 2').kind == 'select'
+    assert policy.rewrite('select id from orders where id = 1 and qty = 2').kind == 'select'
     with pytest.raises(PgSafeError, match='operator not allowed on table "orders": <'):
-        policy.check('select id from orders where id < 1')
-    assert policy.check("select id from other where id < 1 and name ~ 'x'".replace(' and ', ' < ')).kind == 'select'
+        policy.rewrite('select id from orders where id < 1')
+    assert policy.rewrite("select id from other where id < 1 and name ~ 'x'".replace(' and ', ' < ')).kind == 'select'
 
     with pytest.raises(PgSafeError, match='unknown operator "xor"') as exc_info:
         Select('orders', operators=['xor'])  # pyright: ignore[reportArgumentType]
@@ -246,18 +248,18 @@ def test_operators():
 
 def test_star_behaviour():
     with pytest.raises(PgSafeError, match=r'\* is not allowed, list the columns'):
-        Policy(Select('v'), star_behaviour='reject').check('select * from v')
+        Policy(Select('v'), star_behaviour='reject').rewrite('select * from v')
     allow = Policy(Select('v'), Select('orders', columns=['id']), star_behaviour='allow')
-    assert allow.check('select * from v').sql == 'SELECT * FROM "v"'
+    assert allow.rewrite('select * from v').sql == 'SELECT * FROM "v"'
     with pytest.raises(PgSafeError, match='only some of its columns are allowed'):
-        allow.check('select * from orders')
+        allow.rewrite('select * from orders')
     with pytest.raises(PgSafeError, match='unknown star behaviour "maybe"'):
         Policy(star_behaviour='maybe')  # pyright: ignore[reportArgumentType]
 
 
 def test_params():
     policy = Policy(Select('orders'), literals='params')
-    safe = policy.check("select id from orders where product = 'tea' and qty = $1 and note = 'it''s'")
+    safe = policy.rewrite("select id from orders where product = 'tea' and qty = $1 and note = 'it''s'")
     assert safe.sql == (
         'SELECT "orders"."id" FROM "orders" '
         'WHERE ((("orders"."product" = $2) AND ("orders"."qty" = $1)) AND ("orders"."note" = $3))'
@@ -269,11 +271,11 @@ def test_params():
 
 def test_max_rows_dialect_limits():
     policy = Policy(Select('orders'), max_rows=10)
-    assert policy.check('select id from orders').sql == 'SELECT "orders"."id" FROM "orders" LIMIT 10'
-    assert policy.check('select id from orders limit 3').sql == 'SELECT "orders"."id" FROM "orders" LIMIT 3'
+    assert policy.rewrite('select id from orders').sql == 'SELECT "orders"."id" FROM "orders" LIMIT 10'
+    assert policy.rewrite('select id from orders limit 3').sql == 'SELECT "orders"."id" FROM "orders" LIMIT 3'
 
     mysql = Policy(Select('orders'), dialect='mysql')
-    assert mysql.check('select `id` from `orders`').sql == 'SELECT "orders"."id" FROM "orders"'
+    assert mysql.rewrite('select `id` from `orders`').sql == 'SELECT "orders"."id" FROM "orders"'
     with pytest.raises(PgSafeError, match='unknown dialect "oracle"'):
         Policy(dialect='oracle')  # pyright: ignore[reportArgumentType]
 
@@ -284,7 +286,7 @@ def test_max_rows_dialect_limits():
     assert repr(limits).startswith('Limits(max_sql_bytes=30, max_depth=50, ')
     tight = Policy(Select('orders'), limits=limits)
     with pytest.raises(PgSafeError, match='SQL is 38 bytes, the limit is 30') as exc_info:
-        tight.check('select id from orders where qty > 1000')
+        tight.rewrite('select id from orders where qty > 1000')
     assert exc_info.value.kind == 'limit'
     with pytest.raises(PgSafeError, match='max_depth must be at least 1'):
         Policy(limits=Limits(max_depth=0))
@@ -325,7 +327,7 @@ def test_table_mapper():
         return table
 
     policy = Policy(Select('events'), Select('other'), Insert('events'), mappers=[per_tenant])
-    safe = policy.check('select e.id, other.x from events e join other on other.id = e.id', context=42)
+    safe = policy.rewrite('select e.id, other.x from events e join other on other.id = e.id', context=42)
     assert safe.sql == (
         'SELECT "e"."id", "other"."x" FROM "tenants"."events_42" AS "e" INNER JOIN "other" ON ("other"."id" = "e"."id")'
     )
@@ -334,10 +336,10 @@ def test_table_mapper():
     assert seen == [(Table('events', alias='e'), 42), (Table('other'), 42)]
 
     # without an alias, the original name is kept as one so that the columns still resolve
-    assert policy.check('select id from events', context=7).sql == (
+    assert policy.rewrite('select id from events', context=7).sql == (
         'SELECT "events"."id" FROM "tenants"."events_7" AS "events"'
     )
-    assert policy.check('insert into events (a) values (1) returning a', context=7).sql == (
+    assert policy.rewrite('insert into events (a) values (1) returning a', context=7).sql == (
         'INSERT INTO "tenants"."events_7" AS "events" ("a") VALUES (1) RETURNING "events"."a"'
     )
     # the decorated function can still be called directly
@@ -366,7 +368,7 @@ def test_expression_mappers():
         return column
 
     policy = Policy(Select('v'), mappers=[freeze_time, redact, day])
-    assert policy.check("select created, lower(a || 'x') from v where b = 'secret' and c < now()").sql == (
+    assert policy.rewrite("select created, lower(a || 'x') from v where b = 'secret' and c < now()").sql == (
         'SELECT pg_catalog."date_trunc"(\'day\', "v"."created"), pg_catalog."upper"(("v"."a" || \'x\')) '
         'FROM "v" WHERE (("v"."b" = NULL) AND ("v"."c" < "app"."frozen_now"()))'
     )
@@ -377,7 +379,7 @@ def test_expression_mappers():
         return function.replace(name='my_count', schema=None) if function.name == 'count' else function
 
     policy = Policy(Select('v'), mappers=[rename_count])
-    assert policy.check('select count(distinct a) filter (where b > 1) over (partition by c) from v').sql == (
+    assert policy.rewrite('select count(distinct a) filter (where b > 1) over (partition by c) from v').sql == (
         'SELECT "my_count"(DISTINCT "v"."a") FILTER (WHERE ("v"."b" > 1)) OVER (PARTITION BY "v"."c") FROM "v"'
     )
 
@@ -408,7 +410,7 @@ def test_mapper_errors():
     ]:
         policy = Policy(Select('v'), mappers=mappers)
         with pytest.raises(PgSafeError) as exc_info:
-            policy.check(sql)
+            policy.rewrite(sql)
         assert str(exc_info.value) == message
         assert exc_info.value.kind == 'callback'
         assert isinstance(exc_info.value.__cause__, cause)
@@ -474,7 +476,7 @@ def test_mapper_output_is_still_escaped():
         return "'; DROP TABLE orders; --\\"
 
     policy = Policy(Select('v'), mappers=[hostile, hostile_literal])
-    assert policy.check("select a from v where b = 'x'").sql == (
+    assert policy.rewrite("select a from v where b = 'x'").sql == (
         'SELECT "v"."a" FROM "a""b"."x""; DROP TABLE orders; --" AS "v" '
         """WHERE ("v"."b" = E'''; DROP TABLE orders; --\\\\')"""
     )
@@ -519,7 +521,7 @@ def test_nodes_are_immutable():
     for node, attribute in (Table('a'), 'name'), (Column('a'), 'name'), (Select('a'), 'table'), (Limits(), 'max_depth'):
         with pytest.raises(AttributeError):
             setattr(node, attribute, 'x')
-    safe = Policy().check('select 1')
+    safe = Policy().rewrite('select 1')
     with pytest.raises(AttributeError):
         safe.sql = 'drop table x'  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(TypeError):
@@ -542,9 +544,9 @@ def test_function_args_shapes():
 
     policy = Policy(Select('v'), mappers=[record])
     sql = "select count(*), current_date, now(), lower(a), coalesce(b, -1, 'x', c + 1, (select max(d) from v)) from v"
-    out = policy.check(sql).sql
+    out = policy.rewrite(sql).sql
     # a mapper that returns what it was given changes nothing
-    assert out == Policy(Select('v')).check(sql).sql
+    assert out == Policy(Select('v')).rewrite(sql).sql
     assert seen['count'] == []
     assert seen['current_date'] == []
     assert seen['now'] == []
@@ -557,7 +559,7 @@ def test_function_args_shapes():
     def count_one(function: Function, context: Any) -> pgsafe.ExprLike:
         return function.replace(args=[1]) if function.name == 'count' else function
 
-    assert Policy(Select('v'), mappers=[count_one]).check('select count(*) from v').sql == (
+    assert Policy(Select('v'), mappers=[count_one]).rewrite('select count(*) from v').sql == (
         'SELECT pg_catalog."count"(1) FROM "v"'
     )
 
@@ -585,7 +587,7 @@ def test_mappers_run_in_order_and_bottom_up():
         return literal
 
     policy = Policy(Select('v'), mappers=[first, second, to_literal, never_sees_mapped_output])
-    assert policy.check('select lower(upper(a)), 1 from v').sql == 'SELECT pg_catalog."abs"(7), 1 FROM "v"'
+    assert policy.rewrite('select lower(upper(a)), 1 from v').sql == 'SELECT pg_catalog."abs"(7), 1 FROM "v"'
     # the inner call is mapped before the outer one, and each mapper is given what the one before returned,
     # so the literal mapper sees the literal that replaced `upper(a)`
     assert calls == ['first:upper', 'second:upper', 'literal:7', 'first:lower', 'second:abs', 'literal:1']
@@ -597,7 +599,7 @@ def test_mapper_everywhere_in_a_statement():
         return literal.value + 1 if isinstance(literal.value, int) and not isinstance(literal.value, bool) else literal
 
     policy = Policy(Select('v'), Insert('v'), Update('v'), Delete('v'), mappers=[bump])
-    assert policy.check(
+    assert policy.rewrite(
         'with c as (select 1 as n from v) select a, case when b = 1 then 2 else 3 end from v join c on c.n = 1 '
         'where a in (1, 2) and b between 1 and 2 and exists (select 1 from v where a = 1) '
         'group by a, b having count(*) > 1 order by a + 1 limit 1 offset 1'
@@ -607,14 +609,14 @@ def test_mapper_everywhere_in_a_statement():
         'WHERE ((("v"."a" IN (2, 3)) AND ("v"."b" BETWEEN 2 AND 3)) AND (EXISTS (SELECT 2 FROM "v" WHERE ("v"."a" = 2)))) '
         'GROUP BY "v"."a", "v"."b" HAVING (pg_catalog."count"(*) > 2) ORDER BY ("v"."a" + 2) LIMIT 2 OFFSET 2'
     )
-    assert policy.check('insert into v (a) values (1), (2) returning a + 1').sql == (
+    assert policy.rewrite('insert into v (a) values (1), (2) returning a + 1').sql == (
         'INSERT INTO "v" ("a") VALUES (2), (3) RETURNING ("v"."a" + 2)'
     )
-    assert policy.check('update v set a = 1 where b = 1 returning 1').sql == (
+    assert policy.rewrite('update v set a = 1 where b = 1 returning 1').sql == (
         'UPDATE "v" SET "a" = 2 WHERE ("v"."b" = 2) RETURNING 2'
     )
-    assert policy.check('delete from v where b = 1').sql == 'DELETE FROM "v" WHERE ("v"."b" = 2)'
-    assert policy.check('select a from v union select a from v where a = 1 order by 1').sql == (
+    assert policy.rewrite('delete from v where b = 1').sql == 'DELETE FROM "v" WHERE ("v"."b" = 2)'
+    assert policy.rewrite('select a from v union select a from v where a = 1 order by 1').sql == (
         '(SELECT "v"."a" FROM "v") UNION (SELECT "v"."a" FROM "v" WHERE ("v"."a" = 2)) ORDER BY 1'
     )
 
@@ -626,7 +628,7 @@ def test_mapper_returns_opaque_expr():
         return function.args[0] if function.name == 'lower' else function
 
     policy = Policy(Select('v'), mappers=[unwrap])
-    assert policy.check('select lower(a + 1), lower(b), lower(-2) from v').sql == (
+    assert policy.rewrite('select lower(a + 1), lower(b), lower(-2) from v').sql == (
         'SELECT ("v"."a" + 1), "v"."b", (- 2) FROM "v"'
     )
 
@@ -641,7 +643,7 @@ def test_mapper_builds_invalid_sql():
         return Function('nullif', [1])
 
     with pytest.raises(PgSafeError, match='NULLIF cannot be written with these arguments') as exc_info:
-        Policy(Select('v'), mappers=[keyword_function, bad_arity]).check('select lower(a) from v')
+        Policy(Select('v'), mappers=[keyword_function, bad_arity]).rewrite('select lower(a) from v')
     assert exc_info.value.kind == 'unsupported'
 
 
@@ -659,10 +661,10 @@ def test_context_is_passed_through_unchanged():
         return {}
 
     policy = Policy(Select('t'), Insert('t', extra=extra), mappers=[table])
-    policy.check('insert into t (a) values (1)', context=marker)
+    policy.rewrite('insert into t (a) values (1)', context=marker)
     assert seen == [marker, marker]
     seen.clear()
-    policy.check('select a from t')
+    policy.rewrite('select a from t')
     assert seen == [None]
 
 
@@ -675,13 +677,13 @@ def test_extra_is_called_once_per_check():
         return {'n': calls}
 
     policy = Policy(Insert('t', extra=extra))
-    assert policy.check('insert into t (a) values (1), (2), (3)').sql == (
+    assert policy.rewrite('insert into t (a) values (1), (2), (3)').sql == (
         'INSERT INTO "t" ("a", "n") VALUES (1, 1), (2, 1), (3, 1)'
     )
     assert calls == 1
     # not called for a statement that is rejected before the rule is reached
     with pytest.raises(PgSafeError):
-        policy.check('insert into other (a) values (1)')
+        policy.rewrite('insert into other (a) values (1)')
     assert calls == 1
 
 
@@ -692,12 +694,12 @@ def test_extra_values():
             extra={'col': Column('x'), 'fn': Function('now'), 'lit': Literal('s'), 'neg': -1.5, 'nan': float('nan')},
         )
     )
-    assert policy.check('insert into t (a) values (1)').sql == (
+    assert policy.rewrite('insert into t (a) values (1)').sql == (
         'INSERT INTO "t" ("a", "col", "fn", "lit", "neg", "nan") '
         'VALUES (1, "x", pg_catalog."now"(), \'s\', (- 1.5), CAST(\'NaN\' AS double precision))'
     )
     params = Policy(Insert('t', extra={'s': 'from policy'}), literals='params')
-    safe = params.check("insert into t (a) values ('x')")
+    safe = params.rewrite("insert into t (a) values ('x')")
     assert safe.sql == 'INSERT INTO "t" ("a", "s") VALUES ($1, $2)'
     assert safe.params == ['x', 'from policy']
     with pytest.raises(TypeError, match='expected a Column, Function, Literal, Expr, None, bool, int, float or str'):
@@ -712,11 +714,11 @@ def test_policy_can_be_used_from_a_callback():
     @mapper(Literal)
     def nested(literal: Literal, context: Any) -> pgsafe.ExprLike:
         if literal.value == 'sql':
-            return inner.check('select a from v').sql
+            return inner.rewrite('select a from v').sql
         return literal
 
     outer = Policy(Select('v'), mappers=[nested])
-    assert outer.check("select 'sql' from v").sql == """SELECT 'SELECT "v"."a" FROM "v"' FROM "v\""""
+    assert outer.rewrite("select 'sql' from v").sql == """SELECT 'SELECT "v"."a" FROM "v"' FROM "v\""""
 
     # and a policy can check from inside its own mapper
     policies: list[Policy] = []
@@ -725,10 +727,10 @@ def test_policy_can_be_used_from_a_callback():
     def recursive(table: Table, context: Any) -> Table:
         if context == 0:
             return table
-        return Table(policies[0].check('select 1 from v', context=context - 1).kind)
+        return Table(policies[0].rewrite('select 1 from v', context=context - 1).kind)
 
     policies.append(Policy(Select('v'), mappers=[recursive]))
-    assert policies[0].check('select a from v', context=3).sql == 'SELECT "v"."a" FROM "select" AS "v"'
+    assert policies[0].rewrite('select a from v', context=3).sql == 'SELECT "v"."a" FROM "select" AS "v"'
 
 
 def test_threads():
@@ -746,10 +748,10 @@ def test_threads():
     def work(n: int) -> list[str]:
         out: list[str] = []
         for _ in range(200):
-            out.append(policy.check('select * from t where a = 1', context=n).sql)
-            out.append(policy.check('insert into t (a) values (1)', context=n).sql)
+            out.append(policy.rewrite('select * from t where a = 1', context=n).sql)
+            out.append(policy.rewrite('insert into t (a) values (1)', context=n).sql)
             with pytest.raises(PgSafeError):
-                policy.check('select b from t', context=n)
+                policy.rewrite('select b from t', context=n)
         return out
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -764,20 +766,20 @@ def test_threads():
 def test_check_arguments():
     policy = Policy(Select('v'))
     with pytest.raises(TypeError):
-        policy.check(b'select 1')  # pyright: ignore[reportArgumentType]
+        policy.rewrite(b'select 1')  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError):
-        policy.check('select 1', 'context')  # pyright: ignore[reportCallIssue]
+        policy.rewrite('select 1', 'context')  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        policy.check('select 1', allow='select')  # pyright: ignore[reportArgumentType]
+        policy.rewrite('select 1', allow='select')  # pyright: ignore[reportArgumentType]
     with pytest.raises(PgSafeError, match='SELECT statements are not allowed here'):
-        policy.check('select 1', allow=[])
-    assert policy.check('SELECT 1', allow=['SELECT', 'Insert']).kind == 'select'  # pyright: ignore[reportArgumentType]
+        policy.rewrite('select 1', allow=[])
+    assert policy.rewrite('SELECT 1', allow=['SELECT', 'Insert']).kind == 'select'  # pyright: ignore[reportArgumentType]
     # the input is unicode, not bytes: a lone surrogate cannot be encoded
     with pytest.raises(UnicodeEncodeError):
-        policy.check("select '\ud800'")
-    assert policy.check("select 'café \U0001f600'").sql == "SELECT 'café \U0001f600'"
+        policy.rewrite("select '\ud800'")
+    assert policy.rewrite("select 'café \U0001f600'").sql == "SELECT 'café \U0001f600'"
     with pytest.raises(PgSafeError, match='string literals may not contain NUL'):
-        policy.check("select 'a\0b'")
+        policy.rewrite("select 'a\0b'")
 
 
 def test_policy_arguments():
@@ -793,8 +795,8 @@ def test_policy_arguments():
         Limits(max_depth=-1)
     # an empty policy allows statements that touch no table
     empty = Policy()
-    assert empty.check('select 1 + 1, lower($1)').sql == 'SELECT (1 + 1), pg_catalog."lower"($1)'
-    assert empty.check('select 1').tables == []
+    assert empty.rewrite('select 1 + 1, lower($1)').sql == 'SELECT (1 + 1), pg_catalog."lower"($1)'
+    assert empty.rewrite('select 1').tables == []
 
 
 def test_all_limits():
@@ -814,7 +816,7 @@ def test_all_limits():
     def rejected(sql: str, **limits: int) -> str:
         policy = Policy(Select('v'), Insert('v'), limits=Limits(**limits))
         with pytest.raises(PgSafeError) as exc_info:
-            policy.check(sql)
+            policy.rewrite(sql)
         assert exc_info.value.kind == 'limit'
         return exc_info.value.message
 
@@ -841,7 +843,7 @@ def test_error_is_a_normal_exception():
     assert str(error) == 'message'
     assert not hasattr(error, 'kind')
     try:
-        Policy().check('select * from t')
+        Policy().rewrite('select * from t')
     except ValueError as e:
         assert isinstance(e, PgSafeError)
         assert e.args == ('reading from table "t" is not allowed',)
@@ -886,24 +888,26 @@ def test_only():
         Select('orders'),
         Update('orders'),
     )
-    assert policy.check('select * from family f where id = 1').sql == (
+    assert policy.rewrite('select * from family f where id = 1').sql == (
         'SELECT "f"."id" FROM ONLY "family" AS "f" WHERE ("f"."id" = 1)'
     )
-    assert policy.check('update family set name = 1 where id = 1').sql == (
+    assert policy.rewrite('update family set name = 1 where id = 1').sql == (
         'UPDATE ONLY "family" SET "name" = 1 WHERE ("family"."id" = 1)'
     )
-    assert policy.check('delete from family where id = 1').sql == 'DELETE FROM ONLY "family" WHERE ("family"."id" = 1)'
+    assert (
+        policy.rewrite('delete from family where id = 1').sql == 'DELETE FROM ONLY "family" WHERE ("family"."id" = 1)'
+    )
     # INSERT has no ONLY: a row goes into the table it names
-    assert policy.check('insert into family (id) values (1) returning id').sql == (
+    assert policy.rewrite('insert into family (id) values (1) returning id').sql == (
         'INSERT INTO "family" ("id") VALUES (1) RETURNING "family"."id"'
     )
     # a statement can ask for ONLY on any table, and its absence on a table the policy marks changes nothing
-    assert policy.check('select id from only orders').sql == 'SELECT "orders"."id" FROM ONLY "orders"'
-    assert policy.check('update only orders set qty = 1 where id = 1').sql == (
+    assert policy.rewrite('select id from only orders').sql == 'SELECT "orders"."id" FROM ONLY "orders"'
+    assert policy.rewrite('update only orders set qty = 1 where id = 1').sql == (
         'UPDATE ONLY "orders" SET "qty" = 1 WHERE ("orders"."id" = 1)'
     )
-    assert policy.check('select id from orders').sql == 'SELECT "orders"."id" FROM "orders"'
-    assert policy.check('select id from only family').sql == 'SELECT "family"."id" FROM ONLY "family"'
+    assert policy.rewrite('select id from orders').sql == 'SELECT "orders"."id" FROM "orders"'
+    assert policy.rewrite('select id from only family').sql == 'SELECT "family"."id" FROM ONLY "family"'
 
     rules = Select('t', only=True), Update('t', only=True), Delete('t', only=True)
     assert [rule.only for rule in rules] == [True, True, True]
@@ -920,7 +924,7 @@ def test_only():
         assert exc_info.value.kind == 'config'
 
     with pytest.raises(PgSafeError, match='ONLY cannot be used on the CTE "c"'):
-        policy.check('with c as (select id from orders) select id from only c')
+        policy.rewrite('with c as (select id from orders) select id from only c')
 
 
 def test_only_and_mappers():
@@ -932,7 +936,7 @@ def test_only_and_mappers():
         return Table(table.name, alias=table.alias, only=not table.only)
 
     policy = Policy(Select('family', only=True), Select('orders'), mappers=[record])
-    assert policy.check('select f.id, o.id from family f join orders o on o.id = f.id').sql == (
+    assert policy.rewrite('select f.id, o.id from family f join orders o on o.id = f.id').sql == (
         'SELECT "f"."id", "o"."id" FROM "family" AS "f" INNER JOIN ONLY "orders" AS "o" ON ("o"."id" = "f"."id")'
     )
     assert seen == [Table('family', alias='f', only=True), Table('orders', alias='o')]
@@ -945,20 +949,20 @@ def test_only_and_mappers():
         return Table(table.name, only=True)
 
     with pytest.raises(PgSafeError, match='INSERT cannot use ONLY'):
-        Policy(Insert('t'), mappers=[only_on_insert]).check('insert into t (a) values (1)')
+        Policy(Insert('t'), mappers=[only_on_insert]).rewrite('insert into t (a) values (1)')
 
 
 def test_default_schema():
     policy = Policy(Select('orders', columns=['id']), Delete('public.orders'), default_schema='public')
-    safe = policy.check('select * from orders')
+    safe = policy.rewrite('select * from orders')
     assert safe.sql == 'SELECT "orders"."id" FROM "public"."orders"'
     assert safe.tables == ['public.orders']
-    assert policy.check('select id from public.orders').sql == safe.sql
-    assert policy.check('delete from orders where id = 1').sql == (
+    assert policy.rewrite('select id from public.orders').sql == safe.sql
+    assert policy.rewrite('delete from orders where id = 1').sql == (
         'DELETE FROM "public"."orders" WHERE ("orders"."id" = 1)'
     )
     with pytest.raises(PgSafeError, match='reading from table "other.orders" is not allowed'):
-        policy.check('select id from other.orders')
+        policy.rewrite('select id from other.orders')
     with pytest.raises(PgSafeError, match='invalid default schema ""') as exc_info:
         Policy(default_schema='')
     assert exc_info.value.kind == 'config'
@@ -971,5 +975,5 @@ def test_default_schema():
         seen.append(table)
         return table
 
-    Policy(Select('orders'), default_schema='app', mappers=[record]).check('select id from orders')
+    Policy(Select('orders'), default_schema='app', mappers=[record]).rewrite('select id from orders')
     assert seen == [Table('orders', schema='app')]

@@ -49,8 +49,8 @@ fn postgres_parser_agrees() {
     let inline = policy();
     let params = params_policy();
     for case in accept_cases() {
-        assert_within_policy(&inline.check(case.sql, &()).unwrap().sql, case.line);
-        assert_within_policy(&params.check(case.sql, &()).unwrap().sql, case.line);
+        assert_within_policy(&inline.rewrite(case.sql, &()).unwrap().sql, case.line);
+        assert_within_policy(&params.rewrite(case.sql, &()).unwrap().sql, case.line);
     }
 }
 

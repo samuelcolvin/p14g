@@ -23,8 +23,8 @@ pg_query = "6"
 path = "src/lib.rs"
 
 [[bin]]
-name = "check"
-path = "fuzz_targets/check.rs"
+name = "rewrite"
+path = "fuzz_targets/rewrite.rs"
 test = false
 doc = false
 

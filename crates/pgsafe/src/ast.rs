@@ -62,7 +62,7 @@ pub enum Statement {
     Delete(Delete),
 }
 
-/// The kind of a statement, used to restrict what a single `check` call may return.
+/// The kind of a statement, used to restrict what a single `rewrite` call may return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatementKind {
     Select,

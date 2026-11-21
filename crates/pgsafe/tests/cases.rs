@@ -9,7 +9,7 @@ fn accepted() {
     let policy = policy();
     let mut failures = Vec::new();
     for case in accept_cases() {
-        match policy.check(case.sql, &()) {
+        match policy.rewrite(case.sql, &()) {
             Ok(safe) => {
                 if let Some(expected) = case.expected
                     && safe.sql != expected
@@ -36,7 +36,7 @@ fn rejected() {
     let policy = policy();
     let mut failures = Vec::new();
     for case in reject_cases() {
-        match policy.check(case.sql, &()) {
+        match policy.rewrite(case.sql, &()) {
             Ok(safe) => failures.push(format!("line {}: {}\n  accepted as: {}", case.line, case.sql, safe.sql)),
             Err(e) if e.kind() != case.kind => failures.push(format!(
                 "line {}: {}\n  expected {:?}, got {:?}: {e}",
@@ -63,9 +63,9 @@ fn idempotent() {
         .unwrap();
     let first_policy = common::policy();
     for case in accept_cases() {
-        let first = first_policy.check(case.sql, &()).unwrap();
+        let first = first_policy.rewrite(case.sql, &()).unwrap();
         let second = policy
-            .check(&first.sql, &())
+            .rewrite(&first.sql, &())
             .unwrap_or_else(|e| panic!("line {}: output was rejected: {e}\n  {}", case.line, first.sql));
         assert_eq!(first.sql, second.sql, "line {}", case.line);
         assert_eq!(first.kind, second.kind, "line {}", case.line);
@@ -78,7 +78,7 @@ fn idempotent() {
 fn params_mode_has_no_string_literals() {
     let policy = params_policy();
     for case in accept_cases() {
-        let safe = policy.check(case.sql, &()).unwrap();
+        let safe = policy.rewrite(case.sql, &()).unwrap();
         assert!(!safe.sql.contains('\''), "line {}: {}", case.line, safe.sql);
     }
 }

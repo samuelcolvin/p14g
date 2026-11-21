@@ -15,12 +15,12 @@ fn orders() -> Select {
     Select::table("orders").columns(["id", "product", "qty"])
 }
 
-fn check(policy: &Policy, sql: &str) -> String {
-    policy.check(sql, &()).unwrap_or_else(|e| panic!("{sql}: {e}")).sql
+fn rewrite(policy: &Policy, sql: &str) -> String {
+    policy.rewrite(sql, &()).unwrap_or_else(|e| panic!("{sql}: {e}")).sql
 }
 
 fn kind(policy: &Policy, sql: &str) -> ErrorKind {
-    match policy.check(sql, &()) {
+    match policy.rewrite(sql, &()) {
         Ok(safe) => panic!("{sql} was accepted as {}", safe.sql),
         Err(e) => e.kind(),
     }
@@ -40,7 +40,7 @@ fn config_error<C>(result: Result<Policy<C>, Error>) -> String {
 fn result_describes_the_statement() {
     let policy = common::policy();
     let safe = policy
-        .check(
+        .rewrite(
             "select o.id from orders o join app.events e on e.id = o.id where o.id in (select id from customers)",
             &(),
         )
@@ -49,7 +49,7 @@ fn result_describes_the_statement() {
     assert_eq!(safe.tables, ["app.events", "customers", "orders"]);
     assert_eq!(safe.params, Vec::<String>::new());
 
-    let safe = policy.check("delete from orders where id = 1", &()).unwrap();
+    let safe = policy.rewrite("delete from orders where id = 1", &()).unwrap();
     assert_eq!(safe.kind, StatementKind::Delete);
     assert_eq!(safe.tables, ["orders"]);
 }
@@ -58,7 +58,7 @@ fn result_describes_the_statement() {
 fn errors_say_where() {
     let policy = common::policy();
     // an error found while reading the statement points at the name or literal it is about
-    let error = policy.check("select id,\n  U&'x'\nfrom orders", &()).unwrap_err();
+    let error = policy.rewrite("select id,\n  U&'x'\nfrom orders", &()).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported);
     assert_eq!(error.message(), "this kind of literal is not supported");
     let location = error.location().unwrap();
@@ -68,15 +68,19 @@ fn errors_say_where() {
         "this kind of literal is not supported at line 2, column 3"
     );
 
-    let error = policy.check("select id from orders where\n qty @@ 1", &()).unwrap_err();
+    let error = policy
+        .rewrite("select id from orders where\n qty @@ 1", &())
+        .unwrap_err();
     assert_eq!(error.to_string(), "this operator is not supported at line 2, column 2");
 
-    let error = policy.check("select 'abc", &()).unwrap_err();
+    let error = policy.rewrite("select 'abc", &()).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Parse);
     assert_eq!(error.location().map(|l| (l.line, l.column)), Some((1, 8)));
 
     // an error from the policy names what was refused, but has no position
-    let error = policy.check("select id,\n  pg_sleep(1)\nfrom orders", &()).unwrap_err();
+    let error = policy
+        .rewrite("select id,\n  pg_sleep(1)\nfrom orders", &())
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Denied);
     assert_eq!(error.to_string(), "function \"pg_sleep\" is not allowed");
     assert_eq!(error.location(), None);
@@ -86,13 +90,13 @@ fn errors_say_where() {
 fn allow_restricts_statement_kinds() {
     let policy = common::policy();
     let select_only = Some(&[StatementKind::Select][..]);
-    assert!(policy.check_kinds("select id from orders", &(), select_only).is_ok());
+    assert!(policy.rewrite_kinds("select id from orders", &(), select_only).is_ok());
     let error = policy
-        .check_kinds("delete from orders where id = 1", &(), select_only)
+        .rewrite_kinds("delete from orders where id = 1", &(), select_only)
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Denied);
     assert_eq!(error.message(), "DELETE statements are not allowed here");
-    assert!(policy.check_kinds("select id from orders", &(), Some(&[])).is_err());
+    assert!(policy.rewrite_kinds("select id from orders", &(), Some(&[])).is_err());
 }
 
 #[test]
@@ -108,34 +112,34 @@ fn star_behaviour() {
 
     let expand = build(Star::Expand);
     assert_eq!(
-        check(&expand, "select * from orders"),
+        rewrite(&expand, "select * from orders"),
         r#"SELECT "orders"."id", "orders"."product", "orders"."qty" FROM "orders""#
     );
-    assert_eq!(check(&expand, "select * from v"), r#"SELECT "v".* FROM "v""#);
+    assert_eq!(rewrite(&expand, "select * from v"), r#"SELECT "v".* FROM "v""#);
     assert_eq!(
-        check(&expand, "select * from orders o join v on v.id = o.id"),
+        rewrite(&expand, "select * from orders o join v on v.id = o.id"),
         r#"SELECT "o"."id", "o"."product", "o"."qty", "v".* FROM "orders" AS "o" INNER JOIN "v" ON ("v"."id" = "o"."id")"#
     );
     assert_eq!(
-        check(&expand, "select count(*) from orders"),
+        rewrite(&expand, "select count(*) from orders"),
         r#"SELECT pg_catalog."count"(*) FROM "orders""#
     );
 
     let allow = build(Star::Allow);
-    assert_eq!(check(&allow, "select * from v"), r#"SELECT * FROM "v""#);
-    assert_eq!(check(&allow, "select v.* from v"), r#"SELECT "v".* FROM "v""#);
+    assert_eq!(rewrite(&allow, "select * from v"), r#"SELECT * FROM "v""#);
+    assert_eq!(rewrite(&allow, "select v.* from v"), r#"SELECT "v".* FROM "v""#);
     assert_eq!(kind(&allow, "select * from orders"), ErrorKind::Denied);
     assert_eq!(
         kind(&allow, "select * from orders o join v on v.id = o.id"),
         ErrorKind::Denied
     );
     assert_eq!(
-        check(&allow, "select v.* from orders o join v on v.id = o.id"),
+        rewrite(&allow, "select v.* from orders o join v on v.id = o.id"),
         r#"SELECT "v".* FROM "orders" AS "o" INNER JOIN "v" ON ("v"."id" = "o"."id")"#
     );
     // a subquery that kept its star has columns pgsafe cannot list, and is treated like the view under it
     assert_eq!(
-        check(&allow, "select x.anything from (select * from v) x"),
+        rewrite(&allow, "select x.anything from (select * from v) x"),
         r#"SELECT "x"."anything" FROM (SELECT * FROM "v") AS "x""#
     );
 
@@ -143,7 +147,7 @@ fn star_behaviour() {
     assert_eq!(kind(&reject, "select * from v"), ErrorKind::Denied);
     assert_eq!(kind(&reject, "select v.* from v"), ErrorKind::Denied);
     assert_eq!(
-        check(&reject, "select count(*) from v"),
+        rewrite(&reject, "select count(*) from v"),
         r#"SELECT pg_catalog."count"(*) FROM "v""#
     );
 }
@@ -156,11 +160,11 @@ fn rules_for_one_table_are_alternatives() {
         .build()
         .unwrap();
     assert_eq!(
-        check(&policy, "select a from t where a = 1"),
+        rewrite(&policy, "select a from t where a = 1"),
         r#"SELECT "t"."a" FROM "t" WHERE ("t"."a" = 1)"#
     );
     assert_eq!(
-        check(&policy, "select b from t where b < 1"),
+        rewrite(&policy, "select b from t where b < 1"),
         r#"SELECT "t"."b" FROM "t" WHERE ("t"."b" < 1)"#
     );
     // each half is allowed by a rule, but no one rule allows both
@@ -170,12 +174,12 @@ fn rules_for_one_table_are_alternatives() {
     // two instances of the table can each use a different rule
     assert!(
         policy
-            .check("select t1.a from t t1 where t1.a = (select max(t2.b) from t t2)", &())
+            .rewrite("select t1.a from t t1 where t1.a = (select max(t2.b) from t t2)", &())
             .is_err()
     );
     assert!(
         policy
-            .check(
+            .rewrite(
                 "select (select max(t2.b) from t t2 where t2.b > 0), t1.a from t t1",
                 &()
             )
@@ -183,7 +187,7 @@ fn rules_for_one_table_are_alternatives() {
     );
     // star takes the columns of the rule that fits the rest of the query
     assert_eq!(
-        check(&policy, "select * from t where b > 1"),
+        rewrite(&policy, "select * from t where b > 1"),
         r#"SELECT "t"."b" FROM "t" WHERE ("t"."b" > 1)"#
     );
 }
@@ -197,7 +201,7 @@ fn operators() {
         .unwrap();
     assert!(
         policy
-            .check("select id from orders where id = 1 and qty = 2", &())
+            .rewrite("select id from orders where id = 1 and qty = 2", &())
             .is_ok()
     );
     assert_eq!(
@@ -216,7 +220,7 @@ fn operators() {
         .build()
         .unwrap();
     assert_eq!(
-        check(
+        rewrite(
             &regex,
             "select id from orders where product ~ '^t' and product similar to 't%'"
         ),
@@ -240,7 +244,7 @@ fn functions_allow_and_deny() {
         .build()
         .unwrap();
     assert_eq!(
-        check(
+        rewrite(
             &policy,
             "select app.order_total(id), repeat(product, 2), lower(product) from orders"
         ),
@@ -261,7 +265,7 @@ fn functions_allow_and_deny() {
         .functions(["count"])
         .build()
         .unwrap();
-    assert!(none.check("select count(*) from orders", &()).is_ok());
+    assert!(none.rewrite("select count(*) from orders", &()).is_ok());
     assert_eq!(kind(&none, "select lower(product) from orders"), ErrorKind::Denied);
     assert_eq!(kind(&none, "select coalesce(qty, 0) from orders"), ErrorKind::Denied);
     assert_eq!(kind(&none, "select extract(year from current_date)"), ErrorKind::Denied);
@@ -327,7 +331,7 @@ fn rule_names_are_exact() {
     assert_eq!(kind(&policy, "select id from orders"), ErrorKind::Denied);
     assert_eq!(kind(&policy, "select Id from Orders"), ErrorKind::Denied);
     assert_eq!(
-        check(&policy, r#"select "Id" from "Orders""#),
+        rewrite(&policy, r#"select "Id" from "Orders""#),
         r#"SELECT "Orders"."Id" FROM "Orders""#
     );
 }
@@ -346,7 +350,11 @@ fn limits() {
         max_projection: 3,
         max_values_rows: 2,
     });
-    assert!(tight.check("select id from orders where id in (1, 2, 3)", &()).is_ok());
+    assert!(
+        tight
+            .rewrite("select id from orders where id in (1, 2, 3)", &())
+            .is_ok()
+    );
     for sql in [
         format!("select id from orders where product = '{}'", "x".repeat(200)),
         "select id from orders where id in (1, 2, 3, 4)".to_owned(),
@@ -375,7 +383,7 @@ fn limits() {
         })
         .build()
         .unwrap();
-    assert!(rows.check("insert into orders (qty) values (1), (2)", &()).is_ok());
+    assert!(rows.rewrite("insert into orders (qty) values (1), (2)", &()).is_ok());
     assert_eq!(
         kind(&rows, "insert into orders (qty) values (1), (2), (3)"),
         ErrorKind::Limit
@@ -395,27 +403,27 @@ fn limits() {
 fn max_rows() {
     let policy: Policy = Policy::builder().select(orders()).max_rows(Some(100)).build().unwrap();
     assert_eq!(
-        check(&policy, "select id from orders"),
+        rewrite(&policy, "select id from orders"),
         r#"SELECT "orders"."id" FROM "orders" LIMIT 100"#
     );
     assert_eq!(
-        check(&policy, "select id from orders limit 5"),
+        rewrite(&policy, "select id from orders limit 5"),
         r#"SELECT "orders"."id" FROM "orders" LIMIT 5"#
     );
     assert_eq!(
-        check(&policy, "select id from orders limit 500"),
+        rewrite(&policy, "select id from orders limit 500"),
         r#"SELECT "orders"."id" FROM "orders" LIMIT 100"#
     );
     assert_eq!(
-        check(&policy, "select id from orders limit 99999999999999999999999"),
+        rewrite(&policy, "select id from orders limit 99999999999999999999999"),
         r#"SELECT "orders"."id" FROM "orders" LIMIT 100"#
     );
     assert_eq!(
-        check(&policy, "select id from orders limit 1.5"),
+        rewrite(&policy, "select id from orders limit 1.5"),
         r#"SELECT "orders"."id" FROM "orders" LIMIT 100"#
     );
     assert_eq!(
-        check(&policy, "select id from orders union select id from orders"),
+        rewrite(&policy, "select id from orders union select id from orders"),
         r#"(SELECT "orders"."id" FROM "orders") UNION (SELECT "orders"."id" FROM "orders") LIMIT 100"#
     );
     assert_eq!(kind(&policy, "select id from orders limit $1"), ErrorKind::Denied);
@@ -430,7 +438,7 @@ fn params_are_numbered_after_the_input_placeholders() {
         .build()
         .unwrap();
     let safe = policy
-        .check(
+        .rewrite(
             "select id from orders where product = 'tea' and qty = $2 and product <> 'x''y' and id = $1 and qty > 5",
             &(),
         )
@@ -442,13 +450,13 @@ fn params_are_numbered_after_the_input_placeholders() {
     assert_eq!(safe.params, ["tea", "x'y"]);
 
     let safe = policy
-        .check("select date '2020-01-01', true, null, 1.5 from orders", &())
+        .rewrite("select date '2020-01-01', true, null, 1.5 from orders", &())
         .unwrap();
     assert_eq!(safe.sql, r#"SELECT CAST($1 AS date), TRUE, NULL, 1.5 FROM "orders""#);
     assert_eq!(safe.params, ["2020-01-01"]);
 
     let safe = policy
-        .check("insert into orders (product) values ('a'), ('b')", &())
+        .rewrite("insert into orders (product) values ('a'), ('b')", &())
         .unwrap();
     assert_eq!(
         safe.sql,
@@ -494,7 +502,7 @@ fn insert_extra() {
     let _ = tenant.schema;
     assert_eq!(
         policy
-            .check(
+            .rewrite(
                 "insert into orders (product, qty) values ('a', 1), ('b', 2) returning id",
                 &tenant
             )
@@ -504,17 +512,17 @@ fn insert_extra() {
     );
     // the statement may not set a column the policy sets, whether or not the rule lists it
     let error = policy
-        .check("insert into orders (product, tenant_id) values ('a', 1)", &tenant)
+        .rewrite("insert into orders (product, tenant_id) values ('a', 1)", &tenant)
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Denied);
 
     let error = policy
-        .check("insert into notes (body) values ('x')", &tenant)
+        .rewrite("insert into notes (body) values ('x')", &tenant)
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Callback);
     assert_eq!(error.message(), "no tenant");
     let error = policy
-        .check(
+        .rewrite(
             "insert into notes (body, flag) values ('x', false)",
             &Tenant { id: 1, schema: "" },
         )
@@ -522,12 +530,12 @@ fn insert_extra() {
     assert_eq!(error.kind(), ErrorKind::Denied);
     assert_eq!(
         policy
-            .check("insert into notes (body) values ('x')", &Tenant { id: 1, schema: "" })
+            .rewrite("insert into notes (body) values ('x')", &Tenant { id: 1, schema: "" })
             .unwrap()
             .sql,
         r#"INSERT INTO "notes" ("body", "flag", "ratio", "whole", "big", "small", "label", "nothing", "nan") VALUES ('x', TRUE, (- 1.5), 2.0, 1e300, 1e-7, 'it''s', NULL, CAST('NaN' AS double precision))"#
     );
-    let error = policy.check("insert into bad (x) values (1)", &tenant).unwrap_err();
+    let error = policy.rewrite("insert into bad (x) values (1)", &tenant).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Callback);
 }
 
@@ -542,28 +550,28 @@ fn write_rules() {
         .delete(Delete::table("u"))
         .build()
         .unwrap();
-    assert_eq!(check(&policy, "update t set b = 1"), r#"UPDATE "t" SET "b" = 1"#);
+    assert_eq!(rewrite(&policy, "update t set b = 1"), r#"UPDATE "t" SET "b" = 1"#);
     // the rule that allows the unfiltered update is not the one that allows this column
     assert_eq!(kind(&policy, "update t set a = 1"), ErrorKind::Denied);
     assert_eq!(
         kind(&policy, "update t set a = 1, b = 2 where id = 1"),
         ErrorKind::Denied
     );
-    assert_eq!(check(&policy, "delete from t"), r#"DELETE FROM "t""#);
+    assert_eq!(rewrite(&policy, "delete from t"), r#"DELETE FROM "t""#);
     // `u` can be deleted from but not read, so a WHERE that names a column is refused
     assert_eq!(kind(&policy, "delete from u"), ErrorKind::Denied);
     assert_eq!(kind(&policy, "delete from u where id = 1"), ErrorKind::Denied);
     assert_eq!(
-        check(&policy, "delete from u where true"),
+        rewrite(&policy, "delete from u where true"),
         r#"DELETE FROM "u" WHERE TRUE"#
     );
     assert_eq!(kind(&policy, "delete from u where true returning *"), ErrorKind::Denied);
     assert_eq!(
-        check(&policy, "insert into t (anything) values (1)"),
+        rewrite(&policy, "insert into t (anything) values (1)"),
         r#"INSERT INTO "t" ("anything") VALUES (1)"#
     );
     assert_eq!(
-        check(&policy, "update t as x set a = x.a + 1 where x.id = 1 returning x.*"),
+        rewrite(&policy, "update t as x set a = x.a + 1 where x.id = 1 returning x.*"),
         r#"UPDATE "t" AS "x" SET "a" = ("x"."a" + 1) WHERE ("x"."id" = 1) RETURNING "x"."id", "x"."a""#
     );
     assert_eq!(kind(&policy, "update t set a = b where id = 1"), ErrorKind::Denied);
@@ -579,7 +587,7 @@ fn group_by_names() {
         .unwrap();
     // a listed input column wins, as it does in Postgres
     assert_eq!(
-        check(
+        rewrite(
             &policy,
             "select lower(product) as product, count(*) from orders group by product"
         ),
@@ -587,12 +595,12 @@ fn group_by_names() {
     );
     // no listed column of that name, and no table that could be hiding one: it can only be the alias
     assert_eq!(
-        check(&policy, "select lower(product) as p, count(*) from orders group by p"),
+        rewrite(&policy, "select lower(product) as p, count(*) from orders group by p"),
         r#"SELECT pg_catalog."lower"("orders"."product") AS "p", pg_catalog."count"(*) FROM "orders" GROUP BY 1"#
     );
     // only all-column tables: either reading is allowed, so leave the choice to Postgres
     assert_eq!(
-        check(
+        rewrite(
             &policy,
             "select lower(v.x) as p, count(*) from v join w on w.id = v.id group by p"
         ),
@@ -608,7 +616,7 @@ fn group_by_names() {
     );
     // ORDER BY always means the output column
     assert_eq!(
-        check(&policy, "select lower(product) as product from orders order by product"),
+        rewrite(&policy, "select lower(product) as product from orders order by product"),
         r#"SELECT pg_catalog."lower"("orders"."product") AS "product" FROM "orders" ORDER BY "product""#
     );
     assert_eq!(kind(&policy, "select id from orders order by 2"), ErrorKind::Denied);
@@ -641,7 +649,7 @@ fn scoping() {
     );
     // a CTE shadows a table of the same name, and is not checked against that table's rule
     assert_eq!(
-        check(
+        rewrite(
             &policy,
             "with secrets as (select id from orders) select id from secrets"
         ),
@@ -669,17 +677,17 @@ fn scoping() {
     );
     // an unqualified name goes to the one table that lists it, even beside a view that might have it too
     assert_eq!(
-        check(&policy, "select qty, v.other from orders join v on v.id = orders.id"),
+        rewrite(&policy, "select qty, v.other from orders join v on v.id = orders.id"),
         r#"SELECT "orders"."qty", "v"."other" FROM "orders" INNER JOIN "v" ON ("v"."id" = "orders"."id")"#
     );
     // ... and to the view when nothing lists it
     assert_eq!(
-        check(&policy, "select other from orders join v on v.id = orders.id"),
+        rewrite(&policy, "select other from orders join v on v.id = orders.id"),
         r#"SELECT "v"."other" FROM "orders" INNER JOIN "v" ON ("v"."id" = "orders"."id")"#
     );
     // correlated subqueries resolve outwards
     assert_eq!(
-        check(
+        rewrite(
             &policy,
             "select name from customers c where exists (select 1 from orders where id = c.id and name = 'x')"
         ),
@@ -742,9 +750,9 @@ fn mappers() {
         id: 42,
         schema: "tenants",
     };
-    let check = |sql: &str| policy.check(sql, &tenant).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let rewrite = |sql: &str| policy.rewrite(sql, &tenant).unwrap_or_else(|e| panic!("{sql}: {e}"));
 
-    let safe = check("select id, at from events where kind = 'secret' and at < now()");
+    let safe = rewrite("select id, at from events where kind = 'secret' and at < now()");
     assert_eq!(
         safe.sql,
         r#"SELECT "events"."id", pg_catalog."date_trunc"('day', "events"."at") FROM "tenants"."events_42" AS "events" WHERE (("events"."kind" = NULL) AND (pg_catalog."date_trunc"('day', "events"."at") < "app"."frozen_now"()))"#
@@ -753,24 +761,24 @@ fn mappers() {
     assert_eq!(safe.tables, ["events"]);
 
     assert_eq!(
-        check("select e.id from events e join other on other.id = e.id").sql,
+        rewrite("select e.id from events e join other on other.id = e.id").sql,
         r#"SELECT "e"."id" FROM "tenants"."events_42" AS "e" INNER JOIN "other" ON ("other"."id" = "e"."id")"#
     );
     assert_eq!(
-        check("insert into events (kind) values ('a') returning id").sql,
+        rewrite("insert into events (kind) values ('a') returning id").sql,
         r#"INSERT INTO "tenants"."events_42" AS "events" ("kind") VALUES ('a') RETURNING "events"."id""#
     );
     assert_eq!(
-        check("update events set kind = 'b' where id = 1").sql,
+        rewrite("update events set kind = 'b' where id = 1").sql,
         r#"UPDATE "tenants"."events_42" AS "events" SET "kind" = 'b' WHERE ("events"."id" = 1)"#
     );
     assert_eq!(
-        check("delete from events where id = 1").sql,
+        rewrite("delete from events where id = 1").sql,
         r#"DELETE FROM "tenants"."events_42" AS "events" WHERE ("events"."id" = 1)"#
     );
     // the mapper's functions were not, and did not need to be, in the allowed set
     assert_eq!(
-        policy.check("select app.frozen_now()", &tenant).unwrap_err().kind(),
+        policy.rewrite("select app.frozen_now()", &tenant).unwrap_err().kind(),
         ErrorKind::Denied
     );
 
@@ -779,7 +787,7 @@ fn mappers() {
         id: 1,
         schema: "has\0nul",
     };
-    assert!(policy.check("select id from events", &bad).is_err());
+    assert!(policy.rewrite("select id from events", &bad).is_err());
     let policy: Policy = Policy::builder()
         .select(orders())
         .map_literal(|_, ()| Ok(Expr::Literal(Literal::Number("1; DROP TABLE orders".into()))))
@@ -787,10 +795,10 @@ fn mappers() {
         .build()
         .unwrap();
     assert_eq!(
-        policy.check("select 1", &()).unwrap_err().kind(),
+        policy.rewrite("select 1", &()).unwrap_err().kind(),
         ErrorKind::Unsupported
     );
-    let error = policy.check("select id from orders", &()).unwrap_err();
+    let error = policy.rewrite("select id from orders", &()).unwrap_err();
     assert_eq!(
         (error.kind(), error.message()),
         (ErrorKind::Callback, "no columns today")
@@ -806,7 +814,7 @@ fn other_dialects() {
         .unwrap();
     // backticks are MySQL's identifier quotes, and backslash is an escape inside its strings
     assert_eq!(
-        check(&mysql, r"select `id` from `orders` where product = 'it\'s'"),
+        rewrite(&mysql, r"select `id` from `orders` where product = 'it\'s'"),
         r#"SELECT "orders"."id" FROM "orders" WHERE ("orders"."product" = 'it''s')"#
     );
     let generic: Policy = Policy::builder()
@@ -815,7 +823,7 @@ fn other_dialects() {
         .build()
         .unwrap();
     assert_eq!(
-        check(&generic, "select id from orders"),
+        rewrite(&generic, "select id from orders"),
         r#"SELECT "orders"."id" FROM "orders""#
     );
     for dialect in [
@@ -826,8 +834,8 @@ fn other_dialects() {
         Dialect::Sqlite,
     ] {
         let policy: Policy = Policy::builder().select(orders()).dialect(dialect).build().unwrap();
-        assert!(policy.check("select id from orders; select 1", &()).is_err());
-        assert!(policy.check("select secret from orders", &()).is_err());
+        assert!(policy.rewrite("select id from orders; select 1", &()).is_err());
+        assert!(policy.rewrite("select secret from orders", &()).is_err());
     }
 }
 
@@ -842,29 +850,29 @@ fn only() {
         .build()
         .unwrap();
     assert_eq!(
-        check(&policy, "select f.id from family f join orders on orders.id = f.id"),
+        rewrite(&policy, "select f.id from family f join orders on orders.id = f.id"),
         r#"SELECT "f"."id" FROM ONLY "family" AS "f" INNER JOIN "orders" ON ("orders"."id" = "f"."id")"#
     );
     assert_eq!(
-        check(&policy, "update family set x = 1 where id = 1"),
+        rewrite(&policy, "update family set x = 1 where id = 1"),
         r#"UPDATE ONLY "family" SET "x" = 1 WHERE ("family"."id" = 1)"#
     );
     assert_eq!(
-        check(&policy, "delete from family where id = 1"),
+        rewrite(&policy, "delete from family where id = 1"),
         r#"DELETE FROM ONLY "family" WHERE ("family"."id" = 1)"#
     );
     // INSERT has no ONLY, a row goes into the table it names
     assert_eq!(
-        check(&policy, "insert into family (id) values (1) returning id"),
+        rewrite(&policy, "insert into family (id) values (1) returning id"),
         r#"INSERT INTO "family" ("id") VALUES (1) RETURNING "family"."id""#
     );
     // the statement can ask for ONLY on a table the policy does not mark, in either spelling
     assert_eq!(
-        check(&policy, "select id from only orders"),
+        rewrite(&policy, "select id from only orders"),
         r#"SELECT "orders"."id" FROM ONLY "orders""#
     );
     assert_eq!(
-        check(&policy, "select id from only (orders)"),
+        rewrite(&policy, "select id from only (orders)"),
         r#"SELECT "orders"."id" FROM ONLY "orders""#
     );
     assert_eq!(kind(&policy, "select id from orders *"), ErrorKind::Unsupported);
@@ -916,38 +924,38 @@ fn default_schema() {
         .build()
         .unwrap();
     // an unqualified name, in a rule or a statement, means the table in the default schema
-    let safe = policy.check("select id from orders", &()).unwrap();
+    let safe = policy.rewrite("select id from orders", &()).unwrap();
     assert_eq!(safe.sql, r#"SELECT "orders"."id" FROM "public"."orders""#);
     assert_eq!(safe.tables, ["public.orders"]);
-    assert_eq!(check(&policy, "select id from public.orders"), safe.sql);
+    assert_eq!(rewrite(&policy, "select id from public.orders"), safe.sql);
     assert_eq!(
-        check(&policy, "select o.id from orders o join app.events e on e.id = o.id"),
+        rewrite(&policy, "select o.id from orders o join app.events e on e.id = o.id"),
         r#"SELECT "o"."id" FROM "public"."orders" AS "o" INNER JOIN "app"."events" AS "e" ON ("e"."id" = "o"."id")"#
     );
     assert_eq!(
-        check(&policy, "insert into orders (qty) values (1) returning id"),
+        rewrite(&policy, "insert into orders (qty) values (1) returning id"),
         r#"INSERT INTO "public"."orders" ("qty") VALUES (1) RETURNING "orders"."id""#
     );
     assert_eq!(
-        check(&policy, "update orders set qty = 1 where id = 1"),
+        rewrite(&policy, "update orders set qty = 1 where id = 1"),
         r#"UPDATE "public"."orders" SET "qty" = 1 WHERE ("orders"."id" = 1)"#
     );
     assert_eq!(
-        check(&policy, "delete from orders where id = 1"),
+        rewrite(&policy, "delete from orders where id = 1"),
         r#"DELETE FROM "public"."orders" WHERE ("orders"."id" = 1)"#
     );
     // other schemas still have to be named, and a CTE is not a table in any schema
     assert_eq!(kind(&policy, "select id from events"), ErrorKind::Denied);
     assert_eq!(kind(&policy, "select id from other.orders"), ErrorKind::Denied);
     assert_eq!(
-        check(
+        rewrite(
             &policy,
             "with orders as (select id from app.events) select id from orders"
         ),
         r#"WITH "orders" AS (SELECT "events"."id" FROM "app"."events") SELECT "orders"."id" FROM "orders""#
     );
     // the output is accepted again unchanged
-    assert_eq!(check(&policy, &safe.sql), safe.sql);
+    assert_eq!(rewrite(&policy, &safe.sql), safe.sql);
 
     // `orders` and `public.orders` are one table, so their rules must agree about `only`
     config_error(
@@ -962,7 +970,7 @@ fn default_schema() {
     // without it the name is written as the statement gave it
     let plain: Policy = Policy::builder().select(orders()).build().unwrap();
     assert_eq!(
-        check(&plain, "select id from orders"),
+        rewrite(&plain, "select id from orders"),
         r#"SELECT "orders"."id" FROM "orders""#
     );
     assert_eq!(kind(&plain, "select id from public.orders"), ErrorKind::Denied);
@@ -1013,11 +1021,11 @@ fn deep_input_does_not_overflow() {
             .build()
             .unwrap();
         // empty statements are skipped, so this one is simply `SELECT 1`
-        assert_eq!(check(&policy, &chain("select 1", ";", "", 90_000)), "SELECT 1");
+        assert_eq!(rewrite(&policy, &chain("select 1", ";", "", 90_000)), "SELECT 1");
         for sql in &cases {
             assert!(sql.len() < 1 << 20);
             let error = policy
-                .check(sql, &())
+                .rewrite(sql, &())
                 .expect_err("a pathological statement was accepted");
             assert!(
                 matches!(
@@ -1053,7 +1061,7 @@ fn mapper_trait() {
 
     let policy: Policy = Policy::builder().select(orders()).mapper(Prefix("x_")).build().unwrap();
     assert_eq!(
-        check(&policy, "select id from orders where product = 'tea' and qty = 1"),
+        rewrite(&policy, "select id from orders where product = 'tea' and qty = 1"),
         r#"SELECT "orders"."id" FROM "x_orders" AS "orders" WHERE (("orders"."product" = 'x_tea') AND ("orders"."qty" = 1))"#
     );
 }
@@ -1077,7 +1085,7 @@ fn sqlparser_display_is_not_safe_to_emit() {
 
     // pgsafe keeps it one literal
     let policy: Policy = Policy::builder().build().unwrap();
-    let safe = policy.check(input, &()).unwrap();
+    let safe = policy.rewrite(input, &()).unwrap();
     assert_eq!(safe.sql, r"SELECT E'x\\'' UNION SELECT password FROM secrets --'");
     assert_eq!(pg_query::parse(&safe.sql).unwrap().tables(), Vec::<String>::new());
 }

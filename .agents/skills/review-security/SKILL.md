@@ -18,7 +18,7 @@ confirm each is properly addressed.
 Cover the changes **and any code they touch**: a caller made unsafe by a changed callee is in scope even if it isn't in
 the diff.
 
-The policy author, mappers and `Insert.extra` callbacks are trusted. The SQL passed to `check()` is not.
+The policy author, mappers and `Insert.extra` callbacks are trusted. The SQL passed to `rewrite()` is not.
 A finding is something the SQL author can do; note misuse a policy author could plausibly fall into separately.
 
 ## The writer (`backend/`)
@@ -85,7 +85,7 @@ Ask what the SQL author can now read, write or call that no rule names:
 
 ## Crashes and unbounded work
 
-`check()` runs inside the caller's server on input chosen by an attacker. Ask:
+`rewrite()` runs inside the caller's server on input chosen by an attacker. Ask:
 
 - **Recursion over a sqlparser tree?**
     sqlparser builds operator chains with a loop, so a tree can be half as deep as the statement has tokens, whatever
