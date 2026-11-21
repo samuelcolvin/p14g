@@ -257,6 +257,7 @@ pub struct Select {
     table: String,
     columns: Option<Vec<String>>,
     operators: Option<Vec<Op>>,
+    only: bool,
 }
 
 impl Select {
@@ -266,6 +267,7 @@ impl Select {
             table: table.into(),
             columns: None,
             operators: None,
+            only: false,
         }
     }
 
@@ -281,6 +283,19 @@ impl Select {
     #[must_use]
     pub fn operators(mut self, operators: impl IntoIterator<Item = Op>) -> Self {
         self.operators = Some(operators.into_iter().collect());
+        self
+    }
+
+    /// Write the table as `ONLY table`, so that rows of its inheritance children are left out.
+    ///
+    /// In Postgres a query on a table also reads, updates and deletes the rows of tables that inherit from
+    /// it, checking privileges on the parent alone. Set this when the table has children the policy should
+    /// not reach. Do not set it for a partitioned table: the parent holds no rows of its own.
+    ///
+    /// Every `Select`, `Update` and `Delete` rule for one table must agree on this.
+    #[must_use]
+    pub fn only(mut self, only: bool) -> Self {
+        self.only = only;
         self
     }
 }
@@ -345,6 +360,7 @@ pub struct Update {
     table: String,
     columns: Option<Vec<String>>,
     allow_unfiltered: bool,
+    only: bool,
 }
 
 impl Update {
@@ -353,6 +369,7 @@ impl Update {
             table: table.into(),
             columns: None,
             allow_unfiltered: false,
+            only: false,
         }
     }
 
@@ -371,6 +388,13 @@ impl Update {
         self.allow_unfiltered = allow;
         self
     }
+
+    /// Write the table as `ONLY table`. See [`Select::only`].
+    #[must_use]
+    pub fn only(mut self, only: bool) -> Self {
+        self.only = only;
+        self
+    }
 }
 
 /// Allows `DELETE FROM table`.
@@ -378,6 +402,7 @@ impl Update {
 pub struct Delete {
     table: String,
     allow_unfiltered: bool,
+    only: bool,
 }
 
 impl Delete {
@@ -385,6 +410,7 @@ impl Delete {
         Self {
             table: table.into(),
             allow_unfiltered: false,
+            only: false,
         }
     }
 
@@ -392,6 +418,13 @@ impl Delete {
     #[must_use]
     pub fn allow_unfiltered(mut self, allow: bool) -> Self {
         self.allow_unfiltered = allow;
+        self
+    }
+
+    /// Write the table as `ONLY table`. See [`Select::only`].
+    #[must_use]
+    pub fn only(mut self, only: bool) -> Self {
+        self.only = only;
         self
     }
 }
@@ -477,6 +510,7 @@ pub struct PolicyBuilder<C = ()> {
     literals: Literals,
     limits: Limits,
     max_rows: Option<u64>,
+    default_schema: Option<String>,
     dialect: Dialect,
     backend: Backend,
     mappers: Vec<Box<dyn Mapper<C>>>,
@@ -497,6 +531,7 @@ impl<C> Default for PolicyBuilder<C> {
             literals: Literals::default(),
             limits: Limits::default(),
             max_rows: None,
+            default_schema: None,
             dialect: Dialect::default(),
             backend: Backend::default(),
             mappers: Vec::new(),
@@ -584,6 +619,17 @@ impl<C> PolicyBuilder<C> {
         self
     }
 
+    /// The schema that unqualified table names belong to, in rules and in statements.
+    ///
+    /// Without this an unqualified name is written unqualified and Postgres resolves it through the
+    /// `search_path`, where a table of the same name in an earlier schema, or a temporary table, is found
+    /// first. With it `orders` is always written `"schema"."orders"`.
+    #[must_use]
+    pub fn default_schema(mut self, schema: impl Into<String>) -> Self {
+        self.default_schema = Some(schema.into());
+        self
+    }
+
     #[must_use]
     pub fn dialect(mut self, dialect: Dialect) -> Self {
         self.dialect = dialect;
@@ -648,9 +694,33 @@ impl<C> PolicyBuilder<C> {
             .operators
             .map_or_else(OpSet::default_allowed, |ops| ops.into_iter().collect());
 
+        let default_schema = self
+            .default_schema
+            .map(|schema| {
+                Ident::new(schema.as_str())
+                    .map_err(|e| Error::config(format!("invalid default schema {schema:?}: {}", e.message())))
+            })
+            .transpose()?;
+        let table_key = |table: &str| {
+            TableKey::parse(table).map(|key| TableKey {
+                schema: key.schema.or_else(|| default_schema.clone()),
+                name: key.name,
+            })
+        };
+
+        // `only` is a property of the table, so every rule that reads or writes its rows has to agree
+        let mut only: BTreeMap<TableKey, bool> = BTreeMap::new();
+        let mut agree = |key: &TableKey, table: &str, rule_only: bool| match only.insert(key.clone(), rule_only) {
+            Some(previous) if previous != rule_only => Err(Error::config(format!(
+                "the rules for table {table:?} disagree about `only`"
+            ))),
+            _ => Ok(()),
+        };
+
         let mut selects: BTreeMap<TableKey, Vec<SelectRule>> = BTreeMap::new();
         for rule in self.selects {
-            let key = TableKey::parse(&rule.table)?;
+            let key = table_key(&rule.table)?;
+            agree(&key, &rule.table, rule.only)?;
             let columns = parse_columns(rule.columns, &rule.table)?;
             let operators = rule
                 .operators
@@ -659,7 +729,7 @@ impl<C> PolicyBuilder<C> {
         }
         let mut inserts: BTreeMap<TableKey, Vec<InsertRule<C>>> = BTreeMap::new();
         for rule in self.inserts {
-            let key = TableKey::parse(&rule.table)?;
+            let key = table_key(&rule.table)?;
             let columns = parse_columns(rule.columns, &rule.table)?;
             inserts.entry(key).or_default().push(InsertRule {
                 columns,
@@ -668,7 +738,8 @@ impl<C> PolicyBuilder<C> {
         }
         let mut updates: BTreeMap<TableKey, Vec<UpdateRule>> = BTreeMap::new();
         for rule in self.updates {
-            let key = TableKey::parse(&rule.table)?;
+            let key = table_key(&rule.table)?;
+            agree(&key, &rule.table, rule.only)?;
             let columns = parse_columns(rule.columns, &rule.table)?;
             updates.entry(key).or_default().push(UpdateRule {
                 columns,
@@ -677,7 +748,8 @@ impl<C> PolicyBuilder<C> {
         }
         let mut deletes: BTreeMap<TableKey, DeleteRule> = BTreeMap::new();
         for rule in self.deletes {
-            let key = TableKey::parse(&rule.table)?;
+            let key = table_key(&rule.table)?;
+            agree(&key, &rule.table, rule.only)?;
             // two delete rules for one table can only differ in `allow_unfiltered`: either one allowing it is enough
             let entry = deletes.entry(key).or_insert(DeleteRule {
                 allow_unfiltered: false,
@@ -705,7 +777,10 @@ impl<C> PolicyBuilder<C> {
             return Err(Error::config("limits.max_depth must be at least 1"));
         }
 
+        let only = only.into_iter().filter_map(|(key, only)| only.then_some(key)).collect();
+
         Ok(Policy {
+            only,
             selects,
             inserts,
             updates,
@@ -716,6 +791,7 @@ impl<C> PolicyBuilder<C> {
             literals: self.literals,
             limits: self.limits,
             max_rows: self.max_rows,
+            default_schema: default_schema.clone(),
             dialect: self.dialect,
             backend: self.backend,
             mappers: self.mappers,
@@ -768,6 +844,8 @@ pub struct SafeSql {
 /// `C` is the type of the context value passed to [`Policy::check`] and handed on to mappers and
 /// [`Insert::extra`] callbacks.
 pub struct Policy<C = ()> {
+    /// Tables that are always written `ONLY table`.
+    pub(crate) only: BTreeSet<TableKey>,
     pub(crate) selects: BTreeMap<TableKey, Vec<SelectRule>>,
     pub(crate) inserts: BTreeMap<TableKey, Vec<InsertRule<C>>>,
     pub(crate) updates: BTreeMap<TableKey, Vec<UpdateRule>>,
@@ -778,6 +856,8 @@ pub struct Policy<C = ()> {
     literals: Literals,
     limits: Limits,
     max_rows: Option<u64>,
+    /// The schema unqualified table names are given before they are looked up and written.
+    pub(crate) default_schema: Option<Ident>,
     dialect: Dialect,
     backend: Backend,
     mappers: Vec<Box<dyn Mapper<C>>>,

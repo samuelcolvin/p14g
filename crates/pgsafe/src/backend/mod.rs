@@ -270,7 +270,15 @@ impl<'a, S: Syntax> Writer<'a, S> {
     }
 
     fn table(&mut self, table: &Table) {
-        let Table { schema, name, alias } = table;
+        let Table {
+            schema,
+            name,
+            alias,
+            only,
+        } = table;
+        if *only {
+            self.push("ONLY ");
+        }
         if let Some(schema) = schema {
             self.ident(schema);
             self.push(".");
@@ -366,6 +374,9 @@ impl<'a, S: Syntax> Writer<'a, S> {
         } = insert;
         if columns.is_empty() || rows.is_empty() {
             return Err(invalid("an INSERT needs columns and rows"));
+        }
+        if table.only {
+            return Err(invalid("INSERT cannot use ONLY"));
         }
         self.push("INSERT INTO ");
         self.table(table);

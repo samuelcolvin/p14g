@@ -11,6 +11,7 @@ use common::{accept_cases, params_policy, policy};
 use pgsafe::functions;
 
 const TABLES: &[&str] = &[
+    "family",
     "orders",
     "customers",
     "v",

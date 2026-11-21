@@ -58,10 +58,20 @@ class Select:
     `ORDER BY`, or in the `WHERE` of an `UPDATE`.
 
     Without `columns`, every column is allowed. Without `operators`, the policy's default operators apply.
+
+    Set `only` when the table has inheritance children the policy should not reach: Postgres includes their rows
+    in a query on the parent, and checks privileges on the parent alone. With `only`, pgsafe writes the table as
+    `ONLY table`. Do not set it for a partitioned table, whose parent holds no rows. Every `Select`, `Update`
+    and `Delete` rule for one table must agree on it.
     """
 
     def __new__(
-        cls, table: str, *, columns: Sequence[str] | None = None, operators: Sequence[_Operator] | None = None
+        cls,
+        table: str,
+        *,
+        columns: Sequence[str] | None = None,
+        operators: Sequence[_Operator] | None = None,
+        only: bool = False,
     ) -> Select: ...
     @property
     def table(self) -> str: ...
@@ -69,6 +79,8 @@ class Select:
     def columns(self) -> list[str] | None: ...
     @property
     def operators(self) -> list[str] | None: ...
+    @property
+    def only(self) -> bool: ...
 
 @final
 class Insert:
@@ -96,25 +108,36 @@ class Update:
 
     An `UPDATE` with no `WHERE` is rejected unless `allow_unfiltered` is set. That catches mistakes, it is
     not a security control: `WHERE true` passes.
+
+    `only` writes the table as `ONLY table`, see `Select`.
     """
 
-    def __new__(cls, table: str, *, columns: Sequence[str] | None = None, allow_unfiltered: bool = False) -> Update: ...
+    def __new__(
+        cls, table: str, *, columns: Sequence[str] | None = None, allow_unfiltered: bool = False, only: bool = False
+    ) -> Update: ...
     @property
     def table(self) -> str: ...
     @property
     def columns(self) -> list[str] | None: ...
     @property
     def allow_unfiltered(self) -> bool: ...
+    @property
+    def only(self) -> bool: ...
 
 @final
 class Delete:
-    """Allows `DELETE FROM table`. A `DELETE` with no `WHERE` is rejected unless `allow_unfiltered` is set."""
+    """Allows `DELETE FROM table`. A `DELETE` with no `WHERE` is rejected unless `allow_unfiltered` is set.
 
-    def __new__(cls, table: str, *, allow_unfiltered: bool = False) -> Delete: ...
+    `only` writes the table as `ONLY table`, see `Select`.
+    """
+
+    def __new__(cls, table: str, *, allow_unfiltered: bool = False, only: bool = False) -> Delete: ...
     @property
     def table(self) -> str: ...
     @property
     def allow_unfiltered(self) -> bool: ...
+    @property
+    def only(self) -> bool: ...
 
 @final
 class Limits:
@@ -156,13 +179,18 @@ class Limits:
 class Table:
     """A table or view in `FROM`, or the target of a write."""
 
-    def __new__(cls, name: str, *, schema: str | None = None, alias: str | None = None) -> Table: ...
+    def __new__(
+        cls, name: str, *, schema: str | None = None, alias: str | None = None, only: bool = False
+    ) -> Table: ...
     @property
     def name(self) -> str: ...
     @property
     def schema(self) -> str | None: ...
     @property
     def alias(self) -> str | None: ...
+    @property
+    def only(self) -> bool:
+        """Whether the table is written `ONLY name`, which leaves out rows of its inheritance children."""
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self) -> int: ...
 
@@ -280,6 +308,8 @@ class Policy:
         literals: `inline` writes string literals into the SQL, escaped. `params` replaces them with
             placeholders and returns the values in `SafeSql.params`.
         max_rows: Cap on the rows a `SELECT` returns: a missing `LIMIT` is added and a larger one reduced.
+        default_schema: The schema that unqualified table names belong to, in rules and in statements. Without it
+            they are written unqualified and Postgres resolves them through the `search_path`.
         dialect: The dialect of the input: `postgres`, `generic`, `ansi`, `mysql` or `sqlite`.
         limits: Bounds on the size of a statement.
         mappers: Functions decorated with `@mapper(...)`, run in order on statements that pass.
@@ -295,6 +325,7 @@ class Policy:
         star_behaviour: _Literal['expand', 'reject', 'allow'] = 'expand',
         literals: _Literal['inline', 'params'] = 'inline',
         max_rows: int | None = None,
+        default_schema: str | None = None,
         dialect: _Literal['postgres', 'generic', 'ansi', 'mysql', 'sqlite'] = 'postgres',
         limits: Limits | None = None,
         mappers: Sequence[Mapper] | None = None,

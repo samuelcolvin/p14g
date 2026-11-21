@@ -528,14 +528,23 @@ impl<'p, C> Checker<'p, C> {
                 };
                 let alias = table.reference_name().clone();
                 if let Some((columns, open)) = cte {
+                    if table.only {
+                        return Err(Error::denied(format!(
+                            "ONLY cannot be used on the CTE {:?}",
+                            table.name
+                        )));
+                    }
                     self.add_instance(alias, InstanceKind::Derived { columns, open })?
                 } else {
+                    self.qualify(table);
                     let name = table.qualified_name();
                     let rules = self
                         .policy
                         .selects
                         .get(&table_key(table))
                         .ok_or_else(|| Error::denied(format!("reading from table {name:?} is not allowed")))?;
+                    // the statement may ask for ONLY itself, the policy can only add it
+                    table.only |= self.policy.only.contains(&table_key(table));
                     self.tables.insert(name.clone());
                     self.add_instance(alias, InstanceKind::Base { name, rules })?
                 }
@@ -825,7 +834,17 @@ impl<'p, C> Checker<'p, C> {
 
     /// Open a scope holding just the target of a write, so `WHERE`, `SET` and `RETURNING` can read it as
     /// far as the table's select rules allow.
-    fn write_scope(&mut self, table: &Table) -> Result<usize> {
+    /// Give an unqualified table the policy's default schema, so that it is looked up and written with it.
+    fn qualify(&self, table: &mut Table) {
+        if table.schema.is_none() {
+            table.schema.clone_from(&self.policy.default_schema);
+        }
+    }
+
+    fn write_scope(&mut self, table: &mut Table, takes_only: bool) -> Result<usize> {
+        if takes_only {
+            table.only |= self.policy.only.contains(&table_key(table));
+        }
         let name = table.qualified_name();
         let rules = self
             .policy
@@ -860,6 +879,7 @@ impl<'p, C> Checker<'p, C> {
             rows,
             returning,
         } = insert;
+        self.qualify(table);
         let name = table.qualified_name();
         let rules = self
             .policy
@@ -906,7 +926,7 @@ impl<'p, C> Checker<'p, C> {
             }
         }
 
-        self.write_scope(table)?;
+        self.write_scope(table, false)?;
         self.close_write_scope(returning)
     }
 
@@ -917,6 +937,7 @@ impl<'p, C> Checker<'p, C> {
             selection,
             returning,
         } = update;
+        self.qualify(table);
         let name = table.qualified_name();
         let rules = self
             .policy
@@ -944,7 +965,7 @@ impl<'p, C> Checker<'p, C> {
             )));
         }
 
-        self.write_scope(table)?;
+        self.write_scope(table, true)?;
         let mut refs = Refs::new();
         let result = (|| {
             for assignment in assignments.iter_mut() {
@@ -970,6 +991,7 @@ impl<'p, C> Checker<'p, C> {
             selection,
             returning,
         } = delete;
+        self.qualify(table);
         let name = table.qualified_name();
         let rule = self
             .policy
@@ -981,7 +1003,7 @@ impl<'p, C> Checker<'p, C> {
                 "DELETE from table {name:?} without a WHERE clause is not allowed"
             )));
         }
-        self.write_scope(table)?;
+        self.write_scope(table, true)?;
         let mut refs = Refs::new();
         if let Some(selection) = selection
             && let Err(e) = self.expr(selection, &mut refs)

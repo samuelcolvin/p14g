@@ -21,6 +21,12 @@ CREATE TABLE audit (id serial PRIMARY KEY, message text, tenant_id int);
 CREATE VIEW cheap_orders WITH (security_barrier = true) AS
     SELECT id, product, qty FROM orders WHERE qty < 10 WITH CHECK OPTION;
 
+-- `family` has a child table: without ONLY, a query on `family` also reads and writes the child's rows
+CREATE TABLE family (id int, label text);
+CREATE TABLE family_child (extra text) INHERITS (family);
+INSERT INTO family VALUES (1, 'parent'), (2, 'parent');
+INSERT INTO family_child VALUES (10, 'child', 'x'), (11, 'child', 'y'), (12, 'child', 'z');
+
 INSERT INTO customers VALUES (1, 'alice', 'a@example.com'), (2, 'bob', 'b@example.com');
 INSERT INTO orders (product, qty, customer_id, tenant_id) VALUES ('tea', 2, 1, 42), ('coffee', 20, 2, 42), ('milk', 0, 1, 7);
 INSERT INTO app.events VALUES (1, 'click', 'x');
@@ -41,3 +47,4 @@ GRANT SELECT (a, b) ON limited TO pgsafe_test_role;
 GRANT INSERT (message, tenant_id) ON audit TO pgsafe_test_role;
 GRANT USAGE ON SEQUENCE audit_id_seq TO pgsafe_test_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO pgsafe_test_role;
+GRANT SELECT (id, label), INSERT (id, label), UPDATE (label), DELETE ON family TO pgsafe_test_role;

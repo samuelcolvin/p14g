@@ -71,17 +71,20 @@ struct PySelect {
     columns: Option<Vec<String>>,
     #[pyo3(get)]
     operators: Option<Vec<String>>,
+    #[pyo3(get)]
+    only: bool,
 }
 
 #[pymethods]
 impl PySelect {
     #[new]
-    #[pyo3(signature = (table, *, columns=None, operators=None))]
+    #[pyo3(signature = (table, *, columns=None, operators=None, only=false))]
     fn new(
         py: Python<'_>,
         table: String,
         columns: Option<Vec<String>>,
         operators: Option<Vec<String>>,
+        only: bool,
     ) -> PyResult<Self> {
         if let Some(operators) = &operators {
             parse_operators(py, operators)?;
@@ -90,17 +93,23 @@ impl PySelect {
             table,
             columns,
             operators,
+            only,
         })
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Select({:?}, columns={}, operators={})",
+            "Select({:?}, columns={}, operators={}, only={})",
             self.table,
             repr_list(self.columns.as_ref()),
-            repr_list(self.operators.as_ref())
+            repr_list(self.operators.as_ref()),
+            repr_bool(self.only)
         )
     }
+}
+
+fn repr_bool(value: bool) -> &'static str {
+    if value { "True" } else { "False" }
 }
 
 fn parse_operators(py: Python<'_>, operators: &[String]) -> PyResult<Vec<Op>> {
@@ -175,26 +184,30 @@ struct PyUpdate {
     columns: Option<Vec<String>>,
     #[pyo3(get)]
     allow_unfiltered: bool,
+    #[pyo3(get)]
+    only: bool,
 }
 
 #[pymethods]
 impl PyUpdate {
     #[new]
-    #[pyo3(signature = (table, *, columns=None, allow_unfiltered=false))]
-    fn new(table: String, columns: Option<Vec<String>>, allow_unfiltered: bool) -> Self {
+    #[pyo3(signature = (table, *, columns=None, allow_unfiltered=false, only=false))]
+    fn new(table: String, columns: Option<Vec<String>>, allow_unfiltered: bool, only: bool) -> Self {
         Self {
             table,
             columns,
             allow_unfiltered,
+            only,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Update({:?}, columns={}, allow_unfiltered={})",
+            "Update({:?}, columns={}, allow_unfiltered={}, only={})",
             self.table,
             repr_list(self.columns.as_ref()),
-            if self.allow_unfiltered { "True" } else { "False" }
+            repr_bool(self.allow_unfiltered),
+            repr_bool(self.only)
         )
     }
 }
@@ -206,24 +219,28 @@ struct PyDelete {
     table: String,
     #[pyo3(get)]
     allow_unfiltered: bool,
+    #[pyo3(get)]
+    only: bool,
 }
 
 #[pymethods]
 impl PyDelete {
     #[new]
-    #[pyo3(signature = (table, *, allow_unfiltered=false))]
-    fn new(table: String, allow_unfiltered: bool) -> Self {
+    #[pyo3(signature = (table, *, allow_unfiltered=false, only=false))]
+    fn new(table: String, allow_unfiltered: bool, only: bool) -> Self {
         Self {
             table,
             allow_unfiltered,
+            only,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Delete({:?}, allow_unfiltered={})",
+            "Delete({:?}, allow_unfiltered={}, only={})",
             self.table,
-            if self.allow_unfiltered { "True" } else { "False" }
+            repr_bool(self.allow_unfiltered),
+            repr_bool(self.only)
         )
     }
 }
@@ -327,13 +344,20 @@ struct PyTable(ast::Table);
 #[pymethods]
 impl PyTable {
     #[new]
-    #[pyo3(signature = (name, *, schema=None, alias=None))]
-    fn new(py: Python<'_>, name: &str, schema: Option<&str>, alias: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (name, *, schema=None, alias=None, only=false))]
+    fn new(py: Python<'_>, name: &str, schema: Option<&str>, alias: Option<&str>, only: bool) -> PyResult<Self> {
         Ok(Self(ast::Table {
             schema: optional_ident(py, schema)?,
             name: ident(py, name)?,
             alias: optional_ident(py, alias)?,
+            only,
         }))
+    }
+
+    /// Whether the table is written `ONLY name`, which leaves out rows of its inheritance children.
+    #[getter]
+    fn only(&self) -> bool {
+        self.0.only
     }
 
     #[getter]
@@ -353,10 +377,11 @@ impl PyTable {
 
     fn __repr__(&self) -> String {
         format!(
-            "Table({:?}, schema={}, alias={})",
+            "Table({:?}, schema={}, alias={}, only={})",
             self.name(),
             repr_option(self.schema()),
-            repr_option(self.alias())
+            repr_option(self.alias()),
+            repr_bool(self.0.only)
         )
     }
 }
@@ -778,6 +803,7 @@ impl PyPolicy {
         star_behaviour="expand",
         literals="inline",
         max_rows=None,
+        default_schema=None,
         dialect="postgres",
         limits=None,
         mappers=None,
@@ -793,6 +819,7 @@ impl PyPolicy {
         star_behaviour: &str,
         literals: &str,
         max_rows: Option<u64>,
+        default_schema: Option<String>,
         dialect: &str,
         limits: Option<&Bound<'_, PyLimits>>,
         mappers: Option<Vec<Bound<'_, PyMapper>>>,
@@ -806,6 +833,9 @@ impl PyPolicy {
             .literals(Literals::parse(literals).map_err(config)?)
             .max_rows(max_rows)
             .dialect(pgsafe::Dialect::parse(dialect).map_err(config)?);
+        if let Some(default_schema) = default_schema {
+            builder = builder.default_schema(default_schema);
+        }
         if let Some(operators) = operators {
             builder = builder.operators(parse_operators(py, &operators)?);
         }
@@ -866,7 +896,7 @@ fn add_rule(
 ) -> PyResult<PolicyBuilder<Context>> {
     if let Ok(select) = rule.cast::<PySelect>() {
         let select = select.get();
-        let mut rule = pgsafe::Select::table(&select.table);
+        let mut rule = pgsafe::Select::table(&select.table).only(select.only);
         if let Some(columns) = &select.columns {
             rule = rule.columns(columns);
         }
@@ -897,14 +927,20 @@ fn add_rule(
         Ok(builder.insert(rule))
     } else if let Ok(update) = rule.cast::<PyUpdate>() {
         let update = update.get();
-        let mut rule = pgsafe::Update::table(&update.table).allow_unfiltered(update.allow_unfiltered);
+        let mut rule = pgsafe::Update::table(&update.table)
+            .allow_unfiltered(update.allow_unfiltered)
+            .only(update.only);
         if let Some(columns) = &update.columns {
             rule = rule.columns(columns);
         }
         Ok(builder.update(rule))
     } else if let Ok(delete) = rule.cast::<PyDelete>() {
         let delete = delete.get();
-        Ok(builder.delete(pgsafe::Delete::table(&delete.table).allow_unfiltered(delete.allow_unfiltered)))
+        Ok(builder.delete(
+            pgsafe::Delete::table(&delete.table)
+                .allow_unfiltered(delete.allow_unfiltered)
+                .only(delete.only),
+        ))
     } else {
         Err(PyTypeError::new_err(format!(
             "a rule must be a Select, Insert, Update or Delete, not {}",

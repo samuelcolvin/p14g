@@ -293,17 +293,17 @@ def test_max_rows_dialect_limits():
 def test_rules():
     select = Select('orders', columns=('id', 'qty'), operators=['='])
     assert (select.table, select.columns, select.operators) == ('orders', ['id', 'qty'], ['='])
-    assert repr(select) == 'Select("orders", columns=["id", "qty"], operators=["="])'
-    assert repr(Select('v')) == 'Select("v", columns=None, operators=None)'
+    assert repr(select) == 'Select("orders", columns=["id", "qty"], operators=["="], only=False)'
+    assert repr(Select('v')) == 'Select("v", columns=None, operators=None, only=False)'
     insert = Insert('orders', columns=['id'])
     assert (insert.table, insert.columns) == ('orders', ['id'])
     assert repr(insert) == 'Insert("orders", columns=["id"])'
     update = Update('orders', columns=['qty'], allow_unfiltered=True)
     assert (update.table, update.columns, update.allow_unfiltered) == ('orders', ['qty'], True)
-    assert repr(update) == 'Update("orders", columns=["qty"], allow_unfiltered=True)'
+    assert repr(update) == 'Update("orders", columns=["qty"], allow_unfiltered=True, only=False)'
     delete = Delete('orders')
     assert (delete.table, delete.allow_unfiltered) == ('orders', False)
-    assert repr(delete) == 'Delete("orders", allow_unfiltered=False)'
+    assert repr(delete) == 'Delete("orders", allow_unfiltered=False, only=False)'
 
     with pytest.raises(TypeError, match='a rule must be a Select, Insert, Update or Delete, not str'):
         Policy('orders')  # pyright: ignore[reportArgumentType]
@@ -422,7 +422,7 @@ def test_mapper_errors():
 def test_nodes():
     table = Table('orders', schema='app', alias='o')
     assert (table.name, table.schema, table.alias) == ('orders', 'app', 'o')
-    assert repr(table) == 'Table("orders", schema="app", alias="o")'
+    assert repr(table) == 'Table("orders", schema="app", alias="o", only=False)'
     assert table == Table('orders', schema='app', alias='o')
     assert table != Table('orders')
 
@@ -875,3 +875,101 @@ def test_mapper_repr():
 
     for kind in Table, Column, Function, Literal:
         assert repr(mapper(kind)(f)).startswith(f'<Mapper of {kind.__name__} <function test_mapper_repr.<locals>.f')
+
+
+def test_only():
+    policy = Policy(
+        Select('family', columns=['id'], only=True),
+        Update('family', only=True),
+        Delete('family', only=True),
+        Insert('family'),
+        Select('orders'),
+        Update('orders'),
+    )
+    assert policy.check('select * from family f where id = 1').sql == (
+        'SELECT "f"."id" FROM ONLY "family" AS "f" WHERE ("f"."id" = 1)'
+    )
+    assert policy.check('update family set name = 1 where id = 1').sql == (
+        'UPDATE ONLY "family" SET "name" = 1 WHERE ("family"."id" = 1)'
+    )
+    assert policy.check('delete from family where id = 1').sql == 'DELETE FROM ONLY "family" WHERE ("family"."id" = 1)'
+    # INSERT has no ONLY: a row goes into the table it names
+    assert policy.check('insert into family (id) values (1) returning id').sql == (
+        'INSERT INTO "family" ("id") VALUES (1) RETURNING "family"."id"'
+    )
+    # a statement can ask for ONLY on any table, and its absence on a table the policy marks changes nothing
+    assert policy.check('select id from only orders').sql == 'SELECT "orders"."id" FROM ONLY "orders"'
+    assert policy.check('update only orders set qty = 1 where id = 1').sql == (
+        'UPDATE ONLY "orders" SET "qty" = 1 WHERE ("orders"."id" = 1)'
+    )
+    assert policy.check('select id from orders').sql == 'SELECT "orders"."id" FROM "orders"'
+    assert policy.check('select id from only family').sql == 'SELECT "family"."id" FROM ONLY "family"'
+
+    rules = Select('t', only=True), Update('t', only=True), Delete('t', only=True)
+    assert [rule.only for rule in rules] == [True, True, True]
+    assert repr(rules[2]) == 'Delete("t", allow_unfiltered=False, only=True)'
+    assert not Select('t').only
+
+    for mismatched in (
+        [Select('t', only=True), Select('t')],
+        [Select('t'), Update('t', only=True)],
+        [Update('t', only=True), Delete('t')],
+    ):
+        with pytest.raises(PgSafeError, match='the rules for table "t" disagree about `only`') as exc_info:
+            Policy(*mismatched)
+        assert exc_info.value.kind == 'config'
+
+    with pytest.raises(PgSafeError, match='ONLY cannot be used on the CTE "c"'):
+        policy.check('with c as (select id from orders) select id from only c')
+
+
+def test_only_and_mappers():
+    seen: list[Table] = []
+
+    @mapper(Table)
+    def record(table: Table, context: Any) -> Table:
+        seen.append(table)
+        return Table(table.name, alias=table.alias, only=not table.only)
+
+    policy = Policy(Select('family', only=True), Select('orders'), mappers=[record])
+    assert policy.check('select f.id, o.id from family f join orders o on o.id = f.id').sql == (
+        'SELECT "f"."id", "o"."id" FROM "family" AS "f" INNER JOIN ONLY "orders" AS "o" ON ("o"."id" = "f"."id")'
+    )
+    assert seen == [Table('family', alias='f', only=True), Table('orders', alias='o')]
+    assert seen[0].only
+    assert Table('a', only=True) != Table('a')
+    assert repr(Table('a', only=True)) == 'Table("a", schema=None, alias=None, only=True)'
+
+    @mapper(Table)
+    def only_on_insert(table: Table, context: Any) -> Table:
+        return Table(table.name, only=True)
+
+    with pytest.raises(PgSafeError, match='INSERT cannot use ONLY'):
+        Policy(Insert('t'), mappers=[only_on_insert]).check('insert into t (a) values (1)')
+
+
+def test_default_schema():
+    policy = Policy(Select('orders', columns=['id']), Delete('public.orders'), default_schema='public')
+    safe = policy.check('select * from orders')
+    assert safe.sql == 'SELECT "orders"."id" FROM "public"."orders"'
+    assert safe.tables == ['public.orders']
+    assert policy.check('select id from public.orders').sql == safe.sql
+    assert policy.check('delete from orders where id = 1').sql == (
+        'DELETE FROM "public"."orders" WHERE ("orders"."id" = 1)'
+    )
+    with pytest.raises(PgSafeError, match='reading from table "other.orders" is not allowed'):
+        policy.check('select id from other.orders')
+    with pytest.raises(PgSafeError, match='invalid default schema ""') as exc_info:
+        Policy(default_schema='')
+    assert exc_info.value.kind == 'config'
+
+    # a mapper is given the qualified table
+    seen: list[Table] = []
+
+    @mapper(Table)
+    def record(table: Table, context: Any) -> Table:
+        seen.append(table)
+        return table
+
+    Policy(Select('orders'), default_schema='app', mappers=[record]).check('select id from orders')
+    assert seen == [Table('orders', schema='app')]

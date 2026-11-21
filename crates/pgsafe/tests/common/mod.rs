@@ -17,6 +17,11 @@ pub fn builder() -> PolicyBuilder {
                 .operators([Op::Eq, Op::And]),
         )
         .select(Select::table("cheap_orders"))
+        // a table with an inheritance child the policy must not reach
+        .select(Select::table("family").columns(["id", "label"]).only(true))
+        .insert(Insert::table("family").columns(["id", "label"]))
+        .update(Update::table("family").columns(["label"]).only(true))
+        .delete(Delete::table("family").only(true))
         .insert(
             Insert::table("orders")
                 .columns(["product", "qty"])

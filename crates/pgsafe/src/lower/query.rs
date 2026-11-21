@@ -371,8 +371,17 @@ impl Lower<'_> {
                 reject(&json_path, "a JSON path on a table")?;
                 reject(&sample, "TABLESAMPLE")?;
                 reject(&index_directives, "an index hint")?;
-                reject(&inheritance, "ONLY or * on a table")?;
-                Ok(TableFactor::Table(table(name, alias)?))
+                let only = match inheritance {
+                    None => false,
+                    Some(sp::TableInheritance::Only { parenthesized: _ }) => true,
+                    Some(sp::TableInheritance::IncludeDescendants) => {
+                        return Err(Error::unsupported("* after a table name"));
+                    }
+                };
+                Ok(TableFactor::Table(Table {
+                    only,
+                    ..table(name, alias)?
+                }))
             }
             sp::TableFactor::Derived {
                 lateral,
@@ -457,5 +466,6 @@ pub(super) fn table(name: sp::ObjectName, alias: Option<sp::TableAlias>) -> Resu
         schema,
         name,
         alias: alias.map(table_alias).transpose()?,
+        only: false,
     })
 }

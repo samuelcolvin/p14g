@@ -125,6 +125,8 @@ fn postgres_agrees() {
     identifiers_round_trip(&mut client);
     views_enforce_rows(&mut client);
     star_allow(&mut client);
+    only_leaves_out_children(&mut client);
+    default_schema_is_not_shadowed(&mut client);
 }
 
 const NASTY: &[&str] = &[
@@ -253,5 +255,62 @@ fn describe(error: &postgres::Error) -> String {
     match error.as_db_error() {
         Some(db) => format!("{}: {}", db.code().code(), db.message()),
         None => error.to_string(),
+    }
+}
+
+/// A rule with `only` keeps reads and writes to the table itself; without it Postgres includes the rows
+/// of tables that inherit from it, though the role has no privilege on those.
+fn only_leaves_out_children(client: &mut Client) {
+    let error = run(client, "SELECT id FROM family_child", &[]).expect_err("the child is not granted");
+    assert_eq!(error.code().map(SqlState::code), Some("42501"));
+    // what Postgres does with the plain table name: two rows of its own and three of the child's
+    assert_eq!(run(client, r#"SELECT "id" FROM "family""#, &[]).unwrap(), 5);
+    assert_eq!(run(client, r#"DELETE FROM "family" RETURNING "id""#, &[]).unwrap(), 5);
+
+    let policy = policy();
+    let mut rows = |sql: &str| {
+        let safe = policy.check(sql, &()).unwrap();
+        assert!(safe.sql.contains(r#"ONLY "family""#), "{}", safe.sql);
+        run(client, &safe.sql, &[]).unwrap()
+    };
+    assert_eq!(rows("select * from family"), 2);
+    assert_eq!(rows("select id from family where label = 'child'"), 0);
+    assert_eq!(rows("update family set label = 'x' where true returning id"), 2);
+    assert_eq!(rows("delete from family where true returning id"), 2);
+}
+
+/// With `default_schema`, a temporary table of the same name does not take the place of the real one.
+fn default_schema_is_not_shadowed(client: &mut Client) {
+    let qualified = common::builder().default_schema("public").build().unwrap();
+    let plain = policy();
+    let sql = "select id from customers";
+    let rows = |client: &mut Client, policy: &Policy| {
+        let safe = policy.check(sql, &()).unwrap();
+        let messages = client.simple_query(&safe.sql).unwrap();
+        messages
+            .iter()
+            .filter(|m| matches!(m, SimpleQueryMessage::Row(_)))
+            .count()
+    };
+    assert_eq!(rows(client, &qualified), 2);
+    assert_eq!(rows(client, &plain), 2);
+
+    client
+        .batch_execute("CREATE TEMPORARY TABLE customers (id int)")
+        .unwrap();
+    // Postgres looks in the temporary schema first, so the unqualified name now means the empty table
+    assert_eq!(rows(client, &plain), 0);
+    assert_eq!(rows(client, &qualified), 2);
+    client.batch_execute("DROP TABLE pg_temp.customers").unwrap();
+
+    // writes and RETURNING work on the qualified name too
+    for sql in [
+        "insert into orders (product, qty) values ('x', 1) returning id",
+        "update orders set qty = 2 where id = 1 returning *",
+        "delete from orders where id = 1 returning id",
+    ] {
+        let safe = qualified.check(sql, &()).unwrap();
+        assert!(safe.sql.contains(r#""public"."orders""#), "{}", safe.sql);
+        assert_eq!(run(client, &safe.sql, &[]).unwrap(), 1, "{}", safe.sql);
     }
 }

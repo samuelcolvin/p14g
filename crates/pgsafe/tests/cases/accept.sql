@@ -212,6 +212,34 @@ delete from orders where id = 1
 delete from orders where id in (select id from customers) returning id, product
 => DELETE FROM "orders" WHERE ("orders"."id" IN (SELECT "customers"."id" FROM "customers")) RETURNING "orders"."id", "orders"."product"
 
+-- ONLY, asked for by the statement or added by a rule
+select * from only orders
+=> SELECT "orders"."id", "orders"."product", "orders"."qty", "orders"."customer_id" FROM ONLY "orders"
+
+select o.id from only orders as o join only (customers) c on c.id = o.customer_id
+=> SELECT "o"."id" FROM ONLY "orders" AS "o" INNER JOIN ONLY "customers" AS "c" ON ("c"."id" = "o"."customer_id")
+
+update only orders set qty = 1 where id = 1
+=> UPDATE ONLY "orders" SET "qty" = 1 WHERE ("orders"."id" = 1)
+
+delete from only orders where id = 1
+=> DELETE FROM ONLY "orders" WHERE ("orders"."id" = 1)
+
+select * from family
+=> SELECT "family"."id", "family"."label" FROM ONLY "family"
+
+select f.id from family f where f.id in (select id from only family)
+=> SELECT "f"."id" FROM ONLY "family" AS "f" WHERE ("f"."id" IN (SELECT "family"."id" FROM ONLY "family"))
+
+update family set label = 'x' where id = 1 returning *
+=> UPDATE ONLY "family" SET "label" = 'x' WHERE ("family"."id" = 1) RETURNING "family"."id", "family"."label"
+
+delete from family where id = 2
+=> DELETE FROM ONLY "family" WHERE ("family"."id" = 2)
+
+insert into family (id, label) values (9, 'new') returning id
+=> INSERT INTO "family" ("id", "label") VALUES (9, 'new') RETURNING "family"."id"
+
 -- writes through an updatable view
 insert into cheap_orders (product, qty) values ('gum', 1)
 => INSERT INTO "cheap_orders" ("product", "qty") VALUES ('gum', 1)

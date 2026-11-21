@@ -100,6 +100,8 @@ denied: select id from orders o1 join orders o2 on o1.id = o2.id
 denied: select id from orders join orders on true
 denied: select x.id from orders
 denied: select id from v, cheap_orders
+denied: with c as (select id from orders) select id from only c
+denied: select id from only secrets
 
 -- functions outside the allowed set
 denied: select pg_sleep(10)
@@ -219,7 +221,7 @@ unsupported: select o.id from orders o, lateral (select * from customers c where
 unsupported: select * from generate_series(1, 10)
 unsupported: select * from unnest(array[1, 2])
 unsupported: select * from pg_ls_dir('.') as t
-unsupported: select * from only orders
+unsupported: select * from orders *
 unsupported: select * from (orders o join customers c on c.id = o.customer_id)
 unsupported: select * from (select 1)
 unsupported: select * from (values (1), (2)) as t (a)
@@ -290,11 +292,9 @@ unsupported: update orders set qty = 1 from customers where customers.id = order
 unsupported: update orders set (qty, product) = (1, 'x') where id = 1
 denied: update orders set qty = default where id = 1
 unsupported: update orders o join customers c on c.id = o.customer_id set qty = 1 where o.id = 1
-unsupported: update only orders set qty = 1 where id = 1
 denied: delete from customers where id = 1
 denied: delete from secrets
 denied: delete from orders
 denied: delete from orders where id in (select id from secrets)
 unsupported: delete from orders using secrets where secrets.id = orders.id
 parse: delete from orders where current of c
-unsupported: delete from only orders where id = 1

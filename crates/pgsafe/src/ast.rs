@@ -183,6 +183,8 @@ pub struct Table {
     pub schema: Option<Ident>,
     pub name: Ident,
     pub alias: Option<Ident>,
+    /// Written `ONLY name`: rows of inheritance children and partitions are left out.
+    pub only: bool,
 }
 
 impl Table {

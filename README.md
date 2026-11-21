@@ -70,6 +70,10 @@ It does not replace database privileges, and it cannot limit how much work a per
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.
+- Set `default_schema`, or write rules as `schema.table`.
+  Otherwise table names are written unqualified and Postgres resolves them through the `search_path`, where a
+  temporary table or a table in an earlier schema with the same name is found first.
+  Functions you add with `functions=[...]` are written as you name them, so give those a schema too.
 - Restrict rows with views, not with pgsafe (see below).
 - Do not show database error messages to the author of the SQL unless you are content for them to see them.
   A unique-violation error says that a value exists.
@@ -107,13 +111,16 @@ A statement is rejected unless a rule allows it.
 
 | Rule | Allows |
 | --- | --- |
-| `Select(table, columns=None, operators=None)` | Reading the listed columns, or any column without `columns`. |
+| `Select(table, columns=None, operators=None, only=False)` | Reading the listed columns, or any column without `columns`. |
 | `Insert(table, columns=None, extra=None)` | `INSERT ... VALUES` setting the listed columns. |
-| `Update(table, columns=None, allow_unfiltered=False)` | `UPDATE ... SET` on the listed columns. |
-| `Delete(table, allow_unfiltered=False)` | `DELETE FROM`. |
+| `Update(table, columns=None, allow_unfiltered=False, only=False)` | `UPDATE ... SET` on the listed columns. |
+| `Delete(table, allow_unfiltered=False, only=False)` | `DELETE FROM`. |
 
 - `table` is `name` or `schema.name`, spelled as Postgres stores it.
   An unquoted name in the SQL is folded to lower case before it is compared, as Postgres does.
+- With `Policy(..., default_schema='public')`, an unqualified name in a rule or a statement means the table in that
+  schema, and is written `"public"."orders"`.
+  Without it, a rule for `orders` only matches a statement that says `orders`, and the name is written unqualified.
 - Every mention of a column is a read and needs a `Select` rule: in a `WHERE`, `ORDER BY` or `JOIN`, in `RETURNING`,
   and on the right of a `SET`.
   A table with an `Insert` rule and no `Select` rule can be inserted into and nothing else.
@@ -124,6 +131,8 @@ A statement is rejected unless a rule allows it.
   `SIMILAR TO`).
 - `allow_unfiltered` permits an `UPDATE` or `DELETE` with no `WHERE`.
   Rejecting those catches mistakes. It is not a security control, because `WHERE true` passes.
+- `only` makes pgsafe write the table as `ONLY table` (see [Inheritance and partitions](#inheritance-and-partitions)).
+  Every `Select`, `Update` and `Delete` rule for one table must agree on it.
 - `extra` is a dict, or a callable taking the `context` you pass to `check()` and returning a dict, of columns pgsafe
   adds to every inserted row.
   A statement that sets one of those columns itself is rejected.
@@ -179,6 +188,25 @@ match its `WHERE`.
 `security_barrier` stops Postgres evaluating the caller's conditions before the view's, which closes error and timing
 side channels.
 
+### Inheritance and partitions
+
+A rule for a table also covers the rows of tables that inherit from it, and of its partitions.
+This is how Postgres treats the name: `SELECT`, `UPDATE` and `DELETE` on a parent include the rows of its children,
+and privileges are checked on the parent alone, so a role with no grant on a child can still reach its rows this way.
+Only the parent's columns are reachable.
+
+If a table has inheritance children the policy should not reach, set `only=True` on its rules.
+pgsafe then writes `ONLY table` wherever a statement reads, updates or deletes it.
+
+```python
+policy = Policy(Select('family', columns=['id'], only=True))
+print(policy.check('select * from family').sql)
+#> SELECT "family"."id" FROM ONLY "family"
+```
+
+Do not set `only` for a partitioned table: the parent holds no rows of its own, so `ONLY` returns nothing.
+A statement may also write `ONLY` itself, on any table it is allowed to use.
+
 ### Literals and parameters
 
 `check()` returns `SafeSql(sql, params, kind, tables)`.
@@ -233,7 +261,7 @@ It is written by the same writer as the rest of the statement, so it cannot prod
 Not supported, and rejected: every other kind of statement, `SELECT INTO`, `FOR UPDATE`, `JOIN ... USING`,
 `NATURAL JOIN`, `LATERAL`, table functions, `TABLESAMPLE`, `WITH RECURSIVE`, data-modifying CTEs, `DISTINCT ON`,
 `GROUPING SETS`, window frames, arrays and row constructors, `COLLATE`, `AT TIME ZONE`, `ANY`/`ALL`,
-`OPERATOR(...)` and custom operators, `INSERT ... SELECT`, `ON CONFLICT`, `DEFAULT`, `UPDATE ... FROM` and
+`OPERATOR(...)` and custom operators, `table *`, `INSERT ... SELECT`, `ON CONFLICT`, `DEFAULT`, `UPDATE ... FROM` and
 `DELETE ... USING`.
 
 `crates/pgsafe/tests/cases/accept.sql` and `reject.sql` list examples of both, with the SQL each accepted statement

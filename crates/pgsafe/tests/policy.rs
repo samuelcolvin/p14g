@@ -831,6 +831,143 @@ fn other_dialects() {
     }
 }
 
+#[test]
+fn only() {
+    let policy: Policy = Policy::builder()
+        .select(Select::table("family").columns(["id"]).only(true))
+        .update(Update::table("family").only(true))
+        .delete(Delete::table("family").only(true))
+        .insert(Insert::table("family"))
+        .select(orders())
+        .build()
+        .unwrap();
+    assert_eq!(
+        check(&policy, "select f.id from family f join orders on orders.id = f.id"),
+        r#"SELECT "f"."id" FROM ONLY "family" AS "f" INNER JOIN "orders" ON ("orders"."id" = "f"."id")"#
+    );
+    assert_eq!(
+        check(&policy, "update family set x = 1 where id = 1"),
+        r#"UPDATE ONLY "family" SET "x" = 1 WHERE ("family"."id" = 1)"#
+    );
+    assert_eq!(
+        check(&policy, "delete from family where id = 1"),
+        r#"DELETE FROM ONLY "family" WHERE ("family"."id" = 1)"#
+    );
+    // INSERT has no ONLY, a row goes into the table it names
+    assert_eq!(
+        check(&policy, "insert into family (id) values (1) returning id"),
+        r#"INSERT INTO "family" ("id") VALUES (1) RETURNING "family"."id""#
+    );
+    // the statement can ask for ONLY on a table the policy does not mark, in either spelling
+    assert_eq!(
+        check(&policy, "select id from only orders"),
+        r#"SELECT "orders"."id" FROM ONLY "orders""#
+    );
+    assert_eq!(
+        check(&policy, "select id from only (orders)"),
+        r#"SELECT "orders"."id" FROM ONLY "orders""#
+    );
+    assert_eq!(kind(&policy, "select id from orders *"), ErrorKind::Unsupported);
+    assert_eq!(
+        kind(&policy, "with c as (select id from orders) select id from only c"),
+        ErrorKind::Denied
+    );
+
+    // `only` belongs to the table, so the rules for a table have to agree on it
+    let message = config_error(
+        Policy::<()>::builder()
+            .select(Select::table("t").only(true))
+            .update(Update::table("t"))
+            .build(),
+    );
+    assert_eq!(message, "the rules for table \"t\" disagree about `only`");
+    config_error(
+        Policy::<()>::builder()
+            .select(Select::table("t"))
+            .select(Select::table("t").only(true))
+            .build(),
+    );
+    config_error(
+        Policy::<()>::builder()
+            .delete(Delete::table("s.t").only(true))
+            .select(Select::table("s.t"))
+            .build(),
+    );
+    // an insert rule has no `only`, and a table of the same name in another schema is another table
+    assert!(
+        Policy::<()>::builder()
+            .select(Select::table("t").only(true))
+            .insert(Insert::table("t"))
+            .select(Select::table("s.t"))
+            .build()
+            .is_ok()
+    );
+}
+
+#[test]
+fn default_schema() {
+    let policy: Policy = Policy::builder()
+        .select(orders())
+        .select(Select::table("app.events").columns(["id"]))
+        .insert(Insert::table("orders"))
+        .update(Update::table("orders"))
+        .delete(Delete::table("public.orders"))
+        .default_schema("public")
+        .build()
+        .unwrap();
+    // an unqualified name, in a rule or a statement, means the table in the default schema
+    let safe = policy.check("select id from orders", &()).unwrap();
+    assert_eq!(safe.sql, r#"SELECT "orders"."id" FROM "public"."orders""#);
+    assert_eq!(safe.tables, ["public.orders"]);
+    assert_eq!(check(&policy, "select id from public.orders"), safe.sql);
+    assert_eq!(
+        check(&policy, "select o.id from orders o join app.events e on e.id = o.id"),
+        r#"SELECT "o"."id" FROM "public"."orders" AS "o" INNER JOIN "app"."events" AS "e" ON ("e"."id" = "o"."id")"#
+    );
+    assert_eq!(
+        check(&policy, "insert into orders (qty) values (1) returning id"),
+        r#"INSERT INTO "public"."orders" ("qty") VALUES (1) RETURNING "orders"."id""#
+    );
+    assert_eq!(
+        check(&policy, "update orders set qty = 1 where id = 1"),
+        r#"UPDATE "public"."orders" SET "qty" = 1 WHERE ("orders"."id" = 1)"#
+    );
+    assert_eq!(
+        check(&policy, "delete from orders where id = 1"),
+        r#"DELETE FROM "public"."orders" WHERE ("orders"."id" = 1)"#
+    );
+    // other schemas still have to be named, and a CTE is not a table in any schema
+    assert_eq!(kind(&policy, "select id from events"), ErrorKind::Denied);
+    assert_eq!(kind(&policy, "select id from other.orders"), ErrorKind::Denied);
+    assert_eq!(
+        check(
+            &policy,
+            "with orders as (select id from app.events) select id from orders"
+        ),
+        r#"WITH "orders" AS (SELECT "events"."id" FROM "app"."events") SELECT "orders"."id" FROM "orders""#
+    );
+    // the output is accepted again unchanged
+    assert_eq!(check(&policy, &safe.sql), safe.sql);
+
+    // `orders` and `public.orders` are one table, so their rules must agree about `only`
+    config_error(
+        Policy::<()>::builder()
+            .select(Select::table("orders").only(true))
+            .delete(Delete::table("public.orders"))
+            .default_schema("public")
+            .build(),
+    );
+    config_error(Policy::<()>::builder().default_schema("").build());
+
+    // without it the name is written as the statement gave it
+    let plain: Policy = Policy::builder().select(orders()).build().unwrap();
+    assert_eq!(
+        check(&plain, "select id from orders"),
+        r#"SELECT "orders"."id" FROM "orders""#
+    );
+    assert_eq!(kind(&plain, "select id from public.orders"), ErrorKind::Denied);
+}
+
 /// sqlparser builds chains of operators with a loop, so they can be thousands of levels deep whatever its
 /// recursion limit says. These are the deepest trees each kind of chain can make within the default
 /// limits, run on a thread with a small stack: nothing may recurse down them unguarded, including drop.
