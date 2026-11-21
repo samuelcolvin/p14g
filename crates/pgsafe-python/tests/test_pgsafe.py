@@ -548,10 +548,11 @@ def test_function_args_shapes():
     # a mapper that returns what it was given changes nothing
     assert out == Policy(Select('v')).rewrite(sql).sql
     assert seen['count'] == []
-    assert seen['current_date'] == []
     assert seen['now'] == []
     assert seen['lower'] == [Column('a', table='v')]
-    assert [type(arg) for arg in seen['coalesce']] == [Column, Expr, Literal, Expr, Expr]
+    # COALESCE and CURRENT_DATE are grammar, not functions: the mapper is not called for them, only for the
+    # function inside the COALESCE
+    assert set(seen) == {'count', 'now', 'lower', 'max'}
     assert seen['max'] == [Column('d', table='v')]
 
     # `f(*)` has no argument list to replace, so giving it one makes an ordinary call
@@ -633,18 +634,45 @@ def test_mapper_returns_opaque_expr():
     )
 
 
-def test_mapper_builds_invalid_sql():
-    @mapper(Table)
-    def keyword_function(table: Table, context: Any) -> Table:
-        return table
+def test_keyword_forms_as_arguments():
+    seen: list[Any] = []
 
     @mapper(Function)
-    def bad_arity(function: Function, context: Any) -> pgsafe.ExprLike:
+    def record(function: Function, context: Any) -> pgsafe.ExprLike:
+        seen.extend(function.args)
+        return function
+
+    policy = Policy(Select('v'), mappers=[record])
+    sql = 'select concat(coalesce(a, 1), nullif(a, 1), greatest(a, 1), current_date, trim(a), extract(year from b)) from v'
+    assert policy.rewrite(sql).sql == (
+        'SELECT pg_catalog."concat"(COALESCE("v"."a", 1), NULLIF("v"."a", 1), GREATEST("v"."a", 1), CURRENT_DATE, '
+        'TRIM(BOTH FROM "v"."a"), EXTRACT(YEAR FROM "v"."b")) FROM "v"'
+    )
+    # each arrives as an opaque expression, which can be passed on but not taken apart
+    assert [type(arg) for arg in seen] == [Expr] * 6
+
+
+def test_mapper_builds_invalid_sql():
+    @mapper(Column)
+    def constant(column: Column, context: Any) -> pgsafe.ExprLike:
+        return 'x' if column.name == 'b' else column
+
+    policy = Policy(Select('v'), mappers=[constant])
+    assert policy.rewrite('select a from v where b = a').sql == """SELECT "v"."a" FROM "v" WHERE ('x' = "v"."a")"""
+    # Postgres rejects a bare constant in ORDER BY and GROUP BY, so pgsafe will not write one
+    for sql, clause in ('select a from v order by b', 'ORDER BY'), ('select count(*) from v group by b', 'GROUP BY'):
+        with pytest.raises(PgSafeError, match=f'a constant that is not a column position in {clause}') as exc_info:
+            policy.rewrite(sql)
+        assert exc_info.value.kind == 'unsupported'
+
+    # a function named after a keyword form is an ordinary call, which Postgres will say does not exist
+    @mapper(Function)
+    def not_a_keyword(function: Function, context: Any) -> pgsafe.ExprLike:
         return Function('nullif', [1])
 
-    with pytest.raises(PgSafeError, match='NULLIF cannot be written with these arguments') as exc_info:
-        Policy(Select('v'), mappers=[keyword_function, bad_arity]).rewrite('select lower(a) from v')
-    assert exc_info.value.kind == 'unsupported'
+    assert Policy(Select('v'), mappers=[not_a_keyword]).rewrite('select lower(a) from v').sql == (
+        'SELECT pg_catalog."nullif"(1) FROM "v"'
+    )
 
 
 def test_context_is_passed_through_unchanged():

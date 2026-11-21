@@ -1,4 +1,4 @@
-//! The functions allowed by default, and the ones that need special syntax when written.
+//! The functions allowed by default.
 //!
 //! A function is in the default set only if it has no side effects, reads nothing but its arguments, and
 //! cannot be made to allocate or compute far more than the size of its inputs. Matching is by name, so
@@ -127,41 +127,4 @@ pub fn defaults() -> impl Iterator<Item = &'static str> {
 #[must_use]
 pub fn is_default(name: &str) -> bool {
     defaults().any(|n| n == name)
-}
-
-/// How an unqualified function has to be written for Postgres.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Syntax {
-    /// `KEYWORD(args)`: these are grammar constructs, not entries in `pg_catalog`, so they cannot be
-    /// quoted or schema-qualified.
-    Keyword(&'static str),
-    /// `KEYWORD` with no parentheses at all.
-    Niladic(&'static str),
-    /// A builtin with a different catalog name, written `pg_catalog.<name>(args)`.
-    Builtin(&'static str),
-    /// Written as given.
-    Plain,
-}
-
-pub(crate) fn syntax(name: &str) -> Syntax {
-    match name {
-        "coalesce" => Syntax::Keyword("COALESCE"),
-        "nullif" => Syntax::Keyword("NULLIF"),
-        "greatest" => Syntax::Keyword("GREATEST"),
-        "least" => Syntax::Keyword("LEAST"),
-        "current_date" => Syntax::Niladic("CURRENT_DATE"),
-        "current_timestamp" => Syntax::Niladic("CURRENT_TIMESTAMP"),
-        // `trim(x)` is grammar for `btrim(x)`, there is no `pg_catalog.trim`
-        "trim" => Syntax::Builtin("btrim"),
-        _ => Syntax::Plain,
-    }
-}
-
-/// Whether a keyword function can be written with this many arguments. These are grammar, so the wrong
-/// number is a syntax error in Postgres rather than a missing overload.
-pub(crate) fn keyword_arity(keyword: &str, args: usize) -> bool {
-    match keyword {
-        "NULLIF" => args == 2,
-        _ => args >= 1,
-    }
 }

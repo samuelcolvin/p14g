@@ -37,8 +37,12 @@ The output is only as safe as the text the writer produces. Ask:
     either (`- -1` becoming a comment, `a OR b AND c` regrouping).
 - **Is anything written unqualified that Postgres could resolve to something else?**
     Columns are written `"table"."column"`, default functions `pg_catalog.name`, and tables with their schema when the
-    rule or `default_schema` gives one. The bare forms that exist (insert columns, `SET` targets, `OutputColumn`,
-    `Ordinal`) each need a reason they cannot name something unchecked.
+    rule or `default_schema` gives one. The bare forms that exist (insert columns, `SET` targets, `KeyExpr::Output`,
+    `KeyExpr::Position`) each need a reason they cannot name something unchecked.
+- **Can the IR hold something Postgres's grammar does not have?**
+    Prefer a type that cannot represent it over a check: `f(*)` has no `DISTINCT`, `NULLIF` has two arguments,
+    `ORDER BY` items are a position, an output name or an expression. A new runtime check in both lowering and the
+    writer is a sign the type is too loose.
 - **Does any path call `Display`/`to_string()` on a sqlparser node for output?**
     Its escaping is unsafe (`sqlparser_display_is_not_safe_to_emit`). Error messages are the only allowed use.
 
@@ -52,7 +56,8 @@ Syntax that is accepted without being represented is syntax that is silently dro
     A wildcard arm that accepts, or a variant mapped to a nearby meaning it does not have, is a finding.
 - **Does the lowered IR mean what Postgres will make of the output?**
     sqlparser is not Postgres's parser. That is safe only while the output is written from the IR, so check rewrites
-    such as `TRIM` → `btrim`, `POSITION(a IN b)` → `position(b, a)` and typed literals → `CAST` against Postgres itself.
+    such as `POSITION(a IN b)` → `position(b, a)`, `SUBSTRING(x FOR n)` → `substring(x, 1, n)` and typed literals →
+    `CAST` against Postgres itself.
 - **sqlparser upgrade?**
     Read its changelog for new fields, variants and dialect behaviour, and confirm the build broke where it should have.
 

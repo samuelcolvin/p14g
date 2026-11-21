@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     ast::{
-        BinaryOperator, Column, Delete, Expr, Function, FunctionArgs, Ident, Insert, LikeKind, Literal, OrderBy, Query,
-        Select, SelectItem, SetExpr, Statement, Table, TableFactor, UnaryOperator, Update,
+        BinaryOperator, Column, Delete, Expr, Function, FunctionArgs, Ident, Insert, KeyExpr, LikeKind, Literal,
+        OrderBy, Query, Select, SelectItem, SetExpr, Statement, Table, TableFactor, UnaryOperator, Update,
     },
     error::{Error, Result},
     policy::{Op, OpSet, Policy, SelectRule, Star, TableKey, function_lookup_key},
@@ -220,12 +220,14 @@ impl<'p, C> Checker<'p, C> {
     /// `ORDER BY` on a set operation or a parenthesised query can only name output columns.
     fn order_by_outputs(order_by: &mut [OrderBy], outputs: &Outputs) -> Result<()> {
         for item in order_by {
-            match &item.expr {
-                Expr::Column(Column { table: None, name }) if outputs.names.iter().flatten().any(|n| n == name) => {
-                    item.expr = Expr::OutputColumn(name.clone());
+            match &item.key {
+                KeyExpr::Expr(Expr::Column(Column { table: None, name }))
+                    if outputs.names.iter().flatten().any(|n| n == name) =>
+                {
+                    item.key = KeyExpr::Output(name.clone());
                 }
-                Expr::Literal(Literal::Number(number)) if !outputs.open => {
-                    item.expr = Expr::Ordinal(ordinal(number, outputs.names.len())?);
+                KeyExpr::Expr(Expr::Literal(Literal::Number(number))) if !outputs.open => {
+                    item.key = KeyExpr::Position(ordinal(number, outputs.names.len())?);
                 }
                 _ => {
                     return Err(Error::denied(
@@ -295,24 +297,26 @@ impl<'p, C> Checker<'p, C> {
                 self.expr(expr, refs)?;
             }
         }
-        for expr in group_by.iter_mut() {
-            self.group_by(expr, &aliases, projection.len(), has_wildcard, refs)?;
+        for key in group_by.iter_mut() {
+            self.group_by(key, &aliases, projection.len(), has_wildcard, refs)?;
         }
         if let Some(having) = having {
             self.expr(having, refs)?;
         }
         for item in order_by.iter_mut() {
-            match &item.expr {
+            match &mut item.key {
                 // a bare name that matches an output alias: Postgres always picks the output column in
                 // ORDER BY, so writing it bare is unambiguous
-                Expr::Column(Column { table: None, name }) if aliases.iter().any(|(_, alias)| alias == name) => {
-                    item.expr = Expr::OutputColumn(name.clone());
+                KeyExpr::Expr(Expr::Column(Column { table: None, name }))
+                    if aliases.iter().any(|(_, alias)| alias == name) =>
+                {
+                    item.key = KeyExpr::Output(name.clone());
                 }
-                Expr::Literal(Literal::Number(number)) => {
-                    item.expr = Expr::Ordinal(checked_ordinal(number, projection.len(), has_wildcard)?);
+                KeyExpr::Expr(Expr::Literal(Literal::Number(number))) => {
+                    item.key = KeyExpr::Position(checked_ordinal(number, projection.len(), has_wildcard)?);
                 }
-                Expr::Literal(_) => return Err(constant_in("ORDER BY")),
-                _ => self.expr(&mut item.expr, refs)?,
+                KeyExpr::Expr(expr) => self.expr(expr, refs)?,
+                KeyExpr::Position(_) | KeyExpr::Output(_) => {}
             }
         }
         self.close_scope(projection)
@@ -322,46 +326,47 @@ impl<'p, C> Checker<'p, C> {
     /// tell which Postgres will pick, so it only accepts the cases where it can, or where both are allowed.
     fn group_by(
         &mut self,
-        expr: &mut Expr,
+        key: &mut KeyExpr,
         aliases: &[(usize, Ident)],
         columns: usize,
         has_wildcard: bool,
         refs: &mut Refs,
     ) -> Result<()> {
-        match expr {
-            Expr::Literal(Literal::Number(number)) => {
-                *expr = Expr::Ordinal(checked_ordinal(number, columns, has_wildcard)?);
-                Ok(())
+        let expr = match key {
+            KeyExpr::Position(_) | KeyExpr::Output(_) => return Ok(()),
+            KeyExpr::Expr(Expr::Literal(Literal::Number(number))) => {
+                *key = KeyExpr::Position(checked_ordinal(number, columns, has_wildcard)?);
+                return Ok(());
             }
-            Expr::Literal(_) => Err(constant_in("GROUP BY")),
-            Expr::Column(Column { table: None, name }) => {
-                let Some((index, _)) = aliases.iter().find(|(_, alias)| alias == name) else {
-                    return self.expr(expr, refs);
-                };
-                let scope = self.scopes.last().expect("select pushed a scope");
-                let listed = scope.instances.iter().any(|&i| self.instances[i].lists(name));
-                if listed {
-                    // a real input column of that name wins in Postgres too
-                    return self.expr(expr, refs);
-                }
-                let any_open = scope.instances.iter().any(|&i| self.instances[i].open());
-                if scope.instances.iter().all(|&i| self.instances[i].open_base_only()) {
-                    // Postgres only looks at this query level for an input column of that name, and every
-                    // column of every table at this level is allowed, so the bare name is safe either way
-                    *expr = Expr::OutputColumn(name.clone());
-                    Ok(())
-                } else if !any_open && !has_wildcard {
-                    // no visible table is known to have the column, so it must be the alias: say so by position
-                    let position = u32::try_from(index + 1).expect("projection length is limited");
-                    *expr = Expr::Ordinal(position);
-                    Ok(())
-                } else {
-                    Err(Error::denied(format!(
-                        "GROUP BY {name:?} could be a column or the output alias, repeat the expression instead"
-                    )))
-                }
-            }
-            _ => self.expr(expr, refs),
+            KeyExpr::Expr(expr) => expr,
+        };
+        let Expr::Column(Column { table: None, name }) = &*expr else {
+            return self.expr(expr, refs);
+        };
+        let Some((index, _)) = aliases.iter().find(|(_, alias)| alias == name) else {
+            return self.expr(expr, refs);
+        };
+        let scope = self.scopes.last().expect("select pushed a scope");
+        let listed = scope.instances.iter().any(|&i| self.instances[i].lists(name));
+        if listed {
+            // a real input column of that name wins in Postgres too
+            return self.expr(expr, refs);
+        }
+        let any_open = scope.instances.iter().any(|&i| self.instances[i].open());
+        if scope.instances.iter().all(|&i| self.instances[i].open_base_only()) {
+            // Postgres only looks at this query level for an input column of that name, and every
+            // column of every table at this level is allowed, so the bare name is safe either way
+            *key = KeyExpr::Output(name.clone());
+            Ok(())
+        } else if !any_open && !has_wildcard {
+            // no visible table is known to have the column, so it must be the alias: say so by position
+            let position = u32::try_from(index + 1).expect("projection length is limited");
+            *key = KeyExpr::Position(position);
+            Ok(())
+        } else {
+            Err(Error::denied(format!(
+                "GROUP BY {name:?} could be a column or the output alias, repeat the expression instead"
+            )))
         }
     }
 
@@ -677,9 +682,6 @@ impl<'p, C> Checker<'p, C> {
                 Ok(None)
             }
             Expr::Literal(_) | Expr::Placeholder(_) => Ok(None),
-            Expr::OutputColumn(_) | Expr::Ordinal(_) => Err(Error::denied(
-                "an output column reference is only valid in ORDER BY and GROUP BY",
-            )),
             Expr::Unary { op, expr } => {
                 self.expr(expr, refs)?;
                 Ok(Some(match op {
@@ -783,6 +785,33 @@ impl<'p, C> Checker<'p, C> {
                 self.function(function, refs)?;
                 Ok(None)
             }
+            // the keyword forms are allowed and denied under their names, like any other function
+            Expr::Variadic { function, first, rest } => {
+                self.function_allowed(None, function.name())?;
+                self.expr(first, refs)?;
+                self.exprs(rest, refs)?;
+                Ok(None)
+            }
+            Expr::NullIf { left, right } => {
+                self.function_allowed(None, "nullif")?;
+                self.expr(left, refs)?;
+                self.expr(right, refs)?;
+                Ok(None)
+            }
+            Expr::CurrentDate => self.function_allowed(None, "current_date").map(|()| None),
+            Expr::CurrentTimestamp => self.function_allowed(None, "current_timestamp").map(|()| None),
+            Expr::Trim {
+                side: _,
+                expr,
+                characters,
+            } => {
+                self.function_allowed(None, "trim")?;
+                self.expr(expr, refs)?;
+                if let Some(characters) = characters {
+                    self.expr(characters, refs)?;
+                }
+                Ok(None)
+            }
             Expr::Exists { subquery, negated: _ } | Expr::Subquery(subquery) => {
                 self.subquery(subquery, refs)?;
                 Ok(None)
@@ -807,8 +836,6 @@ impl<'p, C> Checker<'p, C> {
             schema,
             name,
             args,
-            distinct: _,
-            order_by,
             filter,
             over,
         } = function;
@@ -818,10 +845,16 @@ impl<'p, C> Checker<'p, C> {
         );
         self.function_allowed(schema.as_ref(), name.as_str())?;
         match args {
-            FunctionArgs::Niladic | FunctionArgs::Star => {}
-            FunctionArgs::List(args) => self.exprs(args, refs)?,
+            FunctionArgs::Star => {}
+            FunctionArgs::List {
+                args,
+                distinct: _,
+                order_by,
+            } => {
+                self.exprs(args, refs)?;
+                self.exprs(order_by.iter_mut().map(|o| &mut o.expr), refs)?;
+            }
         }
-        self.exprs(order_by.iter_mut().map(|o| &mut o.expr), refs)?;
         if let Some(filter) = filter {
             self.expr(filter, refs)?;
         }
@@ -1075,12 +1108,6 @@ fn checked_ordinal(number: &str, columns: usize, has_wildcard: bool) -> Result<u
         ));
     }
     ordinal(number, columns)
-}
-
-/// Postgres reads a bare constant in `ORDER BY` or `GROUP BY` as a column position, and rejects one that is
-/// not an integer as a syntax error.
-fn constant_in(clause: &str) -> Error {
-    Error::unsupported(format!("a constant that is not a column position in {clause}"))
 }
 
 /// A position in the select list, written as a number in `ORDER BY` or `GROUP BY`.

@@ -8,8 +8,8 @@ use std::mem;
 
 use crate::{
     ast::{
-        Column, Delete, Expr, Function, FunctionArgs, Insert, Literal, OrderBy, Query, Select, SelectItem, SetExpr,
-        Statement, Table, TableFactor, Update,
+        Column, Delete, Expr, Function, FunctionArgs, Insert, KeyExpr, Literal, OrderBy, Query, Select, SelectItem,
+        SetExpr, SortExpr, Statement, Table, TableFactor, Update,
     },
     error::Result,
 };
@@ -17,6 +17,8 @@ use crate::{
 /// Rewrites nodes of a checked statement. Every method defaults to leaving the node alone.
 ///
 /// Nodes are visited bottom-up, so a function's arguments have already been mapped when the function is.
+/// `COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are
+/// grammar, not functions, so `map_function` is not called for them, only for what is inside them.
 /// Mappers run in the order they were added and each is given what the one before returned. The inside of
 /// a replacement is not visited.
 pub trait Mapper<C>: Send + Sync {
@@ -194,7 +196,9 @@ impl<C> Walker<'_, C> {
         }
         self.select_items(projection)?;
         self.optional(selection.as_mut())?;
-        self.exprs(group_by)?;
+        for key in group_by {
+            self.key(key)?;
+        }
         self.optional(having.as_mut())
     }
 
@@ -215,6 +219,18 @@ impl<C> Walker<'_, C> {
     }
 
     fn order_by(&self, order_by: &mut [OrderBy]) -> Result<()> {
+        order_by.iter_mut().try_for_each(|item| self.key(&mut item.key))
+    }
+
+    /// Positions and output names are not expressions, so there is nothing in them to map.
+    fn key(&self, key: &mut KeyExpr) -> Result<()> {
+        match key {
+            KeyExpr::Position(_) | KeyExpr::Output(_) => Ok(()),
+            KeyExpr::Expr(expr) => self.expr(expr),
+        }
+    }
+
+    fn sort_exprs(&self, order_by: &mut [SortExpr]) -> Result<()> {
         order_by.iter_mut().try_for_each(|item| self.expr(&mut item.expr))
     }
 
@@ -246,8 +262,28 @@ impl<C> Walker<'_, C> {
 
     fn children(&self, expr: &mut Expr) -> Result<()> {
         match expr {
-            Expr::Column(_) | Expr::Literal(_) | Expr::Placeholder(_) | Expr::OutputColumn(_) | Expr::Ordinal(_) => {
+            Expr::Column(_) | Expr::Literal(_) | Expr::Placeholder(_) | Expr::CurrentDate | Expr::CurrentTimestamp => {
                 Ok(())
+            }
+            Expr::Variadic {
+                function: _,
+                first,
+                rest,
+            } => {
+                self.expr(first)?;
+                self.exprs(rest)
+            }
+            Expr::NullIf { left, right } => {
+                self.expr(left)?;
+                self.expr(right)
+            }
+            Expr::Trim {
+                side: _,
+                expr,
+                characters,
+            } => {
+                self.expr(expr)?;
+                self.optional(characters.as_deref_mut())
             }
             Expr::Unary { op: _, expr }
             | Expr::Is {
@@ -315,20 +351,24 @@ impl<C> Walker<'_, C> {
                 schema: _,
                 name: _,
                 args,
-                distinct: _,
-                order_by,
                 filter,
                 over,
             }) => {
                 match args {
-                    FunctionArgs::Niladic | FunctionArgs::Star => {}
-                    FunctionArgs::List(args) => self.exprs(args)?,
+                    FunctionArgs::Star => {}
+                    FunctionArgs::List {
+                        args,
+                        distinct: _,
+                        order_by,
+                    } => {
+                        self.exprs(args)?;
+                        self.sort_exprs(order_by)?;
+                    }
                 }
-                self.order_by(order_by)?;
                 self.optional(filter.as_deref_mut())?;
                 if let Some(window) = over {
                     self.exprs(&mut window.partition_by)?;
-                    self.order_by(&mut window.order_by)?;
+                    self.sort_exprs(&mut window.order_by)?;
                 }
                 Ok(())
             }

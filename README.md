@@ -247,6 +247,9 @@ print(policy.rewrite('select id from events', context=42).sql)
 ```
 
 There are mappers for `Table`, `Column`, `Function` and `Literal`.
+`COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are grammar in
+Postgres, not functions, so a `Function` mapper is not called for them.
+They are still allowed and denied by name with `functions` and `deny_functions`.
 What a mapper returns is not checked against the policy, so a mapper is trusted code.
 It is written by the same writer as the rest of the statement, so it cannot produce unescaped SQL.
 

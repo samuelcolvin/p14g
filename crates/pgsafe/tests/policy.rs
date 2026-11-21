@@ -1044,6 +1044,126 @@ fn grants() {
     assert_eq!(failing.grants("r", &()).unwrap_err().kind(), ErrorKind::Callback);
 }
 
+#[test]
+fn keyword_forms() {
+    let policy: Policy = Policy::builder().select(orders()).build().unwrap();
+    assert_eq!(
+        rewrite(
+            &policy,
+            "select COALESCE(qty), coalesce(qty, 1, 2), nullif(qty, 0), greatest(1), least(qty, id), current_date, \
+             CURRENT_TIMESTAMP, trim(product), trim(leading 'x' from product), trim(trailing from product) from orders"
+        ),
+        r#"SELECT COALESCE("orders"."qty"), COALESCE("orders"."qty", 1, 2), NULLIF("orders"."qty", 0), GREATEST(1), LEAST("orders"."qty", "orders"."id"), CURRENT_DATE, CURRENT_TIMESTAMP, TRIM(BOTH FROM "orders"."product"), TRIM(LEADING 'x' FROM "orders"."product"), TRIM(TRAILING FROM "orders"."product") FROM "orders""#
+    );
+    // and each form reads back as itself
+    let all = "select coalesce(qty, 1), nullif(qty, 0), greatest(1), least(qty, id), current_date, current_timestamp, \
+               trim(product), trim(leading 'x' from product), trim(trailing from product), trim(both 'x' from product) \
+               from orders";
+    let once = rewrite(&policy, all);
+    assert_eq!(rewrite(&policy, &once), once);
+    // without parentheses the name is a column, which no rule allows
+    assert_eq!(kind(&policy, "select coalesce from orders"), ErrorKind::Denied);
+
+    for sql in [
+        "select coalesce() from orders",
+        "select nullif(qty) from orders",
+        "select nullif(qty, 1, 2) from orders",
+        "select coalesce(distinct qty) from orders",
+        "select greatest(qty order by id) from orders",
+        "select least(*) from orders",
+        "select nullif(qty, 1) filter (where id > 1) from orders",
+        "select coalesce(qty) over () from orders",
+        "select current_date() from orders",
+        "select count(distinct *) from orders",
+    ] {
+        assert_eq!(kind(&policy, sql), ErrorKind::Unsupported, "{sql}");
+    }
+    // a qualified name is a call to a function in that schema, not the keyword form
+    assert_eq!(kind(&policy, "select app.coalesce(qty) from orders"), ErrorKind::Denied);
+
+    // each is allowed and denied under its own name
+    for (name, sql) in [
+        ("coalesce", "select coalesce(qty, 1) from orders"),
+        ("greatest", "select greatest(qty, 1) from orders"),
+        ("least", "select least(qty, 1) from orders"),
+        ("nullif", "select nullif(qty, 1) from orders"),
+        ("current_date", "select current_date"),
+        ("current_timestamp", "select current_timestamp"),
+        ("trim", "select trim(product) from orders"),
+        ("extract", "select extract(year from current_date)"),
+    ] {
+        let denied: Policy = Policy::builder()
+            .select(orders())
+            .deny_functions([name])
+            .build()
+            .unwrap();
+        let error = denied.rewrite(sql, &()).unwrap_err();
+        assert_eq!(error.message(), format!("function {name:?} is not allowed"));
+        assert!(policy.rewrite(sql, &()).is_ok(), "{sql}");
+    }
+}
+
+#[test]
+fn order_and_group_keys() {
+    use pgsafe::ast::{Expr, Literal};
+
+    let policy: Policy = Policy::builder().select(orders()).build().unwrap();
+    // a bare integer is a position; any other bare constant is a syntax error in Postgres
+    assert_eq!(
+        rewrite(&policy, "select id, qty from orders group by 1, 2 order by 2 desc, id"),
+        r#"SELECT "orders"."id", "orders"."qty" FROM "orders" GROUP BY 1, 2 ORDER BY 2 DESC, "orders"."id""#
+    );
+    for sql in [
+        "select id from orders order by 'x'",
+        "select id from orders order by null",
+        "select id from orders order by true",
+        "select count(*) from orders group by 'x'",
+    ] {
+        let error = policy.rewrite(sql, &()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{sql}");
+        assert!(
+            error
+                .message()
+                .starts_with("a constant that is not a column position in"),
+            "{error}"
+        );
+    }
+    // inside an expression, an aggregate or a window, a constant is a value like any other
+    assert_eq!(
+        rewrite(
+            &policy,
+            "select count(*) over (order by 1, 'x') from orders order by id + 1, 'x' || product"
+        ),
+        r#"SELECT pg_catalog."count"(*) OVER (ORDER BY 1, 'x') FROM "orders" ORDER BY ("orders"."id" + 1), ('x' || "orders"."product")"#
+    );
+
+    // a mapper cannot put a constant there either, and a position is not a literal for a mapper to change
+    let mapped: Policy = Policy::builder()
+        .select(orders())
+        .map_column(|column, ()| {
+            Ok(if column.name.as_str() == "qty" {
+                Expr::Literal(Literal::Number("7".into()))
+            } else {
+                Expr::Column(column)
+            })
+        })
+        .map_literal(|_, ()| Ok(Expr::Literal(Literal::Number("9".into()))))
+        .build()
+        .unwrap();
+    assert_eq!(
+        kind(&mapped, "select id from orders order by qty"),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        kind(&mapped, "select count(*) from orders group by qty"),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        rewrite(&mapped, "select id, 5 from orders order by 1, qty + 1"),
+        r#"SELECT "orders"."id", 9 FROM "orders" ORDER BY 1, (9 + 9)"#
+    );
+}
+
 /// sqlparser builds chains of operators with a loop, so they can be thousands of levels deep whatever its
 /// recursion limit says. These are the deepest trees each kind of chain can make within the default
 /// limits, run on a thread with a small stack: nothing may recurse down them unguarded, including drop.

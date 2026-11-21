@@ -208,7 +208,12 @@ class Column:
 
 @final
 class Function:
-    """A function call."""
+    """A call to a function in the catalog.
+
+    `COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are grammar
+    in Postgres, not functions, so they are not passed to a `Function` mapper and arrive as an opaque `Expr` when
+    they are an argument.
+    """
 
     def __new__(cls, name: str, args: Sequence[ExprLike] | None = None, *, schema: str | None = None) -> Function: ...
     @property
@@ -217,7 +222,7 @@ class Function:
     def schema(self) -> str | None: ...
     @property
     def args(self) -> list[Column | Function | Literal | Expr]:
-        """The arguments. Empty for `f(*)` and for keywords such as `CURRENT_DATE`."""
+        """The arguments. Empty for `f(*)`."""
     def replace(self, *, name: str = ..., schema: str | None = ..., args: Sequence[ExprLike] = ...) -> Function:
         """A copy with a different name, schema or arguments, keeping `DISTINCT`, `FILTER`, `OVER` and so on.
 

@@ -2,11 +2,10 @@
 
 use std::fmt::Write;
 
-use super::{FunctionHead, Syntax, invalid};
+use super::Syntax;
 use crate::{
-    ast::{DataType, Function, FunctionArgs, Ident},
-    error::Result,
-    functions::{self, Syntax as FunctionSyntax},
+    ast::{DataType, Ident},
+    functions,
 };
 
 pub(super) struct Postgres;
@@ -83,39 +82,17 @@ impl Syntax for Postgres {
         out.push_str(name);
     }
 
-    fn function_head(&self, function: &Function) -> Result<FunctionHead> {
-        let mut head = String::new();
-        if let Some(schema) = &function.schema {
-            self.ident(&mut head, schema);
-            head.push('.');
-            self.ident(&mut head, &function.name);
-            return Ok(FunctionHead::Call(head));
+    /// Builtins are qualified with `pg_catalog`, so that a function of the same name earlier in the
+    /// `search_path` cannot stand in for them.
+    fn function_name(&self, out: &mut String, schema: Option<&Ident>, name: &Ident) {
+        match schema {
+            Some(schema) => {
+                self.ident(out, schema);
+                out.push('.');
+            }
+            None if functions::is_default(name.as_str()) => out.push_str("pg_catalog."),
+            None => {}
         }
-        let name = function.name.as_str();
-        let plain =
-            !function.distinct && function.order_by.is_empty() && function.filter.is_none() && function.over.is_none();
-        match (functions::syntax(name), &function.args) {
-            (FunctionSyntax::Niladic(keyword), FunctionArgs::Niladic) if plain => Ok(FunctionHead::Bare(keyword)),
-            (FunctionSyntax::Keyword(keyword), FunctionArgs::List(args))
-                if plain && functions::keyword_arity(keyword, args.len()) =>
-            {
-                Ok(FunctionHead::Call(keyword.to_owned()))
-            }
-            (FunctionSyntax::Niladic(keyword) | FunctionSyntax::Keyword(keyword), _) => {
-                Err(invalid(format!("{keyword} cannot be written with these arguments")))
-            }
-            (FunctionSyntax::Builtin(catalog_name), _) => {
-                Ok(FunctionHead::Call(format!("pg_catalog.\"{catalog_name}\"")))
-            }
-            (FunctionSyntax::Plain, _) => {
-                // builtins are qualified so that a function of the same name earlier in the search_path
-                // cannot stand in for them
-                if functions::is_default(name) {
-                    head.push_str("pg_catalog.");
-                }
-                self.ident(&mut head, &function.name);
-                Ok(FunctionHead::Call(head))
-            }
-        }
+        self.ident(out, name);
     }
 }

@@ -12,8 +12,8 @@ use std::mem;
 use crate::{
     ast::{
         BinaryOperator, Column, DataType, DateField, Delete, Expr, Function, FunctionArgs, Ident, Insert, IsTest, Join,
-        JoinKind, LikeKind, Literal, OrderBy, Query, Select, SelectItem, SetExpr, SetOperator, Statement, Table,
-        TableFactor, UnaryOperator, Update,
+        JoinKind, KeyExpr, LikeKind, Literal, OrderBy, Query, Select, SelectItem, SetExpr, SetOperator, SortExpr,
+        Statement, Table, TableFactor, TrimSide, UnaryOperator, Update, VariadicFunction,
     },
     error::{Error, ErrorKind, Result},
     policy::Literals,
@@ -52,14 +52,6 @@ pub(crate) fn quote_ident(backend: Backend, ident: &Ident) -> String {
     out
 }
 
-/// How a function call starts, up to but not including its arguments.
-pub(crate) enum FunctionHead {
-    /// Written as is, with no argument list at all.
-    Bare(&'static str),
-    /// Followed by `(args)`.
-    Call(String),
-}
-
 /// What differs between databases.
 pub(crate) trait Syntax {
     fn ident(&self, out: &mut String, ident: &Ident);
@@ -67,7 +59,8 @@ pub(crate) trait Syntax {
     fn string(&self, out: &mut String, value: &str);
     fn placeholder(&self, out: &mut String, number: u32);
     fn data_type(&self, out: &mut String, data_type: DataType);
-    fn function_head(&self, function: &Function) -> Result<FunctionHead>;
+    /// Write the name of a function in the catalog, qualified as far as the backend can.
+    fn function_name(&self, out: &mut String, schema: Option<&Ident>, name: &Ident);
 }
 
 struct Writer<'a, S> {
@@ -246,7 +239,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
         }
         if !group_by.is_empty() {
             self.push(" GROUP BY ");
-            self.list(group_by, Self::expr)?;
+            self.list(group_by, |w, key| w.key(key, "GROUP BY"))?;
         }
         if let Some(having) = having {
             self.push(" HAVING ");
@@ -333,37 +326,71 @@ impl<'a, S: Syntax> Writer<'a, S> {
         }
     }
 
+    /// Write a query's ` ORDER BY ...`, with the space before it.
     fn order_by(&mut self, order_by: &[OrderBy]) -> Result<()> {
-        if !order_by.is_empty() {
-            self.push(" ");
+        if order_by.is_empty() {
+            return Ok(());
         }
-        self.order_by_items(order_by)
+        self.push(" ORDER BY ");
+        self.list(order_by, |w, item| {
+            let OrderBy {
+                key,
+                descending,
+                nulls_first,
+            } = item;
+            w.key(key, "ORDER BY")?;
+            w.direction(*descending, *nulls_first);
+            Ok(())
+        })
     }
 
-    fn order_by_items(&mut self, order_by: &[OrderBy]) -> Result<()> {
+    fn key(&mut self, key: &KeyExpr, clause: &str) -> Result<()> {
+        match key {
+            KeyExpr::Position(position) => {
+                self.push(&position.to_string());
+                Ok(())
+            }
+            KeyExpr::Output(name) => {
+                self.ident(name);
+                Ok(())
+            }
+            // Postgres would read a number here as a position and rejects any other constant
+            KeyExpr::Expr(Expr::Literal(_)) => Err(invalid(format!(
+                "a constant that is not a column position in {clause} is not supported"
+            ))),
+            KeyExpr::Expr(expr) => self.expr(expr),
+        }
+    }
+
+    /// Write the `ORDER BY ...` of an aggregate call or a window, with no space before it.
+    fn sort_exprs(&mut self, order_by: &[SortExpr]) -> Result<()> {
         if order_by.is_empty() {
             return Ok(());
         }
         self.push("ORDER BY ");
         self.list(order_by, |w, item| {
-            let OrderBy {
+            let SortExpr {
                 expr,
                 descending,
                 nulls_first,
             } = item;
             w.expr(expr)?;
-            match descending {
-                Some(true) => w.push(" DESC"),
-                Some(false) => w.push(" ASC"),
-                None => {}
-            }
-            match nulls_first {
-                Some(true) => w.push(" NULLS FIRST"),
-                Some(false) => w.push(" NULLS LAST"),
-                None => {}
-            }
+            w.direction(*descending, *nulls_first);
             Ok(())
         })
+    }
+
+    fn direction(&mut self, descending: Option<bool>, nulls_first: Option<bool>) {
+        match descending {
+            Some(true) => self.push(" DESC"),
+            Some(false) => self.push(" ASC"),
+            None => {}
+        }
+        match nulls_first {
+            Some(true) => self.push(" NULLS FIRST"),
+            Some(false) => self.push(" NULLS LAST"),
+            None => {}
+        }
     }
 
     fn returning(&mut self, returning: &[SelectItem]) -> Result<()> {
@@ -503,14 +530,6 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 self.syntax.placeholder(&mut self.out, *number);
                 Ok(())
             }
-            Expr::OutputColumn(name) => {
-                self.ident(name);
-                Ok(())
-            }
-            Expr::Ordinal(position) => {
-                self.push(&position.to_string());
-                Ok(())
-            }
             Expr::Unary { op, expr } => self.parens(|w| {
                 w.push(match op {
                     UnaryOperator::Not => "NOT ",
@@ -647,6 +666,51 @@ impl<'a, S: Syntax> Writer<'a, S> {
                 Ok(())
             }
             Expr::Function(function) => self.function(function),
+            Expr::Variadic { function, first, rest } => {
+                self.push(match function {
+                    VariadicFunction::Coalesce => "COALESCE(",
+                    VariadicFunction::Greatest => "GREATEST(",
+                    VariadicFunction::Least => "LEAST(",
+                });
+                self.expr(first)?;
+                for arg in rest {
+                    self.push(", ");
+                    self.expr(arg)?;
+                }
+                self.push(")");
+                Ok(())
+            }
+            Expr::NullIf { left, right } => {
+                self.push("NULLIF(");
+                self.expr(left)?;
+                self.push(", ");
+                self.expr(right)?;
+                self.push(")");
+                Ok(())
+            }
+            Expr::CurrentDate => {
+                self.push("CURRENT_DATE");
+                Ok(())
+            }
+            Expr::CurrentTimestamp => {
+                self.push("CURRENT_TIMESTAMP");
+                Ok(())
+            }
+            Expr::Trim { side, expr, characters } => {
+                self.push(match side {
+                    TrimSide::Both => "TRIM(BOTH ",
+                    TrimSide::Leading => "TRIM(LEADING ",
+                    TrimSide::Trailing => "TRIM(TRAILING ",
+                });
+                if let Some(characters) = characters {
+                    self.expr(characters)?;
+                    self.push(" ");
+                }
+                self.push("FROM ");
+                self.expr(expr)?;
+                self.push(")");
+                Ok(())
+            }
             Expr::Exists { subquery, negated } => self.parens(|w| {
                 w.push(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
                 w.query(subquery)?;
@@ -659,34 +723,31 @@ impl<'a, S: Syntax> Writer<'a, S> {
 
     fn function(&mut self, function: &Function) -> Result<()> {
         let Function {
-            schema: _,
-            name: _,
+            schema,
+            name,
             args,
-            distinct,
-            order_by,
             filter,
             over,
         } = function;
-        match self.syntax.function_head(function)? {
-            FunctionHead::Bare(keyword) => {
-                self.push(keyword);
-                return Ok(());
-            }
-            FunctionHead::Call(head) => self.push(&head),
-        }
+        self.syntax.function_name(&mut self.out, schema.as_ref(), name);
         self.push("(");
-        if *distinct {
-            self.push("DISTINCT ");
-        }
         match args {
-            FunctionArgs::Niladic => return Err(invalid("this function needs an argument list")),
-            FunctionArgs::Star if *distinct || !order_by.is_empty() => {
-                return Err(invalid("f(*) cannot have DISTINCT or ORDER BY"));
-            }
             FunctionArgs::Star => self.push("*"),
-            FunctionArgs::List(args) => self.list(args, Self::expr)?,
+            FunctionArgs::List {
+                args,
+                distinct,
+                order_by,
+            } => {
+                if *distinct {
+                    self.push("DISTINCT ");
+                }
+                self.list(args, Self::expr)?;
+                if !args.is_empty() && !order_by.is_empty() {
+                    self.push(" ");
+                }
+                self.sort_exprs(order_by)?;
+            }
         }
-        self.order_by(order_by)?;
         self.push(")");
         if let Some(filter) = filter {
             self.push(" FILTER (WHERE ");
@@ -702,7 +763,7 @@ impl<'a, S: Syntax> Writer<'a, S> {
                     self.push(" ");
                 }
             }
-            self.order_by_items(&window.order_by)?;
+            self.sort_exprs(&window.order_by)?;
             self.push(")");
         }
         Ok(())

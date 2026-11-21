@@ -147,7 +147,7 @@ pub struct Select {
     pub projection: Vec<SelectItem>,
     pub from: Vec<TableWithJoins>,
     pub selection: Option<Expr>,
-    pub group_by: Vec<Expr>,
+    pub group_by: Vec<KeyExpr>,
     pub having: Option<Expr>,
 }
 
@@ -221,8 +221,33 @@ pub enum JoinKind {
     Cross,
 }
 
+/// An item of a query's `ORDER BY`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderBy {
+    pub key: KeyExpr,
+    /// `Some(true)` for `DESC`, `Some(false)` for `ASC`, `None` when not given.
+    pub descending: Option<bool>,
+    pub nulls_first: Option<bool>,
+}
+
+/// What a query's `ORDER BY` or `GROUP BY` item refers to.
+///
+/// In these two clauses Postgres reads a bare integer as a position in the select list and a bare name as
+/// an output column, neither of which is an expression anywhere else. A bare constant of any other kind
+/// is a syntax error there, so [`KeyExpr::Expr`] holding a literal cannot be written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum KeyExpr {
+    /// A position in the select list, counted from 1.
+    Position(u32),
+    /// An output column, by the name it has in the select list.
+    Output(Ident),
+    Expr(Expr),
+}
+
+/// An item of the `ORDER BY` inside an aggregate call or a window, where it is always an expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SortExpr {
     pub expr: Expr,
     /// `Some(true)` for `DESC`, `Some(false)` for `ASC`, `None` when not given.
     pub descending: Option<bool>,
@@ -236,10 +261,6 @@ pub enum Expr {
     Literal(Literal),
     /// `$n` from the input.
     Placeholder(u32),
-    /// A bare reference to an output column by name, only valid in `ORDER BY` and `GROUP BY`.
-    OutputColumn(Ident),
-    /// A reference to an output column by position, only valid in `ORDER BY` and `GROUP BY`.
-    Ordinal(u32),
     Unary {
         op: UnaryOperator,
         expr: Box<Self>,
@@ -296,6 +317,28 @@ pub enum Expr {
         expr: Box<Self>,
     },
     Function(Function),
+    /// `COALESCE`, `GREATEST` or `LEAST`. These are grammar in Postgres, not functions in `pg_catalog`, and
+    /// take one argument or more.
+    Variadic {
+        function: VariadicFunction,
+        first: Box<Self>,
+        rest: Vec<Self>,
+    },
+    /// `NULLIF(left, right)`
+    NullIf {
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    /// `CURRENT_DATE`
+    CurrentDate,
+    /// `CURRENT_TIMESTAMP`
+    CurrentTimestamp,
+    /// `TRIM([BOTH | LEADING | TRAILING] [characters] FROM expr)`
+    Trim {
+        side: TrimSide,
+        expr: Box<Self>,
+        characters: Option<Box<Self>>,
+    },
     Exists {
         subquery: Box<Query>,
         negated: bool,
@@ -456,15 +499,38 @@ pub enum DateField {
     Year,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VariadicFunction {
+    Coalesce,
+    Greatest,
+    Least,
+}
+
+impl VariadicFunction {
+    /// The lower case name, which is what `functions` and `deny_functions` call it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Coalesce => "coalesce",
+            Self::Greatest => "greatest",
+            Self::Least => "least",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrimSide {
+    Both,
+    Leading,
+    Trailing,
+}
+
+/// A call to a function in the catalog. `COALESCE` and the other keyword forms are [`Expr`] variants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     pub schema: Option<Ident>,
     pub name: Ident,
     pub args: FunctionArgs,
-    /// `f(DISTINCT ...)`
-    pub distinct: bool,
-    /// `f(... ORDER BY ...)`, for ordered aggregates such as `string_agg`.
-    pub order_by: Vec<OrderBy>,
     /// `FILTER (WHERE ...)`
     pub filter: Option<Box<Expr>>,
     pub over: Option<Window>,
@@ -477,9 +543,11 @@ impl Function {
         Self {
             schema: None,
             name,
-            args: FunctionArgs::List(args),
-            distinct: false,
-            order_by: Vec::new(),
+            args: FunctionArgs::List {
+                args,
+                distinct: false,
+                order_by: Vec::new(),
+            },
             filter: None,
             over: None,
         }
@@ -498,17 +566,21 @@ impl Function {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum FunctionArgs {
-    /// Written without parentheses, e.g. `CURRENT_DATE`.
-    Niladic,
-    /// `f(*)`
+    /// `f(*)`. Postgres takes neither `DISTINCT` nor `ORDER BY` with it.
     Star,
-    List(Vec<Expr>),
+    List {
+        args: Vec<Expr>,
+        /// `f(DISTINCT ...)`
+        distinct: bool,
+        /// `f(... ORDER BY ...)`, for ordered aggregates such as `string_agg`.
+        order_by: Vec<SortExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Window {
     pub partition_by: Vec<Expr>,
-    pub order_by: Vec<OrderBy>,
+    pub order_by: Vec<SortExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

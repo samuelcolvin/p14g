@@ -421,7 +421,11 @@ impl PyColumn {
     }
 }
 
-/// A function call. `args` holds `Column`, `Function`, `Literal` and opaque `Expr` objects.
+/// A call to a function in the catalog. `args` holds `Column`, `Function`, `Literal` and opaque `Expr` objects.
+///
+/// `COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are grammar
+/// in Postgres, not functions, so they are not passed to a `Function` mapper and arrive as an opaque `Expr`
+/// when they are an argument.
 #[pyclass(frozen, eq, hash, module = "pgsafe", name = "Function")]
 #[derive(PartialEq, Eq, Hash)]
 struct PyFunction(ast::Function);
@@ -451,11 +455,15 @@ impl PyFunction {
         self.0.schema.as_ref().map(ast::Ident::as_str)
     }
 
-    /// The arguments. Empty for `f(*)` and for keywords such as `CURRENT_DATE`.
+    /// The arguments. Empty for `f(*)`.
     #[getter]
     fn args(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         match &self.0.args {
-            ast::FunctionArgs::List(args) => args.iter().map(|arg| expr_to_py(py, arg.clone())).collect(),
+            ast::FunctionArgs::List {
+                args,
+                distinct: _,
+                order_by: _,
+            } => args.iter().map(|arg| expr_to_py(py, arg.clone())).collect(),
             _ => Ok(Vec::new()),
         }
     }
@@ -473,7 +481,24 @@ impl PyFunction {
                 "schema" => function.schema = optional_ident(py, value.extract::<Option<String>>()?.as_deref())?,
                 "args" => {
                     let args: Vec<Bound<'_, PyAny>> = value.extract()?;
-                    function.args = ast::FunctionArgs::List(args.iter().map(py_to_expr).collect::<PyResult<_>>()?);
+                    let new_args = args.iter().map(py_to_expr).collect::<PyResult<_>>()?;
+                    function.args = match function.args {
+                        // keep DISTINCT and ORDER BY, which sit beside the arguments
+                        ast::FunctionArgs::List {
+                            args: _,
+                            distinct,
+                            order_by,
+                        } => ast::FunctionArgs::List {
+                            args: new_args,
+                            distinct,
+                            order_by,
+                        },
+                        _ => ast::FunctionArgs::List {
+                            args: new_args,
+                            distinct: false,
+                            order_by: Vec::new(),
+                        },
+                    };
                 }
                 other => {
                     return Err(PyTypeError::new_err(format!(

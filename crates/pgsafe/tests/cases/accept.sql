@@ -277,7 +277,7 @@ select lower(product), upper(product), length(product), char_length(product), in
 => SELECT pg_catalog."lower"("orders"."product"), pg_catalog."upper"("orders"."product"), pg_catalog."length"("orders"."product"), pg_catalog."char_length"("orders"."product"), pg_catalog."initcap"("orders"."product"), pg_catalog."reverse"("orders"."product"), pg_catalog."md5"("orders"."product") FROM "orders"
 
 select trim(product), trim(both 'x' from product), trim(leading 'x' from product), trim(trailing 'x' from product), ltrim(product), rtrim(product, 'a'), btrim(product, 'a') from orders
-=> SELECT pg_catalog."btrim"("orders"."product"), pg_catalog."btrim"("orders"."product", 'x'), pg_catalog."ltrim"("orders"."product", 'x'), pg_catalog."rtrim"("orders"."product", 'x'), pg_catalog."ltrim"("orders"."product"), pg_catalog."rtrim"("orders"."product", 'a'), pg_catalog."btrim"("orders"."product", 'a') FROM "orders"
+=> SELECT TRIM(BOTH FROM "orders"."product"), TRIM(BOTH 'x' FROM "orders"."product"), TRIM(LEADING 'x' FROM "orders"."product"), TRIM(TRAILING 'x' FROM "orders"."product"), pg_catalog."ltrim"("orders"."product"), pg_catalog."rtrim"("orders"."product", 'a'), pg_catalog."btrim"("orders"."product", 'a') FROM "orders"
 
 select substring(product from 1 for 2), substring(product from 2), substring(product for 2), substring(product, 1, 2), substr(product, 1, 2) from orders
 => SELECT pg_catalog."substring"("orders"."product", 1, 2), pg_catalog."substring"("orders"."product", 2), pg_catalog."substring"("orders"."product", 1, 2), pg_catalog."substring"("orders"."product", 1, 2), pg_catalog."substring"("orders"."product", 1, 2) FROM "orders"

@@ -3,8 +3,8 @@ use sqlparser::ast as sp;
 use super::{Lower, ident, qualified_name, reject, single_name};
 use crate::{
     ast::{
-        Cte, Expr, Ident, Join, JoinKind, Literal, OrderBy, Query, Select, SelectItem, SetExpr, SetOperator, Table,
-        TableFactor, TableWithJoins,
+        Cte, Expr, Ident, Join, JoinKind, KeyExpr, Literal, OrderBy, Query, Select, SelectItem, SetExpr, SetOperator,
+        SortExpr, Table, TableFactor, TableWithJoins,
     },
     error::{Error, Result},
 };
@@ -245,7 +245,10 @@ impl Lower<'_> {
         let group_by = match group_by {
             sp::GroupByExpr::Expressions(exprs, modifiers) => {
                 reject(&modifiers, "a GROUP BY modifier")?;
-                exprs.into_iter().map(|e| self.expr(e)).collect::<Result<_>>()?
+                exprs
+                    .into_iter()
+                    .map(|e| self.expr(e).map(KeyExpr::Expr))
+                    .collect::<Result<_>>()?
             }
             sp::GroupByExpr::All(_) => return Err(Error::unsupported("GROUP BY ALL")),
         };
@@ -405,6 +408,20 @@ impl Lower<'_> {
     }
 
     fn order_by(&mut self, order_by: sp::OrderByExpr) -> Result<OrderBy> {
+        let SortExpr {
+            expr,
+            descending,
+            nulls_first,
+        } = self.sort_expr(order_by)?;
+        // whether this is a position, an output column or an expression is decided once the select list is known
+        Ok(OrderBy {
+            key: KeyExpr::Expr(expr),
+            descending,
+            nulls_first,
+        })
+    }
+
+    fn sort_expr(&mut self, order_by: sp::OrderByExpr) -> Result<SortExpr> {
         let sp::OrderByExpr {
             expr,
             options: sp::OrderByOptions { sort, nulls_first },
@@ -417,15 +434,16 @@ impl Lower<'_> {
             Some(sp::OrderBySort::Desc) => Some(true),
             Some(sp::OrderBySort::Using(_)) => return Err(Error::unsupported("ORDER BY ... USING")),
         };
-        Ok(OrderBy {
+        Ok(SortExpr {
             expr: self.expr(expr)?,
             descending,
             nulls_first,
         })
     }
 
-    pub(super) fn order_bys(&mut self, order_by: Vec<sp::OrderByExpr>) -> Result<Vec<OrderBy>> {
-        order_by.into_iter().map(|o| self.order_by(o)).collect()
+    /// Lower the `ORDER BY` of an aggregate call or a window.
+    pub(super) fn sort_exprs(&mut self, order_by: Vec<sp::OrderByExpr>) -> Result<Vec<SortExpr>> {
+        order_by.into_iter().map(|o| self.sort_expr(o)).collect()
     }
 }
 

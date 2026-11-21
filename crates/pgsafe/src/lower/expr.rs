@@ -4,10 +4,10 @@ use super::{Lower, ident, location, name_location, object_name, qualified_name, 
 use crate::{
     ast::{
         BinaryOperator, Column, DataType, DateField, Expr, Function, FunctionArgs, Ident, IsTest, LikeKind, Literal,
-        UnaryOperator, Window,
+        TrimSide, UnaryOperator, VariadicFunction, Window,
     },
     error::{Error, Location, Result},
-    functions::{self, Syntax},
+    functions,
 };
 
 impl Lower<'_> {
@@ -253,23 +253,26 @@ impl Lower<'_> {
                 expr,
                 trim_characters,
             } => {
-                let name = match trim_where {
-                    None | Some(sp::TrimWhereField::Both) => "trim",
-                    Some(sp::TrimWhereField::Leading) => "ltrim",
-                    Some(sp::TrimWhereField::Trailing) => "rtrim",
+                let side = match trim_where {
+                    None | Some(sp::TrimWhereField::Both) => TrimSide::Both,
+                    Some(sp::TrimWhereField::Leading) => TrimSide::Leading,
+                    Some(sp::TrimWhereField::Trailing) => TrimSide::Trailing,
                 };
-                let mut args = vec![self.expr(*expr)?];
-                match (trim_what, trim_characters) {
-                    (None, None) => {}
-                    (Some(what), None) => args.push(self.expr(*what)?),
+                let characters = match (trim_what, trim_characters) {
+                    (None, None) => None,
+                    (Some(what), None) => Some(self.boxed(*what)?),
                     (None, Some(mut characters)) if characters.len() == 1 => {
-                        args.push(self.expr(characters.remove(0))?);
+                        Some(Box::new(self.expr(characters.remove(0))?))
                     }
                     _ => return Err(Error::unsupported("TRIM with more than one set of characters")),
-                }
-                builtin(name, args)
+                };
+                Ok(Expr::Trim {
+                    side,
+                    expr: self.boxed(*expr)?,
+                    characters,
+                })
             }
-            sp::Expr::Function(function) => self.function(function).map(Expr::Function),
+            sp::Expr::Function(function) => self.function(function),
             sp::Expr::Exists { subquery, negated } => {
                 self.count_subquery()?;
                 Ok(Expr::Exists {
@@ -353,7 +356,7 @@ impl Lower<'_> {
         }
     }
 
-    fn function(&mut self, function: sp::Function) -> Result<Function> {
+    fn function(&mut self, function: sp::Function) -> Result<Expr> {
         let sp::Function {
             name,
             uses_odbc_syntax,
@@ -372,47 +375,13 @@ impl Lower<'_> {
         reject(&null_treatment, "IGNORE / RESPECT NULLS")?;
         let (schema, name) = qualified_name(name, "a function name")?;
         // `pg_catalog.lower` and `lower` are the same builtin: keep one spelling so both are written alike
-        let schema = schema.filter(|schema| {
-            !(schema.as_str() == "pg_catalog"
-                && functions::is_default(name.as_str())
-                && functions::syntax(name.as_str()) == Syntax::Plain)
-        });
+        let schema = schema.filter(|schema| !(schema.as_str() == "pg_catalog" && functions::is_default(name.as_str())));
 
-        let mut distinct = false;
-        let mut order_by = Vec::new();
+        // `None` when the call was written with no parentheses at all
         let args = match args {
-            sp::FunctionArguments::None => FunctionArgs::Niladic,
+            sp::FunctionArguments::None => None,
             sp::FunctionArguments::Subquery(_) => return Err(Error::unsupported("a subquery as function arguments")),
-            sp::FunctionArguments::List(sp::FunctionArgumentList {
-                duplicate_treatment,
-                args,
-                clauses,
-            }) => {
-                distinct = matches!(duplicate_treatment, Some(sp::DuplicateTreatment::Distinct));
-                for clause in clauses {
-                    match clause {
-                        sp::FunctionArgumentClause::OrderBy(exprs) => order_by = self.order_bys(exprs)?,
-                        _ => return Err(Error::unsupported("this clause in function arguments")),
-                    }
-                }
-                let mut list = Vec::with_capacity(args.len());
-                let mut star = false;
-                for arg in args {
-                    match arg {
-                        sp::FunctionArg::Unnamed(sp::FunctionArgExpr::Expr(expr)) => list.push(self.expr(expr)?),
-                        sp::FunctionArg::Unnamed(sp::FunctionArgExpr::Wildcard) => star = true,
-                        sp::FunctionArg::Unnamed(_) => return Err(Error::unsupported("a qualified * as an argument")),
-                        sp::FunctionArg::Named { .. } | sp::FunctionArg::ExprNamed { .. } => {
-                            return Err(Error::unsupported("named function arguments"));
-                        }
-                    }
-                }
-                match (star, list.is_empty()) {
-                    (false, _) => FunctionArgs::List(list),
-                    (true, true) => FunctionArgs::Star,
-                    (true, false) => return Err(Error::unsupported("* mixed with other arguments")),
-                }
-            }
+            sp::FunctionArguments::List(list) => Some(self.function_args(list)?),
         };
         let filter = filter.map(|e| self.boxed(*e)).transpose()?;
         let over = match over {
@@ -428,50 +397,138 @@ impl Lower<'_> {
                 reject(&window_frame, "a window frame")?;
                 Some(Window {
                     partition_by: self.exprs(partition_by)?,
-                    order_by: self.order_bys(order_by)?,
+                    order_by: self.sort_exprs(order_by)?,
                 })
             }
         };
 
-        // `f(*)` is its own grammar rule in Postgres, which takes neither DISTINCT nor ORDER BY
-        if matches!(args, FunctionArgs::Star) && (distinct || !order_by.is_empty()) {
-            return Err(Error::unsupported("DISTINCT or ORDER BY with * as the argument"));
+        // Some names are grammar in Postgres rather than functions in the catalog. They become their own
+        // expressions, and the grammar gives them no DISTINCT, ORDER BY, FILTER or OVER.
+        if schema.is_none()
+            && let Some(keyword) = Keyword::from_name(name.as_str())
+        {
+            let plain_args = match (args, &filter, &over) {
+                (None, None, None) => None,
+                (
+                    Some(FunctionArgs::List {
+                        args,
+                        distinct: false,
+                        order_by,
+                    }),
+                    None,
+                    None,
+                ) if order_by.is_empty() => Some(args),
+                _ => {
+                    return Err(Error::unsupported(format!(
+                        "{name} with *, DISTINCT, ORDER BY, FILTER or OVER"
+                    )));
+                }
+            };
+            return keyword.expr(plain_args);
         }
 
-        // functions that are really grammar can only be written one way, so anything else is rejected here
-        if schema.is_none() {
-            let plain = !distinct && order_by.is_empty() && filter.is_none() && over.is_none();
-            match (functions::syntax(name.as_str()), &args) {
-                (Syntax::Niladic(_), FunctionArgs::Niladic) if plain => {}
-                (Syntax::Niladic(keyword), _) => {
-                    return Err(Error::unsupported(format!("{keyword} with arguments or modifiers")));
-                }
-                (Syntax::Keyword(keyword), FunctionArgs::List(list)) if plain => {
-                    if !functions::keyword_arity(keyword, list.len()) {
-                        return Err(Error::unsupported(format!("{keyword} with {} arguments", list.len())));
-                    }
-                }
-                (Syntax::Keyword(keyword), _) => {
-                    return Err(Error::unsupported(format!("{keyword} with modifiers")));
-                }
-                (Syntax::Builtin(_) | Syntax::Plain, FunctionArgs::Niladic) => {
-                    return Err(Error::unsupported(format!("the function {name} without parentheses")));
-                }
-                (Syntax::Builtin(_) | Syntax::Plain, _) => {}
-            }
-        } else if matches!(args, FunctionArgs::Niladic) {
+        let Some(args) = args else {
             return Err(Error::unsupported(format!("the function {name} without parentheses")));
-        }
-
-        Ok(Function {
+        };
+        Ok(Expr::Function(Function {
             schema,
             name,
             args,
-            distinct,
-            order_by,
             filter,
             over,
-        })
+        }))
+    }
+
+    fn function_args(&mut self, list: sp::FunctionArgumentList) -> Result<FunctionArgs> {
+        let sp::FunctionArgumentList {
+            duplicate_treatment,
+            args,
+            clauses,
+        } = list;
+        let distinct = matches!(duplicate_treatment, Some(sp::DuplicateTreatment::Distinct));
+        let mut order_by = Vec::new();
+        for clause in clauses {
+            match clause {
+                sp::FunctionArgumentClause::OrderBy(exprs) => order_by = self.sort_exprs(exprs)?,
+                _ => return Err(Error::unsupported("this clause in function arguments")),
+            }
+        }
+        let mut list = Vec::with_capacity(args.len());
+        let mut star = false;
+        for arg in args {
+            match arg {
+                sp::FunctionArg::Unnamed(sp::FunctionArgExpr::Expr(expr)) => list.push(self.expr(expr)?),
+                sp::FunctionArg::Unnamed(sp::FunctionArgExpr::Wildcard) => star = true,
+                sp::FunctionArg::Unnamed(_) => return Err(Error::unsupported("a qualified * as an argument")),
+                sp::FunctionArg::Named { .. } | sp::FunctionArg::ExprNamed { .. } => {
+                    return Err(Error::unsupported("named function arguments"));
+                }
+            }
+        }
+        match (star, list.is_empty()) {
+            (false, _) => Ok(FunctionArgs::List {
+                args: list,
+                distinct,
+                order_by,
+            }),
+            // `f(*)` is its own grammar rule in Postgres, which takes neither DISTINCT nor ORDER BY
+            (true, true) if !distinct && order_by.is_empty() => Ok(FunctionArgs::Star),
+            (true, true) => Err(Error::unsupported("DISTINCT or ORDER BY with * as the argument")),
+            (true, false) => Err(Error::unsupported("* mixed with other arguments")),
+        }
+    }
+}
+
+/// The names that are grammar in Postgres, each with a fixed shape.
+#[derive(Clone, Copy)]
+enum Keyword {
+    Variadic(VariadicFunction),
+    NullIf,
+    CurrentDate,
+    CurrentTimestamp,
+}
+
+impl Keyword {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "coalesce" => Some(Self::Variadic(VariadicFunction::Coalesce)),
+            "greatest" => Some(Self::Variadic(VariadicFunction::Greatest)),
+            "least" => Some(Self::Variadic(VariadicFunction::Least)),
+            "nullif" => Some(Self::NullIf),
+            "current_date" => Some(Self::CurrentDate),
+            "current_timestamp" => Some(Self::CurrentTimestamp),
+            _ => None,
+        }
+    }
+
+    /// Build the expression. `args` is `None` when the name was written with no parentheses.
+    fn expr(self, args: Option<Vec<Expr>>) -> Result<Expr> {
+        match (self, args) {
+            (Self::CurrentDate, None) => Ok(Expr::CurrentDate),
+            (Self::CurrentTimestamp, None) => Ok(Expr::CurrentTimestamp),
+            (Self::CurrentDate | Self::CurrentTimestamp, Some(_)) => {
+                Err(Error::unsupported("CURRENT_DATE or CURRENT_TIMESTAMP with parentheses"))
+            }
+            (Self::Variadic(function), Some(args)) => {
+                let mut args = args.into_iter();
+                let Some(first) = args.next() else {
+                    return Err(Error::unsupported(format!("{} with no arguments", function.name())));
+                };
+                Ok(Expr::Variadic {
+                    function,
+                    first: Box::new(first),
+                    rest: args.collect(),
+                })
+            }
+            (Self::NullIf, Some(args)) => match <[Expr; 2]>::try_from(args) {
+                Ok([left, right]) => Ok(Expr::NullIf {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+                Err(args) => Err(Error::unsupported(format!("nullif with {} arguments", args.len()))),
+            },
+            (Self::Variadic(_) | Self::NullIf, None) => Err(Error::unsupported("this function without parentheses")),
+        }
     }
 }
 
