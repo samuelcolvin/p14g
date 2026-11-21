@@ -1,0 +1,72 @@
+//! Check pgsafe's output with Postgres's own parser (via libpg_query), with no database needed.
+//!
+//! pgsafe reads SQL with sqlparser, which is not Postgres. So for everything pgsafe emits, ask the real
+//! parser what it sees: it must parse, and the tables and functions it finds must be ones the policy allows.
+
+mod common;
+
+use std::collections::BTreeSet;
+
+use common::{accept_cases, params_policy, policy};
+use pgsafe::functions;
+
+const TABLES: &[&str] = &[
+    "orders",
+    "customers",
+    "v",
+    "app.events",
+    "limited",
+    "cheap_orders",
+    "audit",
+];
+
+fn assert_within_policy(sql: &str, line: usize) {
+    let parsed = pg_query::parse(sql).unwrap_or_else(|e| panic!("line {line}: Postgres cannot parse {sql}\n  {e}"));
+    assert_eq!(parsed.protobuf.stmts.len(), 1, "line {line}: {sql}");
+
+    let cte_names: BTreeSet<String> = parsed.cte_names.iter().cloned().collect();
+    for table in parsed.tables() {
+        assert!(
+            TABLES.contains(&table.as_str()) || cte_names.contains(&table),
+            "line {line}: Postgres sees table {table:?} in {sql}"
+        );
+    }
+    for function in parsed.functions() {
+        let name = function
+            .strip_prefix("pg_catalog.")
+            .unwrap_or_else(|| panic!("line {line}: unqualified function {function:?} in {sql}"));
+        // `like_escape` is what Postgres's grammar turns `LIKE ... ESCAPE` into
+        assert!(
+            functions::is_default(name) || name == "btrim" || name == "like_escape",
+            "line {line}: Postgres sees function {function:?} in {sql}"
+        );
+    }
+}
+
+#[test]
+fn postgres_parser_agrees() {
+    let inline = policy();
+    let params = params_policy();
+    for case in accept_cases() {
+        assert_within_policy(&inline.check(case.sql, &()).unwrap().sql, case.line);
+        assert_within_policy(&params.check(case.sql, &()).unwrap().sql, case.line);
+    }
+}
+
+/// The queries the policy rejects really would have reached something forbidden: if Postgres's parser
+/// sees no forbidden table or function in any of them, the case file is not testing what it claims to.
+#[test]
+fn rejected_cases_name_forbidden_things() {
+    let forbidden = common::reject_cases()
+        .iter()
+        .filter_map(|case| pg_query::parse(case.sql).ok())
+        .filter(|parsed| {
+            parsed.tables().iter().any(|t| !TABLES.contains(&t.as_str()))
+                || parsed.functions().iter().any(|f| !functions::is_default(f))
+        })
+        .count();
+    assert!(
+        forbidden > 50,
+        "only {forbidden} rejected cases name a forbidden table or function"
+    );
+}
