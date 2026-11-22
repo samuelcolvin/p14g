@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Generic, Literal as _Literal, TypeAlias, final, overload
+from typing import Any, Generic, Literal as _Literal, LiteralString, TypeAlias, final, overload
 
-from typing_extensions import LiteralString, TypeVar
+from typing_extensions import TypeVar
 
 __all__ = [
     'DEFAULT_FUNCTIONS',

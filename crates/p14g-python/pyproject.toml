@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "p14g"
 description = "Check untrusted SQL against an allowlist and rewrite it so it is safe to run on Postgres."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Samuel Colvin", email = "s@muelcolvin.com" }]
 license = "MIT"
 license-files = ["LICENSE"]
@@ -15,7 +15,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

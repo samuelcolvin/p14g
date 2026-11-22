@@ -116,7 +116,6 @@ jobs:
       matrix:
         os: [ubuntu]
         python-version:
-          - '3.10'
           - '3.11'
           - '3.12'
           - '3.13'
@@ -125,11 +124,11 @@ jobs:
           - '3.15'
         include:
           - os: macos
-            python-version: '3.10'
+            python-version: '3.11'
           - os: macos
             python-version: '3.15'
           - os: windows
-            python-version: '3.10'
+            python-version: '3.11'
           - os: windows
             python-version: '3.15'
 
@@ -273,15 +272,15 @@ jobs:
           args: --out dist
           working-directory: crates/p14g-python
 
-      # CPython wheels use the stable ABI (`abi3-py310` in Cargo.toml), so one wheel covers
-      # every CPython version >= 3.10. Free-threaded builds don't support abi3, so maturin
+      # CPython wheels use the stable ABI (`abi3-py311` in Cargo.toml), so one wheel covers
+      # every CPython version >= 3.11. Free-threaded builds don't support abi3, so maturin
       # builds a separate version-specific wheel for the one listed here.
       - name: build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --out dist --interpreter 3.10 3.14t
+          args: --release --out dist --interpreter 3.11 3.14t
           working-directory: crates/p14g-python
 
       - run: ${{ matrix.ls || 'ls -lh' }} crates/p14g-python/dist/

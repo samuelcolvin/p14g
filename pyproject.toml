@@ -4,8 +4,8 @@ dev = [
     "pytest",
     "pytest-pretty",
     "dirty-equals",
-    # for `LiteralString` in the tests, on Python 3.10
-    "typing-extensions",
+    # runs the python examples in README.md and checks their `#>` output
+    "pytest-examples",
 ]
 linting = [
     "ruff",
@@ -30,7 +30,7 @@ filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 extend-select = [
@@ -50,7 +50,7 @@ quote-style = "single"
 
 [tool.basedpyright]
 include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingModuleSource = false
 stubPath = "crates/p14g-python"

@@ -61,19 +61,25 @@ context = {'tenant_id': 42}
 
 safe = policy.rewrite('select * from orders where qty < 3', context=context)
 print(safe.sql)
-#> SELECT orders.id, orders.product, orders.qty
-#> FROM (SELECT orders.id, orders.product, orders.qty FROM orders WHERE orders.tenant_id = 42) AS orders
-#> WHERE orders.qty < 3
+"""
+SELECT orders.id, orders.product, orders.qty
+FROM (SELECT orders.id, orders.product, orders.qty FROM orders WHERE orders.tenant_id = 42) AS orders
+WHERE orders.qty < 3
+"""
 
 safe = policy.rewrite("insert into orders (product, qty) values ('tea', 2)", context=context)
 print(safe.sql)
-#> INSERT INTO orders (product, qty, tenant_id)
-#> VALUES ('tea', 2, 42)
+"""
+INSERT INTO orders (product, qty, tenant_id)
+VALUES ('tea', 2, 42)
+"""
 
 safe = policy.rewrite('delete from orders where id = 7 or true', context=context)
 print(safe.sql)
-#> DELETE FROM orders
-#> WHERE orders.tenant_id = 42 AND (orders.id = 7 OR TRUE)
+"""
+DELETE FROM orders
+WHERE orders.tenant_id = 42 AND (orders.id = 7 OR TRUE)
+"""
 
 try:
     policy.rewrite('select * from pg_shadow', context=context)
@@ -88,7 +94,7 @@ Put row-level security on `orders` as well (see [Rows](#rows)).
 `policy.grants()` returns the `GRANT` statements for the role that will run the output, so the database enforces the
 same tables and columns:
 
-```python
+```python {test="continue"}
 for grant in policy.grants('app_role', context=context):
     print(grant)
     #> GRANT SELECT ("id", "product", "qty", "tenant_id") ON "orders" TO "app_role"
@@ -297,6 +303,9 @@ It is a function of the `context` you pass to `rewrite()`, and returns an SQL ex
 `:name` placeholders:
 
 ```python
+from p14g import Delete, Insert, Policy, Select, Update
+
+
 def org(context):
     return 'org = :org_id and deleted_at is null', {'org_id': context['org_id']}
 
@@ -309,13 +318,17 @@ policy = Policy(
 )
 
 print(policy.rewrite('select * from orders where qty > 1', context={'org_id': 42}).sql)
-#> SELECT orders.id, orders.qty
-#> FROM (SELECT orders.id, orders.qty FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL) AS orders
-#> WHERE orders.qty > 1
+"""
+SELECT orders.id, orders.qty
+FROM (SELECT orders.id, orders.qty FROM orders WHERE orders.org = 42 AND orders.deleted_at IS NULL) AS orders
+WHERE orders.qty > 1
+"""
 
 print(policy.rewrite('delete from orders where id = 7 or true', context={'org_id': 42}).sql)
-#> DELETE FROM orders
-#> WHERE orders.org = 42 AND orders.deleted_at IS NULL AND (orders.id = 7 OR TRUE)
+"""
+DELETE FROM orders
+WHERE orders.org = 42 AND orders.deleted_at IS NULL AND (orders.id = 7 OR TRUE)
+"""
 ```
 
 - p14g parses the expression itself, so it goes through the same writer as the rest of the statement.
@@ -367,10 +380,14 @@ If a table has inheritance children the policy should not reach, set `only=True`
 p14g then writes `ONLY table` wherever a statement reads, updates or deletes it.
 
 ```python
+from p14g import Policy, Select
+
 policy = Policy(Select('family', columns=['id'], only=True))
 print(policy.rewrite('select * from family').sql)
-#> SELECT "family".id
-#> FROM ONLY "family"
+"""
+SELECT "family".id
+FROM ONLY "family"
+"""
 ```
 
 Do not set `only` for a partitioned table: the parent holds no rows of its own, so `ONLY` returns nothing.
@@ -423,11 +440,15 @@ A chain of `AND`, or of `OR`, has none around a comparison or test such as `a = 
 relies on `AND` and `OR` binding more loosely than comparisons.
 
 ```python
+from p14g import Policy, Select
+
 policy = Policy(Select('orders'))
 print(policy.rewrite('select id, "user" as "user" from orders where (qty + 1) * 2 > 4 and (a = 1 or b is null)').sql)
-#> SELECT orders.id, orders.user AS "user"
-#> FROM orders
-#> WHERE ((orders.qty + 1) * 2) > 4 AND (orders.a = 1 OR orders.b IS NULL)
+"""
+SELECT orders.id, orders.user AS "user"
+FROM orders
+WHERE ((orders.qty + 1) * 2) > 4 AND (orders.a = 1 OR orders.b IS NULL)
+"""
 ```
 
 Parentheses around a whole statement are taken away.
@@ -452,8 +473,10 @@ def per_tenant(table: Table, context):
 
 policy = Policy(Select('events'), mappers=[per_tenant])
 print(policy.rewrite('select id from events', context=42).sql)
-#> SELECT events.id
-#> FROM tenants.events_42 AS events
+"""
+SELECT events.id
+FROM tenants.events_42 AS events
+"""
 ```
 
 There are mappers for `Table`, `Column`, `Function` and `Literal`.
