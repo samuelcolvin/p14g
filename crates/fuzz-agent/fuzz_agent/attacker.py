@@ -20,7 +20,6 @@ from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
 from pydantic_ai_harness import CodeMode
 from pydantic_monty import MountDir
 
-from .judge import Judge
 from .oracle import Finding, Oracle
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -136,10 +135,9 @@ and policy you are attacking.
 
 @dataclass
 class Session:
-    """What one run of the fuzzer holds: the checks, the judge, and the files it writes."""
+    """What one run of the fuzzer holds: the checks and the files it writes."""
 
     oracle: Oracle
-    judge: Judge | None
     directory: Path
     turns: int = 40
     """Model requests in a round. The last has no tools, so that it is the round's summary."""
@@ -150,7 +148,6 @@ class Session:
     findings: list[Finding] = field(default_factory=list[Finding])
     tried: list[str] = field(default_factory=list[str])
     """One line per statement: what happened to it, then the statement. The next round is shown this."""
-    judge_failures: int = 0
     _files: frozenset[str] | None = None
 
     def record(self, name: str, entry: dict[str, Any]) -> None:
@@ -297,10 +294,6 @@ def build(model: Model | str, repository: Path) -> Agent[Session, str]:
         attempt = await asyncio.to_thread(session.oracle.attempt, sql)
         if attempt.output is not None:
             session.accepted += 1
-            if judgment := await _judge(session, sql, attempt.output):
-                # the agent is not told: it would learn to write SQL that worries the judge
-                model, flags = judgment
-                session.found(Finding('judge', f'{model}: {", ".join(flags)}', sql, attempt.output))
         status = 'rejected' if attempt.output is None else 'accepted'
         flat = ' '.join(sql.split())
         print(f'{number:4} {status}: {flat[:120]}')
@@ -325,19 +318,3 @@ def build(model: Model | str, repository: Path) -> Agent[Session, str]:
         return 'recorded'
 
     return agent
-
-
-async def _judge(session: Session, input_sql: str, output_sql: str) -> tuple[str, list[str]] | None:
-    if session.judge is None:
-        return None
-    try:
-        model, flags = await session.judge.flags(input_sql, output_sql)
-    except Exception as e:  # noqa: BLE001 - whatever goes wrong with the judge, the run carries on
-        session.judge_failures += 1
-        print(f'  the judge failed: {type(e).__name__}: {str(e)[:200]}')
-        if session.judge_failures >= 3:
-            print('  three failures, carrying on without the judge')
-            session.judge = None
-        return None
-    session.judge_failures = 0
-    return (model, flags) if flags else None

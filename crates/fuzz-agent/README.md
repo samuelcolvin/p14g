@@ -1,8 +1,8 @@
 # LLM fuzz agent
 
 This is an adversarial, tool-using [Pydantic AI](https://ai.pydantic.dev/) agent for p14g. A language model reads
-the repository and submits SQL that tries to escape a fixed policy. Every accepted statement is checked by code;
-an optional second model gives an independent opinion.
+the repository and submits SQL that tries to escape a fixed policy. Every accepted statement is checked by code
+and run on Postgres.
 
 The attacker receives the project README, `AGENTS.md`, the security-review checklist and the complete target policy
 and schema in its initial instructions. It has one tool, `run_code`, from Pydantic AI Harness's
@@ -50,32 +50,10 @@ Useful options:
 --focus TEXT              use one attack area instead of rotating through the built-in areas
 --rounds N                number of independent attack rounds
 --turns N                 maximum model requests in each round
---judge-model MODEL       optional independent judge
---judge-threshold P       yes/no cutoff for a decision-model judge
---database-url URL        disposable Postgres server; omit it when invoking Python directly for static checks only
+--database-url URL        disposable Postgres server (default: P14G_TEST_DATABASE_URL)
 ```
 
 Run `uv run --group fuzz-agent python -m fuzz_agent --help` from this directory for the complete CLI.
-
-## JEV judge
-
-[JEV](https://typesafe.ai/blog/introducing-system-one-models-and-jev) is a System One model: it answers typed
-questions with probabilities instead of generating text. That makes it suitable as a cheap second opinion on each
-accepted rewrite, while a generative model remains responsible for producing the SQL. Pydantic AI exposes JEV as a
-decision model and maps the fields in `judge.Verdict` to parallel yes/no questions.
-
-Set `TYPESAFE_API_KEY` and the runner automatically uses `typesafe:jev-latest`:
-
-```bash
-export TYPESAFE_API_KEY=...
-make fuzz-agent ARGS='--rounds 1'
-```
-
-For repeatable evaluation, pass a versioned model after tuning the threshold, for example
-`--judge-model typesafe:jev-1.13.0`. `jev-latest` is a moving alias, so its answer distribution can change. Judge
-flags are recorded as opinions and do not make the command fail. The attacking model is not shown them, which keeps
-it from optimizing against the judge. Findings record the exact model version returned by the provider even when
-the configured name is an alias.
 
 ## Traces
 
@@ -97,7 +75,8 @@ The deterministic oracle:
 - checks row limits, panics, slow rewrites, and agreement between inline and parameterized literal modes.
 
 Runs are written under `crates/fuzz-agent/runs/`. `attempts.jsonl` is written before p14g sees a statement, so its
-last line survives a process crash. `findings.jsonl` contains deterministic failures and model opinions, and
-`notes.md` contains the attacking model's round summaries.
+last line survives a process crash. `findings.jsonl` contains the failed checks and anything the agent reported with
+`report_finding`, and `notes.md` contains the attacking model's round summaries.
 
-Run the API-free regression tests with `make test-fuzz-agent`.
+Run the API-free regression tests with `make test-fuzz-agent`. Most need Postgres, as `make test-postgres` does,
+and are skipped without `P14G_TEST_DATABASE_URL`.

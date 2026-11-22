@@ -4,9 +4,9 @@ They are the properties the libFuzzer targets check (`crates/fuzz/src/lib.rs`), 
 no panic, output that Postgres's parser reads as one statement naming only allowed tables and functions, output
 that reads back as itself, and a plan Postgres will make for a role with only the policy's grants.
 
-With a database they go further and run the output, as the owner of the tables so that nothing but p14g stands
-in the way, in a transaction that is rolled back. A canary in the result or in an error is a read that got
-through, and a change to a row the policy does not allow is a write that got through.
+Then the output is run, as the owner of the tables so that nothing but p14g stands in the way, in a transaction
+that is rolled back. A canary in the result or in an error is a read that got through, and a change to a row the
+policy does not allow is a write that got through.
 """
 
 from __future__ import annotations
@@ -89,26 +89,21 @@ class Attempt:
 
 
 class Oracle:
-    def __init__(self, database_url: str | None, worker: Worker | None = None):
+    def __init__(self, database_url: str, worker: Worker | None = None):
         # p14g runs in `worker`, so that a statement that hangs it can be given up on
         self.worker = worker or Worker(timeout=HUNG_REWRITE)
         self.canaries = target.Canaries()
         self._lock = threading.Lock()
-        self._owner: psycopg.Connection[Row] | None = None
-        self._role: psycopg.Connection[Row] | None = None
-        self._before: Snapshot = {}
-        if database_url is not None:
-            self._set_up(database_url)
-
-    @property
-    def has_database(self) -> bool:
-        return self._owner is not None
+        self._owner, self._role = _set_up(database_url, self.canaries)
+        self._before = self._snapshot()
+        # from here on, so that each statement is a span but the rows put in by `_set_up` are not
+        logfire.instrument_psycopg(self._owner)
+        logfire.instrument_psycopg(self._role)
 
     def close(self) -> None:
         self.worker.close()
-        for connection in (self._owner, self._role):
-            if connection is not None:
-                connection.close()
+        self._owner.close()
+        self._role.close()
 
     def attempt(self, sql: str) -> Attempt:
         with logfire.span('attempt', sql=sql) as span:
@@ -188,7 +183,10 @@ class Oracle:
         try:
             statements = pglast.parse_sql(safe.sql)
         except pglast.Error as e:
-            return found('postgres-parse', f"Postgres's parser cannot read the output: {e}")
+            # Postgres itself says so when it plans the inline output, so only the parameterized output is reported
+            if mode == 'params':
+                found('postgres-parse', f"Postgres's parser cannot read the output: {e}")
+            return None
         if len(statements) != 1:
             return found('multiple-statements', f'the output is {len(statements)} statements')
 
@@ -226,8 +224,7 @@ class Oracle:
     @logfire.instrument('explain as the restricted role', extract_args=False)
     def _explain(self, attempt: Attempt) -> None:
         """Ask Postgres to plan the output for a role that has exactly the policy's grants."""
-        if self._role is None or attempt.output is None:
-            return
+        assert attempt.output is not None
         try:
             self._role.execute(b'EXPLAIN ' + attempt.output.encode(), prepare=True)
         except psycopg.Error as e:
@@ -237,9 +234,6 @@ class Oracle:
 
     @logfire.instrument('run as the owner', extract_args=False)
     def _run(self, safe: Rewritten, attempt: Attempt) -> None:
-        if self._owner is None:
-            return
-
         def found(kind: str, detail: str) -> None:
             attempt.findings.append(Finding(kind, detail, attempt.sql, safe.sql))
 
@@ -270,52 +264,7 @@ class Oracle:
         for problem in _forbidden_writes(self._before, after):
             found('forbidden-write', problem)
 
-    def _set_up(self, database_url: str) -> None:
-        """Make the database from scratch, and connect to it as the owner of the tables and as the restricted role."""
-        passwords = {OWNER: secrets.token_hex(16), ROLE: secrets.token_hex(16)}
-        with psycopg.connect(database_url, autocommit=True) as admin:
-            for role, password in passwords.items():
-                exists = admin.execute('SELECT 1 FROM pg_roles WHERE rolname = %s', [role]).fetchone()
-                verb = pgsql.SQL('ALTER' if exists else 'CREATE')
-                admin.execute(
-                    pgsql.SQL('{} ROLE {} LOGIN NOSUPERUSER PASSWORD {}').format(
-                        verb, pgsql.Identifier(role), pgsql.Literal(password)
-                    )
-                )
-            admin.execute(pgsql.SQL('DROP DATABASE IF EXISTS {} WITH (FORCE)').format(pgsql.Identifier(DATABASE)))
-            admin.execute(
-                pgsql.SQL('CREATE DATABASE {} OWNER {}').format(pgsql.Identifier(DATABASE), pgsql.Identifier(OWNER))
-            )
-
-        def connect(role: str) -> psycopg.Connection[Row]:
-            info = conninfo.make_conninfo(database_url, dbname=DATABASE, user=role, password=passwords[role])
-            connection = psycopg.Connection[Row].connect(info, autocommit=True, row_factory=dict_row)
-            connection.execute("SET statement_timeout = '2s'")
-            return connection
-
-        owner = connect(OWNER)
-        owner.execute(target.SCHEMA.encode())
-        for table, rows in target.rows(self.canaries).items():
-            for row in rows:
-                owner.execute(
-                    pgsql.SQL('INSERT INTO {} ({}) VALUES ({})').format(
-                        _table(table),
-                        pgsql.SQL(', ').join(map(pgsql.Identifier, row)),
-                        pgsql.SQL(', ').join(pgsql.Placeholder() * len(row)),
-                    ),
-                    list(row.values()),
-                )
-        for grant in target.policy().grants(ROLE, context=target.CONTEXT):
-            owner.execute(grant.encode())
-        self._owner = owner
-        self._role = connect(ROLE)
-        self._before = self._snapshot()
-        # from here on, so that each statement is a span but the rows put in above are not
-        logfire.instrument_psycopg(owner)
-        logfire.instrument_psycopg(self._role)
-
     def _snapshot(self) -> Snapshot:
-        assert self._owner is not None
         # the same queries every time, so they are left out of the trace
         with logfire.suppress_instrumentation():
             return {
@@ -325,6 +274,46 @@ class Oracle:
                 }
                 for table in target.WRITES
             }
+
+
+def _set_up(database_url: str, canaries: target.Canaries) -> tuple[psycopg.Connection[Row], psycopg.Connection[Row]]:
+    """Make the database from scratch, and connect to it as the owner of the tables and as the restricted role."""
+    passwords = {OWNER: secrets.token_hex(16), ROLE: secrets.token_hex(16)}
+    with psycopg.connect(database_url, autocommit=True) as admin:
+        for role, password in passwords.items():
+            exists = admin.execute('SELECT 1 FROM pg_roles WHERE rolname = %s', [role]).fetchone()
+            verb = pgsql.SQL('ALTER' if exists else 'CREATE')
+            admin.execute(
+                pgsql.SQL('{} ROLE {} LOGIN NOSUPERUSER PASSWORD {}').format(
+                    verb, pgsql.Identifier(role), pgsql.Literal(password)
+                )
+            )
+        admin.execute(pgsql.SQL('DROP DATABASE IF EXISTS {} WITH (FORCE)').format(pgsql.Identifier(DATABASE)))
+        admin.execute(
+            pgsql.SQL('CREATE DATABASE {} OWNER {}').format(pgsql.Identifier(DATABASE), pgsql.Identifier(OWNER))
+        )
+
+    def connect(role: str) -> psycopg.Connection[Row]:
+        info = conninfo.make_conninfo(database_url, dbname=DATABASE, user=role, password=passwords[role])
+        connection = psycopg.Connection[Row].connect(info, autocommit=True, row_factory=dict_row)
+        connection.execute("SET statement_timeout = '2s'")
+        return connection
+
+    owner = connect(OWNER)
+    owner.execute(target.SCHEMA.encode())
+    for table, rows in target.rows(canaries).items():
+        for row in rows:
+            owner.execute(
+                pgsql.SQL('INSERT INTO {} ({}) VALUES ({})').format(
+                    _table(table),
+                    pgsql.SQL(', ').join(map(pgsql.Identifier, row)),
+                    pgsql.SQL(', ').join(pgsql.Placeholder() * len(row)),
+                ),
+                list(row.values()),
+            )
+    for grant in target.policy().grants(ROLE, context=target.CONTEXT):
+        owner.execute(grant.encode())
+    return owner, connect(ROLE)
 
 
 def _forbidden_writes(before: Snapshot, after: Snapshot) -> list[str]:

@@ -15,7 +15,7 @@ linting = [
 ]
 # for the LLM fuzzer in crates/fuzz-agent
 fuzz-agent = [
-    "pydantic-ai-slim[anthropic,openai,typesafe]",
+    "pydantic-ai-slim[anthropic,openai]",
     "psycopg[binary]",
     # Postgres's own parser, to check what p14g emits
     "pglast",

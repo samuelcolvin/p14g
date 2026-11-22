@@ -24,11 +24,10 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from . import attacker
 from .attacker import FOCUS, PACKAGE, Session, copy_repository
-from .judge import Judge
 from .oracle import Oracle
 
 # findings a person has to weigh up, as opposed to a check that failed
-OPINIONS = {'judge', 'claimed'}
+OPINIONS = {'claimed'}
 
 TRIED_IN_NOTES = 60
 """How many of a round's statements the rounds after it are shown."""
@@ -45,22 +44,12 @@ def usable_summary(text: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    default_judge = 'typesafe:jev-latest' if 'TYPESAFE_API_KEY' in os.environ else None
     parser = argparse.ArgumentParser(prog='fuzz_agent', description=__doc__)
     parser.add_argument(
         '--model',
         default=os.environ.get('P14G_FUZZ_MODEL', 'gateway/doubleword:zai-org/GLM-5.3'),
         help='the model that writes the SQL, as a Pydantic AI model name; a `gateway/` model is reached through '
         'the Pydantic AI Gateway with LOGFIRE_API_KEY (default: %(default)s)',
-    )
-    parser.add_argument(
-        '--judge-model',
-        default=os.environ.get('P14G_FUZZ_JUDGE_MODEL') or default_judge,
-        help='a decision model, or a language model, asked whether each accepted statement breaks the policy '
-        '(default: typesafe:jev-latest if TYPESAFE_API_KEY is set, otherwise no judge)',
-    )
-    parser.add_argument(
-        '--judge-threshold', type=float, default=0.5, help='how likely a yes from a decision model has to be to count'
     )
     parser.add_argument('--rounds', type=int, default=len(FOCUS), help='rounds to run, each on one area of the library')
     parser.add_argument('--turns', type=int, default=40, help='model requests the agent gets in a round')
@@ -71,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         '--database-url',
         default=os.environ.get('P14G_TEST_DATABASE_URL'),
         help='a superuser connection to a throwaway Postgres (`make postgres`); the database p14g_agent is dropped '
-        'and made again. Without one the output is checked but never run',
+        'and made again (default: P14G_TEST_DATABASE_URL)',
     )
     args = parser.parse_args()
     if args.model.startswith('gateway/') and 'LOGFIRE_API_KEY' not in os.environ:
@@ -79,8 +68,8 @@ def parse_args() -> argparse.Namespace:
             f'{args.model} goes through the Pydantic AI Gateway: set LOGFIRE_API_KEY to a key made with '
             '`logfire-cli api-key write gateway`'
         )
-    if not 0 <= args.judge_threshold <= 1:
-        parser.error('--judge-threshold must be between 0 and 1')
+    if not args.database_url:
+        parser.error('set P14G_TEST_DATABASE_URL or pass --database-url: every statement is run on Postgres')
     if args.rounds < 1:
         parser.error('--rounds must be at least 1')
     if args.turns < 1:
@@ -95,15 +84,10 @@ async def run(args: argparse.Namespace) -> int:
     # the copy of the repository the agent reads, removed when the run ends
     repository = tempfile.TemporaryDirectory(prefix='p14g-fuzz-agent-')
     try:
-        judge = Judge(args.judge_model, args.judge_threshold) if args.judge_model else None
-        session = Session(oracle, judge, directory, turns=args.turns)
+        session = Session(oracle, directory, turns=args.turns)
         agent = attacker.build(model(args.model), copy_repository(session.files, Path(repository.name)))
 
         print(f'model: {args.model}')
-        print(f'judge: {args.judge_model or "none (set TYPESAFE_API_KEY or pass --judge-model)"}')
-        print(
-            f'database: {"statements are run" if oracle.has_database else "none, the output is checked but never run"}'
-        )
         sending = bool(logfire.DEFAULT_LOGFIRE_INSTANCE.config.token)
         print(f'traces: {"sent to Logfire" if sending else "not sent, set LOGFIRE_API_KEY"}')
         print(f'writing to {directory}\n')
@@ -111,7 +95,7 @@ async def run(args: argparse.Namespace) -> int:
         usage = RunUsage()
         notes: list[str] = []
         with logfire.span(
-            'fuzz run {model}', model=args.model, judge=args.judge_model, rounds=args.rounds, directory=str(directory)
+            'fuzz run {model}', model=args.model, rounds=args.rounds, directory=str(directory)
         ) as run_span:
             for number in range(1, args.rounds + 1):
                 focus = args.focus or FOCUS[(number - 1) % len(FOCUS)]

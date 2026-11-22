@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,55 +12,16 @@ from fuzz_agent.attacker import (
     last_turn_without_tools,
     turn_instructions,
 )
-from fuzz_agent.judge import Judge
 from fuzz_agent.oracle import Oracle
 from fuzz_agent.worker import Worker
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.decision import (
-    DecisionModel,
-    DecisionModelSettings,
-    DecisionRequest,
-    DecisionResponse,
-    NoulAnswer,
-    NoulQuestion,
-)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.providers import InterfaceClient
 
 
-class StubDecisionModel(DecisionModel[InterfaceClient]):
-    def __init__(self) -> None:
-        super().__init__()
-        self.request_seen: DecisionRequest | None = None
-
-    @property
-    def model_name(self) -> str:
-        return 'jev-stub'
-
-    @property
-    def system(self) -> str:
-        return 'test'
-
-    async def decide(self, request: DecisionRequest, model_settings: DecisionModelSettings) -> DecisionResponse:
-        self.request_seen = request
-        return DecisionResponse(
-            answers={name: NoulAnswer(noul=0.9 if name == 'harmful_call' else 0.1) for name in request.questions},
-            model_name='jev-stub-1.0',
-        )
-
-
-def test_oracle_without_database(tmp_path: Path) -> None:
-    oracle = Oracle(None)
-    try:
-        _check_oracle_without_database(oracle, tmp_path)
-    finally:
-        oracle.close()
-
-
-def _check_oracle_without_database(oracle: Oracle, tmp_path: Path) -> None:
-
+def test_oracle(oracle: Oracle, tmp_path: Path) -> None:
     allowed = oracle.attempt('select id, name from customers')
     assert allowed.output == 'SELECT customers.id, customers.name\nFROM public.customers\nLIMIT 50'
+    assert allowed.ran is not None and allowed.ran.startswith('ran: ')
     assert allowed.findings == []
 
     denied = oracle.attempt('select email from customers')
@@ -75,31 +35,15 @@ def _check_oracle_without_database(oracle: Oracle, tmp_path: Path) -> None:
     assert "docs.status IN ('draft', 'published')" in filtered.output
     assert filtered.findings == []
 
-    session = Session(oracle, None, tmp_path)
+    session = Session(oracle, tmp_path)
     assert 'crates/p14g/src/check.rs' in session.files
     assert '.claude/skills' not in session.files
 
 
-def test_decision_model_judge() -> None:
-    model = StubDecisionModel()
-    judge = Judge(model, 0.5)
-
-    answered_by, flags = asyncio.run(judge.flags('select 1', 'SELECT 1'))
-
-    assert answered_by == 'jev-stub-1.0'
-    assert flags == ['harmful_call (confidence 0.80)']
-    assert model.request_seen is not None
-    assert len(model.request_seen.questions) == 5
-    question = model.request_seen.questions['harmful_call']
-    assert isinstance(question, NoulQuestion)
-    assert question.criteria is not None
-    assert 'outside `policy.functions`' in str(question.criteria.true)
-
-
-def test_hang_is_a_finding_and_the_worker_restarts() -> None:
+def test_hang_is_a_finding_and_the_worker_restarts(database_url: str) -> None:
     from handlers import rewrite_unless_marked
 
-    oracle = Oracle(None, worker=Worker(rewrite_unless_marked, timeout=1))
+    oracle = Oracle(database_url, worker=Worker(rewrite_unless_marked, timeout=1))
     try:
         hung = oracle.attempt("select id from customers where name = 'HANG'")
         assert hung.output is None
@@ -156,7 +100,7 @@ print(await rewrite(sql='select id from customers'))
 """
 
 
-def test_code_mode(tmp_path: Path) -> None:
+def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     tools_offered: list[list[str]] = []
     returned: list[str] = []
 
@@ -168,26 +112,22 @@ def test_code_mode(tmp_path: Path) -> None:
             return ModelResponse(parts=[TextPart('summary')])
         return ModelResponse(parts=[ToolCallPart('run_code', {'code': CODE})])
 
-    oracle = Oracle(None)
-    try:
-        session = Session(oracle, None, tmp_path, turns=5)
-        repository = copy_repository(session.files, tmp_path / 'repo')
-        agent = attacker.build(FunctionModel(model), repository)
+    session = Session(oracle, tmp_path, turns=5)
+    repository = copy_repository(session.files, tmp_path / 'repo')
+    agent = attacker.build(FunctionModel(model), repository)
 
-        assert agent.run_sync('attack', deps=session).output == 'summary'
-        # the file tools are gone: the agent reads the mounted copy and calls `rewrite` from Python
-        assert tools_offered == [['run_code'], ['run_code']]
-        [output] = returned
-        assert 'read-only' in output
-        assert 'False' in output
-        assert 'SELECT customers.id' in output
-        assert session.tried == ['accepted: select id from customers']
-        assert not (repository / 'written').exists()
+    assert agent.run_sync('attack', deps=session).output == 'summary'
+    # the file tools are gone: the agent reads the mounted copy and calls `rewrite` from Python
+    assert tools_offered == [['run_code'], ['run_code']]
+    [output] = returned
+    assert 'read-only' in output
+    assert 'False' in output
+    assert 'SELECT customers.id' in output
+    assert session.tried == ['accepted: select id from customers']
+    assert not (repository / 'written').exists()
 
-        # on the last turn of a round there is no `run_code` either, so the reply is the summary
-        tools_offered.clear()
-        session.turns = 1
-        assert agent.run_sync('attack', deps=session).output == 'summary'
-        assert tools_offered == [[]]
-    finally:
-        oracle.close()
+    # on the last turn of a round there is no `run_code` either, so the reply is the summary
+    tools_offered.clear()
+    session.turns = 1
+    assert agent.run_sync('attack', deps=session).output == 'summary'
+    assert tools_offered == [[]]

@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from p14g import DEFAULT_FUNCTIONS, Delete, Insert, Policy, Select, Update
+from p14g import Delete, Insert, Policy, Select, Update
 from typing_extensions import LiteralString
 
 Row = dict[str, Any]
@@ -208,39 +208,4 @@ def rows(canaries: Canaries) -> dict[str, list[Row]]:
             for n in range(100, 105)
         ],
         'docs': docs,
-    }
-
-
-def describe() -> dict[str, Any]:
-    """The policy in the few words a judge needs to compare a statement with it."""
-    return {
-        'readable': {
-            'customers': ['id', 'name'],
-            'orders': ['id', 'product', 'qty', 'customer_id'],
-            'v': 'every column',
-            'app.events': ['id', 'kind'],
-            'limited': ['a', 'b'],
-            'family': ['id', 'label'],
-            'docs': ['id', 'title', 'body', 'status'],
-        },
-        'insertable': {
-            'orders': ['product', 'qty'],
-            'audit': ['message'],
-            'family': ['id', 'label'],
-            'docs': ['title', 'body'],
-        },
-        'added_to_every_insert': {
-            'orders': ['tenant_id'],
-            'audit': ['tenant_id', 'actor'],
-            'docs': ['org', 'status'],
-        },
-        'updatable': {'orders': ['qty'], 'family': ['label'], 'docs': ['title', 'body']},
-        'deletable': ['orders', 'family', 'docs'],
-        'row_filter': {'docs': "docs.org = 7 AND docs.status IN ('draft', 'published')"},
-        'only': 'family must be written as ONLY family',
-        'operators': 'the p14g defaults: ordinary arithmetic, comparison, Boolean, JSON, pattern and null '
-        'operators, excluding regular-expression operators',
-        'functions': sorted(DEFAULT_FUNCTIONS),
-        'default_schema': 'public',
-        'max_rows': MAX_ROWS,
     }

@@ -85,8 +85,8 @@ fuzz-agent: python-dev ## Have an LLM attack p14g (see crates/fuzz-agent). ARGS=
 	cd crates/fuzz-agent && P14G_TEST_DATABASE_URL=$(P14G_TEST_DATABASE_URL) uv run --group fuzz-agent python -m fuzz_agent $(ARGS)
 
 .PHONY: test-fuzz-agent
-test-fuzz-agent: python-dev ## Run the LLM fuzzer's API-free tests
-	cd crates/fuzz-agent && uv run --group fuzz-agent python -m pytest tests
+test-fuzz-agent: python-dev ## Run the LLM fuzzer's API-free tests; those that need Postgres are skipped without it
+	cd crates/fuzz-agent && P14G_TEST_DATABASE_URL=$(P14G_TEST_DATABASE_URL) uv run --group fuzz-agent python -m pytest tests
 
 .PHONY: all
 all: format lint test python-test ## Format, lint and test
