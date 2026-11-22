@@ -346,6 +346,10 @@ impl Filter {
 }
 
 /// A value bound to a placeholder of a [`Filter`]: one value, or a list for `IN (:name)`.
+///
+/// Each value must be what converting a `bool`, number or string gives: a literal, a negative number, or a cast
+/// from a string for NaN and the infinities. Anything else, a column or a function call for example, makes the
+/// filter fail.
 #[derive(Debug, Clone)]
 pub enum FilterValue {
     One(Expr),

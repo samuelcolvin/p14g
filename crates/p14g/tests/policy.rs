@@ -7,9 +7,16 @@ use std::thread;
 use p14g::{
     Delete, Dialect, Error, ErrorKind, Filter, Insert, Layout, Limits, Literals, Op, Policy, PolicyBuilder,
     QuoteIdentifiers, Select, Star, StatementKind, Update,
-    ast::{Expr, Literal, MAX_PLACEHOLDER},
+    ast::{Column, Expr, Ident, Literal, MAX_PLACEHOLDER},
     functions,
 };
+
+fn column_a() -> Expr {
+    Expr::Column(Column {
+        table: None,
+        name: Ident::new("a").unwrap(),
+    })
+}
 
 /// A builder that writes each statement on one line, which is easier to compare against.
 fn dense<C>() -> PolicyBuilder<C> {
@@ -1662,6 +1669,10 @@ fn filter_values_and_errors() {
         "t.a = 'x'' OR ''1''=''1' OR t.b = (- 7) OR t.c = 1.5 OR t.d = TRUE OR (t.e IS NOT DISTINCT FROM NULL)"
     );
     assert_eq!(
+        where_(|()| Filter::new("a = :x").bind("x", f64::NAN)),
+        "t.a = CAST('NaN' AS double precision)"
+    );
+    assert_eq!(
         where_(|()| Filter::new("a = :s").bind("s", r"back\slash'")),
         r"t.a = E'back\\slash'''"
     );
@@ -1698,7 +1709,7 @@ fn filter_values_and_errors() {
     assert_eq!(safe.params, ["x", "y"]);
 
     // a filter that cannot be used rejects the statement, it is never left out
-    let cases: [(MakeFilter, &str); 10] = [
+    let cases: [(MakeFilter, &str); 13] = [
         (
             |()| Filter::new("a = :missing"),
             "the filter uses :missing but no value was given for it",
@@ -1724,6 +1735,19 @@ fn filter_values_and_errors() {
             "a subquery in a filter is not supported",
         ),
         (|()| Filter::new("other.a = 1"), "other.a is a column of another table"),
+        // a bound value goes in as it is, so it must be a value: a column in it would not be bound to the table
+        (
+            |()| Filter::new("a = :v").bind("v", column_a()),
+            "the value for :v must be a literal, a negative number or a cast from a string",
+        ),
+        (
+            |()| Filter::new("a in (:v)").bind("v", vec![Expr::from(1), column_a()]),
+            "the value for :v must be a literal, a negative number or a cast from a string",
+        ),
+        (
+            |()| Filter::new("a = :v").bind("v", Expr::Placeholder(1)),
+            "the value for :v must be a literal, a negative number or a cast from a string",
+        ),
         (
             |()| Filter::new("a = 1; drop table t"),
             "expected one expression, found ; after it",

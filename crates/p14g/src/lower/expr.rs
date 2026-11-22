@@ -1,3 +1,5 @@
+use std::slice;
+
 use sqlparser::ast as sp;
 
 use super::{Lower, ident, location, name_location, object_name, qualified_name, reject};
@@ -405,13 +407,25 @@ impl<'a> Lower<'a> {
                     "the placeholder {placeholder:?} is not supported in a filter (use :name)"
                 ))
             })?;
-        self.filter
+        let value = self
+            .filter
             .as_ref()
             .map_or(&[][..], |filter| filter.bindings)
             .iter()
             .find(|(bound, _)| bound == name)
             .map(|(_, value)| value)
-            .ok_or_else(|| Error::callback(format!("the filter uses :{name} but no value was given for it")))
+            .ok_or_else(|| Error::callback(format!("the filter uses :{name} but no value was given for it")))?;
+        let values = match value {
+            FilterValue::One(value) => slice::from_ref(value),
+            FilterValue::Many(values) => values.as_slice(),
+        };
+        if values.iter().all(is_value) {
+            Ok(value)
+        } else {
+            Err(Error::callback(format!(
+                "the value for :{name} must be a literal, a negative number or a cast from a string"
+            )))
+        }
     }
 
     fn function(&mut self, function: sp::Function) -> Result<Expr> {
@@ -757,5 +771,22 @@ fn lower_data_type(data_type: sp::DataType) -> Result<DataType> {
             }
         }
         _ => Err(Error::unsupported("this type")),
+    }
+}
+
+/// Whether a value bound to a filter's placeholder is a value: one of the shapes `Expr`'s `From` impls build.
+///
+/// It goes into the statement as it is. A column in it would be neither qualified with the filter's table nor
+/// recorded among the columns the filter reads, which an `UPDATE` must not set, and a `$n` would not be counted
+/// when p14g numbers the parameters it adds.
+fn is_value(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::Unary {
+            op: UnaryOperator::Minus,
+            expr,
+        } => matches!(**expr, Expr::Literal(Literal::Number(_))),
+        Expr::Cast { expr, data_type: _ } => matches!(**expr, Expr::Literal(Literal::String(_))),
+        _ => false,
     }
 }
