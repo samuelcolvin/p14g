@@ -152,10 +152,17 @@ A table has the columns its rules list, or an unknown set of columns when a rule
 
 Every column reference is written fully qualified, `table.column`.
 If Postgres would have resolved a name differently from p14g, the rewritten query fails in the database.
-An unqualified name that could belong to more than one table in the statement is rejected; qualify it.
+An unqualified name is bound to the table whose rule lists it, or, when no rule lists it, to the one table whose rule
+allows all columns.
+A name that two rules list, or that no rule lists when two tables allow all columns, is rejected; qualify it.
+A name that one rule lists is bound to that table even when another table allows all columns.
+Postgres would call the name ambiguous if that table has the column too, but the output reads the listed column,
+which the policy allows.
 
 Whole-row references such as `SELECT orders FROM orders` or `row_to_json(o)` are rejected, because `orders` is not a
 column.
+Against a table whose rule allows all columns, `SELECT v FROM v` reads `v` as a column and is written `v.v`, which
+fails in the database unless the table has a column `v`.
 
 `star_behaviour` controls `*`:
 
@@ -172,6 +179,9 @@ The list is for the whole statement and cannot be set per table.
 ### Functions
 
 Functions are matched by name, so every overload of an allowed name is allowed.
+p14g does not know how many arguments a function takes, which functions are aggregates or window functions, or
+where those may appear.
+`WHERE sum(qty) > 1`, `rank()` without `OVER` and `lower(product) OVER ()` are accepted and fail in the database.
 `p14g.DEFAULT_FUNCTIONS` (`p14g::functions` in Rust) is allowed unless you pass `default_functions=False`.
 `functions=[...]` adds names and `deny_functions=[...]` removes them.
 
