@@ -15,3 +15,4 @@ htmlcov/
 /crates/fuzz-agent/.library/
 .logfire/
 .env
+/scratch.py
