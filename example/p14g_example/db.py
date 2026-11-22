@@ -1,4 +1,4 @@
-"""Database connections, and `setup()` which creates the roles, tables and grants.
+"""`setup()`, which creates the roles, tables and grants.
 
 Run `python -m p14g_example.db` (or `make setup`) to (re)create everything.
 """
@@ -6,23 +6,14 @@ Run `python -m p14g_example.db` (or `make setup`) to (re)create everything.
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import asyncpg
 
-from .policy import UNTRUSTED_ROLE, Ctx, policy
+from .policy import ORG_ID, UNTRUSTED_ROLE, policy
+from .settings import settings
 
-__all__ = 'ADMIN_URL', 'OWNER_URL', 'UNTRUSTED_URL', 'setup'
-
-_HOST = os.getenv('EXAMPLE_PG_HOST', '127.0.0.1:54331')
-_DB = os.getenv('EXAMPLE_PG_DB', 'example')
-# superuser, only for `setup()`
-ADMIN_URL = os.getenv('EXAMPLE_ADMIN_URL', f'postgres://postgres:postgres@{_HOST}/{_DB}')
-# owns the tables; the server uses it to look up API keys and write the audit log
-OWNER_URL = os.getenv('EXAMPLE_OWNER_URL', f'postgres://example_owner:owner@{_HOST}/{_DB}')
-# runs p14g's output
-UNTRUSTED_URL = os.getenv('EXAMPLE_UNTRUSTED_URL', f'postgres://{UNTRUSTED_ROLE}:untrusted@{_HOST}/{_DB}')
+__all__ = ('setup',)
 
 SCHEMA_SQL = Path(__file__).parent.parent / 'sql' / 'schema.sql'
 
@@ -32,13 +23,13 @@ async def setup() -> list[str]:
 
     Returns the grant statements that were run.
     """
-    conn = await asyncpg.connect(ADMIN_URL)
+    conn = await asyncpg.connect(str(settings.admin_dsn))
     try:
         async with conn.transaction():
             await conn.execute(SCHEMA_SQL.read_text())
-            # The grants come from the policy, so the database and p14g cannot drift apart. The context is only
-            # used to learn which columns `extra` sets, so any org will do.
-            grants = policy.grants(UNTRUSTED_ROLE, context=Ctx(org_id=0, user_id=0))
+            # The grants come from the policy, so the database and p14g cannot drift apart. The context is used to
+            # learn which columns `extra` sets.
+            grants = policy.grants(UNTRUSTED_ROLE, context=ORG_ID)
             await conn.execute('set role example_owner')
             for grant in grants:
                 await conn.execute(grant)

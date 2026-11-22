@@ -4,7 +4,7 @@ A small multi-tenant app whose users can send their own SQL to `POST /query`.
 It uses the three layers the p14g README recommends:
 
 1. **p14g** (`p14g_example/policy.py`) checks each statement against a policy and rewrites it.
-   Tables and columns outside the policy are refused, every multi-tenant table is filtered to the caller's org,
+   Tables and columns outside the policy are refused, every multi-tenant table is filtered to Anne's org,
    `org_id` is set on inserts, and a `LIMIT 1000` is added.
 2. **Grants.** The statement runs as `example_untrusted`, which has only the grants `policy.grants()` returns,
    plus statement, lock and idle timeouts.
@@ -25,9 +25,13 @@ make test
 
 `make setup` drops and recreates everything, so it can be rerun at any time.
 
+Settings are in `p14g_example/settings.py`, a pydantic-settings model read from environment variables prefixed
+`EXAMPLE_` or a `.env` file: `EXAMPLE_ADMIN_DSN`, `EXAMPLE_OWNER_DSN`, `EXAMPLE_UNTRUSTED_DSN`,
+`EXAMPLE_OWNER_POOL_SIZE`, `EXAMPLE_UNTRUSTED_POOL_SIZE` and `EXAMPLE_MAX_ROWS`.
+The defaults match the database `make db` starts.
+
 ```bash
-curl -s localhost:8014/query \
-  -H 'Authorization: Bearer acme-alice-key' -H 'content-type: application/json' \
+curl -s localhost:8014/query -H 'content-type: application/json' \
   -d '{"sql": "select p.name, count(t.id) from projects p left join tasks t on t.project_id = p.id group by p.name"}'
 ```
 
@@ -49,16 +53,11 @@ A refused statement gets a 400 with p14g's error:
 {"detail": {"error": "denied", "message": "reading from table \"app.api_keys\" is not allowed", ...}}
 ```
 
-`GET /schema` lists what the caller may do, which is what you would give an LLM writing the SQL.
-
-### API keys
-
-| key | user | org |
-|---|---|---|
-| `acme-alice-key` | Alice | Acme (1) |
-| `acme-bob-key` | Bob | Acme (1) |
-| `globex-carol-key` | Carol | Globex (2) |
-| `globex-dan-key` | Dan | Globex (2) |
+There is no authentication: anyone can call `/query`, and every statement runs as Anne.
+The seed data has two orgs: Acme (1), with Anne and Bob, and Globex (2), with Charlie.
+Anne sees Acme's data and nothing of Globex's.
+The org id is the context `rewrite()` gets, and the filters are functions of it; a real app would take it from the
+logged-in user.
 
 ## The schema
 
@@ -81,7 +80,7 @@ The filter adds `org_id = <org>` and the `Insert` rules' `extra` sets it.
 ## Roles
 
 - `postgres`, the superuser, is used only by `make setup`.
-- `example_owner` owns the schema and tables. The server uses it to look up API keys and write the audit log.
+- `example_owner` owns the schema and tables. The server uses it to write the audit log.
   Row-level security does not apply to it, since it owns the tables.
 - `example_untrusted` runs p14g's output. It is not a superuser, does not have `BYPASSRLS`, owns nothing, and has
   `statement_timeout = 2s`. `PUBLIC` has no privileges on the database or on schema `public`.
@@ -94,7 +93,7 @@ The server keeps a connection pool for each of the two login roles.
   user attach a task to another org's project. The composite key `(org_id, project_id) references projects (org_id, id)`
   refuses that. The error still tells the user that the id is not in their org, nothing more.
 - Database errors are returned as their SQLSTATE only.
-  A message such as a unique violation's `Key (email)=(...) already exists` can quote rows the caller cannot read.
+  A message such as a unique violation's `Key (email)=(...) already exists` can quote rows outside the org.
 - `app.org_id` is set with `set_config('app.org_id', ..., true)`, so it lasts until the end of the transaction and
   does not stay on the pooled connection. p14g does not allow `set_config` in a statement, so users cannot change it.
   Without the setting, row-level security returns no rows.

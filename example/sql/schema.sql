@@ -1,7 +1,7 @@
 -- Run as a superuser on a database dedicated to this example: `make setup` does that, then runs the grants
 -- `policy.grants('example_untrusted')` returns. It drops and recreates everything, so it can be rerun.
 --
--- `example_owner` owns the tables. The server uses it to look up API keys and write the audit log.
+-- `example_owner` owns the tables. The server uses it to write the audit log.
 -- `example_untrusted` runs the SQL p14g writes. It owns nothing and cannot bypass row-level security.
 
 drop schema if exists app cascade;
@@ -106,7 +106,6 @@ create table invoices (
 create table audit_log (
     id bigint generated always as identity primary key,
     org_id bigint not null,
-    user_id bigint not null,
     sql_in text not null,
     sql_out text,
     error text,
@@ -149,19 +148,17 @@ insert into organisations (name, plan, stripe_customer_id) values
     ('Globex', 'enterprise', 'cus_globex456');
 
 insert into users (org_id, email, name, password_hash) values
-    (1, 'alice@acme.example', 'Alice', '$argon2id$v=19$m=65536,t=3,p=4$YWNtZWFsaWNl$not-a-real-hash-1'),
-    (1, 'bob@acme.example', 'Bob', '$argon2id$v=19$m=65536,t=3,p=4$YWNtZWJvYg$not-a-real-hash-2'),
-    (2, 'carol@globex.example', 'Carol', '$argon2id$v=19$m=65536,t=3,p=4$Z2xvYmV4Y2Fyb2w$not-a-real-hash-3'),
-    (2, 'dan@globex.example', 'Dan', '$argon2id$v=19$m=65536,t=3,p=4$Z2xvYmV4ZGFu$not-a-real-hash-4');
+    (1, 'anne@acme.example', 'Anne', '$argon2id$v=19$m=65536,t=3,p=4$YW5uZQ$not-a-real-hash-1'),
+    (1, 'bob@acme.example', 'Bob', '$argon2id$v=19$m=65536,t=3,p=4$Ym9i$not-a-real-hash-2'),
+    (2, 'charlie@globex.example', 'Charlie', '$argon2id$v=19$m=65536,t=3,p=4$Y2hhcmxpZQ$not-a-real-hash-3');
 
--- The keys themselves are in the README; only their SHA-256 is stored.
+-- Secrets that untrusted SQL must never reach; the server does not use them.
 insert into api_keys (user_id, key_hash)
 select u.id, encode(sha256(convert_to(k.key, 'UTF8')), 'hex')
 from (values
-    ('alice@acme.example', 'acme-alice-key'),
+    ('anne@acme.example', 'acme-anne-key'),
     ('bob@acme.example', 'acme-bob-key'),
-    ('carol@globex.example', 'globex-carol-key'),
-    ('dan@globex.example', 'globex-dan-key')
+    ('charlie@globex.example', 'globex-charlie-key')
 ) as k (email, key)
 join users u on u.email = k.email;
 
@@ -176,7 +173,7 @@ insert into tasks (org_id, project_id, assignee_id, title, status, due_date) val
     (1, 1, 2, 'Fit rocket', 'doing', '2026-12-01'),
     (1, 2, 1, 'Source magnet', 'todo', '2027-01-15'),
     (2, 3, 3, 'Find a site', 'done', '2026-09-30'),
-    (2, 3, 4, 'Hire weavers', 'doing', null),
+    (2, 3, 3, 'Hire weavers', 'doing', null),
     (2, 4, 3, 'Classified', 'todo', '2027-03-01');
 
 insert into invoices (org_id, amount_cents, issued_at) values
