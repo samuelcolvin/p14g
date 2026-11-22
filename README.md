@@ -5,14 +5,41 @@ Check untrusted SQL against an allowlist and rewrite it so it is safe to run on 
 Parental Guidance (p14g) is for running SQL written by someone you do not trust, such as an LLM or an end user,
 directly against a Postgres database.
 You give it rules for which tables, columns, operators and functions may be used.
-It parses each statement with [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs), checks it against the
-rules, and writes out new SQL for you to run.
-It never connects to a database.
+It parses each statement with [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs), lowers it to a simple AST, checks it against the rules, and writes out new SQL for you to run.
 
 It is a Rust library, `p14g`, with a Python package of the same name built with PyO3.
 
+## Why
+
+"Just use Postgres" is still a great principle, so is "Just give the Agent SQL". However, the two rules are generally mutually exclusive.
+
+p14g allows you to just use SQL AND give the Agent SQL access.
+
+## Security and Threat Model
+
+p14g should be used together with role permissions and row-level security.
+
+See [Security Considerations](#security-considerations) for more details on how to use p14g safely.
+
+See [THREAT_MODEL.md](THREAT_MODEL.md) for details on the threat model.
+
+## Python Example
+
+To install `p14g`, run
+
+```bash
+uv add p14g
+```
+Or `pip install p14g` for the boomers.
+
+Here's an example of using `p14g` in Python:
+
 ```python
 from p14g import Delete, Insert, P14gError, Policy, Select, Update
+
+
+def by_tenant(context):
+    return 'tenant_id = :tenant_id', {'tenant_id': context['tenant_id']}
 
 
 def add_tenant(context):
@@ -20,48 +47,109 @@ def add_tenant(context):
 
 
 policy = Policy(
-    Select('orders', columns=['id', 'product', 'qty']),
+    Select('orders', columns=['id', 'product', 'qty'], filter=by_tenant),
     Insert('orders', columns=['product', 'qty'], extra=add_tenant),
-    Update('orders', columns=['qty']),
-    Delete('orders'),
+    Update('orders', columns=['qty'], filter=by_tenant),
+    Delete('orders', filter=by_tenant),
 )
+context = {'tenant_id': 42}
 
-safe = policy.rewrite('select * from orders where qty < 3')
+safe = policy.rewrite('select * from orders where qty < 3', context=context)
 print(safe.sql)
 #> SELECT orders.id, orders.product, orders.qty
-#> FROM orders
+#> FROM (SELECT orders.id, orders.product, orders.qty FROM orders WHERE orders.tenant_id = 42) AS orders
 #> WHERE orders.qty < 3
 
-safe = policy.rewrite("insert into orders (product, qty) values ('tea', 2)", context={'tenant_id': 42})
+safe = policy.rewrite("insert into orders (product, qty) values ('tea', 2)", context=context)
 print(safe.sql)
 #> INSERT INTO orders (product, qty, tenant_id)
 #> VALUES ('tea', 2, 42)
 
+safe = policy.rewrite('delete from orders where id = 7 or true', context=context)
+print(safe.sql)
+#> DELETE FROM orders
+#> WHERE orders.tenant_id = 42 AND (orders.id = 7 OR TRUE)
+
 try:
-    policy.rewrite('select * from pg_shadow')
+    policy.rewrite('select * from pg_shadow', context=context)
 except P14gError as e:
     print(e.kind, e)
     #> denied reading from table "pg_shadow" is not allowed
 ```
 
-The same policy in Rust:
+The filter limits each statement to tenant 42's rows; `extra` sets `tenant_id` on inserted rows.
+Put row-level security on `orders` as well (see [Rows](#rows)).
+
+`policy.grants()` returns the `GRANT` statements for the role that will run the output, so the database enforces the
+same tables and columns:
+
+```python
+for grant in policy.grants('app_role', context=context):
+    print(grant)
+    #> GRANT SELECT ("id", "product", "qty", "tenant_id") ON "orders" TO "app_role"
+    #> GRANT INSERT ("product", "qty", "tenant_id") ON "orders" TO "app_role"
+    #> GRANT UPDATE ("qty") ON "orders" TO "app_role"
+    #> GRANT DELETE ON "orders" TO "app_role"
+```
+
+## Rust Example
+
+To install `p14g`, run
+
+```bash
+cargo add p14g
+```
+
+Here's the same example as above, but in Rust.
 
 ```rust
-use p14g::{Delete, Insert, Policy, Select, Update};
+use p14g::{Delete, ErrorKind, Filter, Insert, Policy, Select, Update};
 
 struct Request { tenant_id: i64 }
 
-let policy: Policy<Request> = Policy::builder()
-    .select(Select::table("orders").columns(["id", "product", "qty"]))
-    .insert(Insert::table("orders").columns(["product", "qty"]).extra(|r: &Request| [("tenant_id", r.tenant_id)]))
-    .update(Update::table("orders").columns(["qty"]))
-    .delete(Delete::table("orders"))
-    .build()?;
+fn by_tenant(r: &Request) -> Filter {
+    Filter::new("tenant_id = :tenant_id").bind("tenant_id", r.tenant_id)
+}
 
-let safe = policy.rewrite("select * from orders where qty < 3", &Request { tenant_id: 42 })?;
+let policy: Policy<Request> = Policy::builder()
+    .select(Select::table("orders").columns(["id", "product", "qty"]).filter(by_tenant))
+    .insert(Insert::table("orders").columns(["product", "qty"]).extra(|r: &Request| [("tenant_id", r.tenant_id)]))
+    .update(Update::table("orders").columns(["qty"]).filter(by_tenant))
+    .delete(Delete::table("orders").filter(by_tenant))
+    .build()?;
+let request = Request { tenant_id: 42 };
+
+let safe = policy.rewrite("select * from orders where qty < 3", &request)?;
+println!("{}", safe.sql);
+// SELECT orders.id, orders.product, orders.qty
+// FROM (SELECT orders.id, orders.product, orders.qty FROM orders WHERE orders.tenant_id = 42) AS orders
+// WHERE orders.qty < 3
+
+let safe = policy.rewrite("insert into orders (product, qty) values ('tea', 2)", &request)?;
+println!("{}", safe.sql);
+// INSERT INTO orders (product, qty, tenant_id)
+// VALUES ('tea', 2, 42)
+
+let safe = policy.rewrite("delete from orders where id = 7 or true", &request)?;
+println!("{}", safe.sql);
+// DELETE FROM orders
+// WHERE orders.tenant_id = 42 AND (orders.id = 7 OR TRUE)
+
+let error = policy.rewrite("select * from pg_shadow", &request).unwrap_err();
+assert_eq!(error.kind(), ErrorKind::Denied);
+println!("{error}");
+// reading from table "pg_shadow" is not allowed
+
+for grant in policy.grants("app_role", &request)? {
+    println!("{grant}");
+}
+// GRANT SELECT ("id", "product", "qty", "tenant_id") ON "orders" TO "app_role"
+// GRANT INSERT ("product", "qty", "tenant_id") ON "orders" TO "app_role"
+// GRANT UPDATE ("qty") ON "orders" TO "app_role"
+// GRANT DELETE ON "orders" TO "app_role"
 ```
 
-## What you must also do
+## Security considerations
 
 p14g is one layer of defence.
 It does not replace database privileges, and it cannot limit how much work a permitted query does.
@@ -69,8 +157,9 @@ It does not replace database privileges, and it cannot limit how much work a per
 - Connect as a role that has been granted only what the policy allows.
   `policy.grants('app_role')` returns the `GRANT` statements for a policy's tables and columns.
   It does not cover sequences that inserted rows take defaults from, or tables a mapper renames statements to.
-- Set `statement_timeout` and `lock_timeout` for that role.
-  A cross join of two large tables you allowed is a valid query.
+- Set a time limit on every query: `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout` on
+  that role.
+  A cross join of two large tables you allowed is a valid query, and p14g does not estimate how long a query will run.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.
