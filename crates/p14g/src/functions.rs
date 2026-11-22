@@ -108,7 +108,8 @@ pub const OTHER: &[&str] = &["gen_random_uuid"];
 /// Functions no policy can allow, in `functions` or in a rule's `filter`, in any schema.
 ///
 /// Each can change the role a statement runs as: `set_config` sets `role` and `session_authorization`, the
-/// others run SQL given as text, which can call it. Postgres 18 has no other built-in function that does either.
+/// others run SQL given as text, which can call it. We know of no other built-in function in Postgres 18 that does
+/// either.
 /// The `dblink` functions are from an extension, and connect as whoever their connection string names.
 pub const FORBIDDEN: &[&str] = &[
     "set_config",
