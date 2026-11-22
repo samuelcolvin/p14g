@@ -26,8 +26,8 @@ make test
 `make setup` drops and recreates everything, so it can be rerun at any time.
 
 Settings are in `p14g_example/settings.py`, a pydantic-settings model read from environment variables prefixed
-`EXAMPLE_` or a `.env` file: `EXAMPLE_ADMIN_DSN`, `EXAMPLE_OWNER_DSN`, `EXAMPLE_UNTRUSTED_DSN`,
-`EXAMPLE_OWNER_POOL_SIZE`, `EXAMPLE_UNTRUSTED_POOL_SIZE` and `EXAMPLE_MAX_ROWS`.
+`EXAMPLE_` or a `.env` file: `EXAMPLE_ADMIN_DSN`, `EXAMPLE_OWNER_DSN`,
+`EXAMPLE_AUTHENTICATOR_DSN`, `EXAMPLE_OWNER_POOL_SIZE`, `EXAMPLE_AUTHENTICATOR_POOL_SIZE` and `EXAMPLE_MAX_ROWS`.
 The defaults match the database `make db` starts.
 
 ```bash
@@ -83,10 +83,22 @@ The filter adds `org_id = <org>` and the `Insert` rules' `extra` sets it.
 - `postgres`, the superuser, is used only by `make setup`.
 - `example_owner` owns the schema and tables. The server uses it to write the audit log.
   Row-level security does not apply to it, since it owns the tables.
-- `example_untrusted` runs p14g's output. It is not a superuser, does not have `BYPASSRLS`, owns nothing, and has
-  `statement_timeout = 2s`. `PUBLIC` has no privileges on the database or on schema `public`.
+- `example_untrusted` has the grants for p14g's output. It cannot log in, is not a superuser, does not have
+  `BYPASSRLS` and owns nothing.
+- `example_authenticator` is what the server's pool for untrusted SQL logs in as. It has no privileges of its own,
+  and is a member of `example_untrusted` `WITH INHERIT FALSE, SET TRUE`: it can switch to that role but does not
+  otherwise get its grants. It has `statement_timeout = 2s` and the other timeouts, since `SET ROLE` does not apply
+  the settings of the role it switches to.
 
-The server keeps a connection pool for each of the two login roles.
+`PUBLIC` has no privileges on the database or on schema `public`.
+
+Each transaction starts with `set_config('role', 'example_untrusted', true)`, which is `SET LOCAL ROLE` with the
+role as a parameter. So one pool serves any number of roles, where a pool per login role would need connections
+for each. This is how PostgREST and Supabase work.
+The authenticator must never be a member of the owner, or of any role with more than untrusted SQL should get.
+A statement that managed to run `SET ROLE` could switch to any role the authenticator is a member of.
+p14g rejects `SET`, `RESET` and `set_config`, and with `RESET ROLE` a statement would only get the authenticator,
+which can read nothing.
 
 ## Notes
 

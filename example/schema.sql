@@ -2,37 +2,49 @@
 -- `policy.grants('example_untrusted')` returns. It drops and recreates everything, so it can be rerun.
 --
 -- `example_owner` owns the tables. The server uses it to write the audit log.
--- `example_untrusted` runs the SQL p14g writes. It owns nothing and cannot bypass row-level security.
+-- `example_untrusted` has the grants for the SQL p14g writes. It cannot log in, owns nothing and cannot bypass
+--   row-level security. An app with several levels of access would have one such role for each.
+-- `example_authenticator` is what the server's pool logs in as. It has no privileges of its own; each transaction
+--   switches to `example_untrusted` with `set_config('role', ..., true)`. One pool serves every such role, however
+--   many there are.
 
 drop schema if exists app cascade;
 -- `drop owned` also removes the roles' privileges, without which `drop role` fails
-do $$ begin
-    if exists (select from pg_roles where rolname = 'example_untrusted') then
-        drop owned by example_untrusted;
-    end if;
-    if exists (select from pg_roles where rolname = 'example_owner') then
-        drop owned by example_owner;
-    end if;
+do $$
+declare
+    r text;
+begin
+    foreach r in array array['example_authenticator', 'example_untrusted', 'example_owner'] loop
+        if exists (select from pg_roles where rolname = r) then
+            execute format('drop owned by %I', r);
+            execute format('drop role %I', r);
+        end if;
+    end loop;
 end $$;
-drop role if exists example_untrusted;
-drop role if exists example_owner;
 
 create role example_owner login password 'owner';
-create role example_untrusted login password 'untrusted'
+create role example_untrusted nologin nosuperuser nocreatedb nocreaterole nobypassrls noreplication;
+create role example_authenticator login password 'authenticator'
     nosuperuser nocreatedb nocreaterole noinherit nobypassrls noreplication connection limit 20;
 
--- Limits for every connection as the untrusted role. p14g does not bound how much work a query does.
-alter role example_untrusted set statement_timeout = '2s';
-alter role example_untrusted set lock_timeout = '1s';
-alter role example_untrusted set idle_in_transaction_session_timeout = '5s';
-alter role example_untrusted set search_path = app;
-alter role example_untrusted set client_encoding = 'UTF8';
+-- The authenticator may switch to the untrusted role, but does not get its privileges until it does.
+-- It must never be a member of `example_owner`: a statement that managed to run `set role` could reach any role
+-- the authenticator is a member of.
+grant example_untrusted to example_authenticator with inherit false, set true;
+
+-- Limits for every connection the server opens. They go on the role that logs in: `set role` does not apply the
+-- settings of the role it switches to. p14g does not bound how much work a query does.
+alter role example_authenticator set statement_timeout = '2s';
+alter role example_authenticator set lock_timeout = '1s';
+alter role example_authenticator set idle_in_transaction_session_timeout = '5s';
+alter role example_authenticator set search_path = app;
+alter role example_authenticator set client_encoding = 'UTF8';
 
 -- Nothing in `public`, and no access to the database except for the two roles.
 revoke all on schema public from public;
 do $$ begin
     execute format('revoke all on database %I from public', current_database());
-    execute format('grant connect on database %I to example_owner, example_untrusted', current_database());
+    execute format('grant connect on database %I to example_owner, example_authenticator', current_database());
 end $$;
 
 create schema app authorization example_owner;

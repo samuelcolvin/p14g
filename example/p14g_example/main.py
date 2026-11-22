@@ -4,7 +4,8 @@ There is no authentication: every request runs as Anne, in org `ORG_ID`. Each on
 
 1. p14g checks the statement against `policy` and rewrites it: tables and columns outside the policy are refused,
    `org_id = ORG_ID` is added for every multi-tenant table, `org_id` is set on inserts, and a `LIMIT` is added.
-2. The statement runs as `example_untrusted`, which has only the grants `policy.grants()` returned.
+2. The statement runs as `example_untrusted`, which has only the grants `policy.grants()` returned. The pool logs
+   in as `example_authenticator`, which has no privileges, and switches to it for each transaction.
 3. Row-level security on the multi-tenant tables reads `app.org_id`, which is set for the transaction only.
 """
 
@@ -22,7 +23,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from p14g import P14gError
 from pydantic import BaseModel
 
-from .policy import ORG_ID, policy
+from .policy import ORG_ID, UNTRUSTED_ROLE, policy
 from .settings import settings
 
 __all__ = ('app',)
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with (
         asyncpg.create_pool(str(settings.owner_dsn), min_size=1, max_size=settings.owner_pool_size) as owner_pool,
         asyncpg.create_pool(
-            str(settings.untrusted_dsn), min_size=1, max_size=settings.untrusted_pool_size
+            str(settings.authenticator_dsn), min_size=1, max_size=settings.authenticator_pool_size
         ) as untrusted_pool,
     ):
         app.state.owner_pool = owner_pool
@@ -91,9 +92,14 @@ async def run_query(
 
     try:
         async with untrusted.acquire() as conn, conn.transaction(readonly=safe.kind == 'select'):
-            # `true`: the setting lasts until the end of this transaction, so it never leaks to the next request on
-            # this pooled connection. p14g does not allow `set_config` in the statement, so it cannot change it.
-            await conn.execute("select set_config('app.org_id', $1, true)", ORG_ID)
+            # The pool logs in as `example_authenticator`, which has no privileges. Switch to the role that has the
+            # grants, and set the org that row-level security reads. `true` makes both last until the end of this
+            # transaction, so neither stays on the pooled connection for the next request. This is `SET LOCAL ROLE`,
+            # but takes the role as a parameter, so an app with many roles can pick one per request.
+            # p14g rejects `SET`, `RESET` and `set_config` in the statement, so it cannot change either.
+            await conn.execute(
+                "select set_config('role', $1, true), set_config('app.org_id', $2, true)", UNTRUSTED_ROLE, ORG_ID
+            )
             stmt = await conn.prepare(safe.sql)
             records = await stmt.fetch()
             columns = [a.name for a in stmt.get_attributes()]

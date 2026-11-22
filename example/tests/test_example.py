@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from p14g_example.db import setup
 from p14g_example.main import app
-from p14g_example.policy import ORG_ID
+from p14g_example.policy import ORG_ID, UNTRUSTED_ROLE
 from p14g_example.settings import settings
 
 
@@ -44,13 +44,18 @@ def query(client: TestClient, sql: str) -> dict[str, Any]:
     return body
 
 
-def untrusted(sql: str, org_id: str | None) -> Any:
-    """Run `sql` as the untrusted role directly, without p14g, to check what Postgres enforces by itself."""
+def untrusted(sql: str, org_id: str | None, role: str | None = UNTRUSTED_ROLE) -> Any:
+    """Run `sql` as the server does, but without p14g, to check what Postgres enforces by itself.
+
+    It connects as the authenticator and switches to `role` for the transaction, unless `role` is `None`.
+    """
 
     async def run() -> Any:
-        conn = await asyncpg.connect(str(settings.untrusted_dsn))
+        conn = await asyncpg.connect(str(settings.authenticator_dsn))
         try:
             async with conn.transaction():
+                if role is not None:
+                    await conn.execute("select set_config('role', $1, true)", role)
                 if org_id is not None:
                     await conn.execute("select set_config('app.org_id', $1, true)", org_id)
                 return await conn.fetch(sql)
@@ -229,3 +234,29 @@ def test_db_with_check():
 def test_db_statement_timeout():
     with pytest.raises(asyncpg.QueryCanceledError):
         untrusted('select pg_sleep(5)', ORG_ID)
+
+
+def test_db_authenticator_has_no_privileges():
+    """Without switching role, the connection the pool opens can read nothing."""
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+        untrusted('select * from app.countries', ORG_ID, role=None)
+
+
+def test_db_authenticator_cannot_become_owner():
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+        untrusted('select 1', ORG_ID, role='example_owner')
+
+
+def test_db_role_ends_with_transaction():
+    async def run() -> tuple[str, str]:
+        conn = await asyncpg.connect(str(settings.authenticator_dsn))
+        try:
+            async with conn.transaction():
+                await conn.execute("select set_config('role', $1, true)", UNTRUSTED_ROLE)
+                inside = await conn.fetchval('select current_user')
+            outside = await conn.fetchval('select current_user')
+        finally:
+            await conn.close()
+        return inside, outside
+
+    assert asyncio.run(run()) == (UNTRUSTED_ROLE, 'example_authenticator')

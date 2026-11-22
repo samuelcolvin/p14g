@@ -18,11 +18,13 @@ class Settings(BaseSettings):
     """A superuser, used only by `setup()`."""
     owner_dsn: PostgresDsn = PostgresDsn('postgres://example_owner:owner@127.0.0.1:54331/example')
     """Owns the tables. The server uses it to write the audit log."""
-    untrusted_dsn: PostgresDsn = PostgresDsn('postgres://example_untrusted:untrusted@127.0.0.1:54331/example')
-    """Runs p14g's output. The role name must match `UNTRUSTED_ROLE` in policy.py."""
+    authenticator_dsn: PostgresDsn = PostgresDsn(
+        'postgres://example_authenticator:authenticator@127.0.0.1:54331/example'
+    )
+    """Runs p14g's output, after switching to `UNTRUSTED_ROLE` in each transaction. Has no privileges of its own."""
 
     owner_pool_size: int = 5
-    untrusted_pool_size: int = 10
+    authenticator_pool_size: int = 10
 
     max_rows: int = 1000
     """Cap on the rows a `SELECT` returns; p14g adds or lowers its `LIMIT`."""
