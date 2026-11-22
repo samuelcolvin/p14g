@@ -49,7 +49,7 @@ Useful options:
 
 ```text
 --model MODEL             model that writes attacking SQL
---focus TEXT              use one attack area instead of rotating through the built-in areas
+--focus TEXT              one area to attack in every round; by default the agent picks an area each round
 --rounds N                number of independent attack rounds
 --turns N                 maximum model requests in each round
 --database-url URL        disposable Postgres server (default: P14G_TEST_DATABASE_URL)

@@ -21,7 +21,7 @@ from pydantic_ai.providers.gateway import gateway_provider  # pyright: ignore[re
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from . import attacker, library
-from .attacker import FOCUS, PACKAGE, Session
+from .attacker import PACKAGE, Session
 from .oracle import Oracle
 
 TRIED_IN_NOTES = 60
@@ -46,10 +46,10 @@ def parse_args() -> argparse.Namespace:
         help='the model that writes the SQL, as a Pydantic AI model name; a `gateway/` model is reached through '
         'the Pydantic AI Gateway with LOGFIRE_API_KEY (default: %(default)s)',
     )
-    parser.add_argument('--rounds', type=int, default=len(FOCUS), help='rounds to run, each on one area of the library')
+    parser.add_argument('--rounds', type=int, default=7, help='rounds to run, each on one area of the library')
     parser.add_argument('--turns', type=int, default=40, help='model requests the agent gets in a round')
     parser.add_argument(
-        '--focus', help='what to attack, in your own words, for every round; the default is a different area each round'
+        '--focus', help='what to attack, in your own words, for every round; by default the agent chooses an area'
     )
     parser.add_argument(
         '--database-url',
@@ -92,9 +92,10 @@ async def run(args: argparse.Namespace) -> int:
             'fuzz run {model}', model=args.model, rounds=args.rounds, directory=str(directory)
         ) as run_span:
             for number in range(1, args.rounds + 1):
-                focus = args.focus or FOCUS[(number - 1) % len(FOCUS)]
-                print(f'round {number} of {args.rounds}: {focus.split(":")[0]}')
-                prompt = f'This round, attack this area:\n\n{focus}\n\nYou have {args.turns} turns.'
+                print(f'round {number} of {args.rounds}')
+                prompt = f'This is round {number} of {args.rounds}. You have {args.turns} turns.'
+                if args.focus:
+                    prompt += f'\n\nThis round, attack this area:\n\n{args.focus}'
                 if notes:
                     prompt += '\n\nSummaries of the rounds before this one:\n\n' + '\n\n'.join(notes)
                 session.round_start = session.attempts
@@ -102,7 +103,7 @@ async def run(args: argparse.Namespace) -> int:
                 tried_before = len(session.tried)
                 # the limit is on the usage it is given, so each round has its own
                 round_usage = RunUsage()
-                with logfire.span('round {number}', number=number, focus=focus) as round_span:
+                with logfire.span('round {number}', number=number, focus=args.focus) as round_span:
                     try:
                         result = await attacker.agent.run(
                             prompt,
@@ -126,7 +127,7 @@ async def run(args: argparse.Namespace) -> int:
                     )
                 usage.incr(round_usage)
                 found = sorted({f'{finding.kind}: {finding.detail.splitlines()[0]}' for finding in session.findings})
-                note = f'## Round {number}: {focus}\n\n{summary}\n\n{session.attempts - session.round_start} statements tried.'
+                note = f'## Round {number}\n\n{summary}\n\n{session.attempts - session.round_start} statements tried.'
                 if found:
                     note += ' Findings recorded so far:\n' + '\n'.join(f'- {line}' for line in found)
                 # kept by the fuzzer, so the next round knows what was tried whether or not the model summarised it

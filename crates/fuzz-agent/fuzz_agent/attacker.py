@@ -19,41 +19,6 @@ from .oracle import Finding, Oracle
 
 PACKAGE = Path(__file__).resolve().parent
 
-# one per round, so that a run covers the library and does not spend itself on the first idea
-FOCUS = [
-    (
-        'The writer (`crates/p14g/src/backend/`): string and identifier escaping, which names are left unquoted, '
-        'keywords, where parentheses are left out, tokens that could run together or start a comment.'
-    ),
-    (
-        'Lowering (`crates/p14g/src/lower/`): syntax sqlparser accepts and Postgres reads differently, constructs '
-        'rewritten on the way (POSITION, SUBSTRING, typed literals, casts), fields of a sqlparser node that are '
-        'dropped or misread, and the input dialect.'
-    ),
-    (
-        'Name resolution (`crates/p14g/src/check.rs`): scopes, CTEs that shadow a table, aliases, derived tables, '
-        'correlated subqueries, whole-row references, system columns, `*` expansion, and columns bound to a table '
-        'other than the one Postgres will pick.'
-    ),
-    (
-        'The row filter on `docs` (`crates/p14g/src/filter.rs`, `Checker::filter_tables`, `Checker::write_filters`): '
-        'every place a table can appear, aliases and CTEs named `docs`, set operations, subqueries inside writes, '
-        'UPDATE and DELETE, and reading or changing rows of another org or status.'
-    ),
-    (
-        'Writes: columns an INSERT may not set, the values p14g adds to every insert, RETURNING, the right-hand side '
-        'of SET, `ONLY family` and its child table, and tables that can only be inserted into.'
-    ),
-    (
-        'Operators, functions and types: the operator list, which leaves out regular expressions, the function allowlist and every overload '
-        'of an allowed name, cast targets, and anything that reads server state or has a side effect.'
-    ),
-    (
-        'Limits and crashes: a panic, a statement that makes `rewrite()` slow, deep or wide input, and a SELECT that '
-        'returns more than `max_rows` rows.'
-    ),
-]
-
 INSTRUCTIONS = """\
 You are testing the security of p14g, at the request of its author, on their own machine and a throwaway database.
 
@@ -108,8 +73,36 @@ yours to change.
   Do not report things the README documents as limits, such as an error raised before a row filter is applied.
 - The database is rebuilt for each run and nothing you do to it is kept.
 
-When you are out of ideas for the area you were given, stop and reply with a short summary: what you tried, what
-p14g did, and what you would try next. On your last turn you may not call `run_code`, and the reply you write then
+## Where to look
+
+A run is several rounds. Spend each round on one area: unless the prompt names one, choose an area the summaries
+of the earlier rounds have not covered, or go deeper where an earlier finding suggests there is more.
+
+These are some of the places where p14g's understanding of SQL and Postgres's could part. The list is not
+complete: the bug worth finding may be somewhere it does not mention, so look beyond it, especially once the
+earlier rounds have covered these.
+
+- The writer (`crates/p14g/src/backend/`): string and identifier escaping, which names are left unquoted,
+  keywords, where parentheses are left out, tokens that could run together or start a comment.
+- Lowering (`crates/p14g/src/lower/`): syntax sqlparser accepts and Postgres reads differently, constructs
+  rewritten on the way (POSITION, SUBSTRING, typed literals, casts), fields of a sqlparser node that are dropped
+  or misread, and the input dialect.
+- Name resolution (`crates/p14g/src/check.rs`): scopes, CTEs that shadow a table, aliases, derived tables,
+  correlated subqueries, whole-row references, system columns, `*` expansion, and columns bound to a table other
+  than the one Postgres will pick.
+- The row filter on `docs` (`crates/p14g/src/filter.rs`, `Checker::filter_tables`, `Checker::write_filters`):
+  every place a table can appear, aliases and CTEs named `docs`, set operations, subqueries inside writes, UPDATE
+  and DELETE, and reading or changing rows of another org or status.
+- Writes: columns an INSERT may not set, the values p14g adds to every insert, RETURNING, the right-hand side of
+  SET, `ONLY family` and its child table, and tables that can only be inserted into.
+- Operators, functions and types: the operator list, which leaves out regular expressions, the function
+  allowlist and every overload of an allowed name, cast targets, and anything that reads server state or has a
+  side effect.
+- Limits and crashes: a panic, a statement that makes `rewrite()` slow, deep or wide input, and a SELECT that
+  returns more than `max_rows` rows.
+
+When you are out of ideas for the round's area, stop and reply with a short summary: which area you chose, what
+you tried, what p14g did, and what you would try next. On your last turn you may not call `run_code`, and the reply you write then
 is that summary. The next round starts from it and nothing else you saw.
 
 ## Start here
