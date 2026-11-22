@@ -57,12 +57,15 @@ class P14gError(ValueError):
 
 @final
 class Select(Generic[_C]):
-    """Allows reading from a table or view.
+    """Allows reading the listed columns of a table or view.
 
     Every mention of a column counts as a read, wherever it is: in the select list, in a `WHERE` or
     `ORDER BY`, or in the `WHERE` of an `UPDATE`.
 
-    Without `columns`, every column is allowed.
+    For security reasons, all column names allowed need to be listed: there is no rule that allows every column,
+    and `'*'` in the list is an error. Postgres reads `t.name` as the function call `name(t)` when `t` has no column `name`, so a name p14g cannot be
+    sure is a column could call any function that takes the table's row. See "Why every column is listed" in the
+    README.
 
     `filter` is a condition every row read through this rule has to meet. It is a function of the context passed
     to `rewrite()` that returns an SQL expression and the values for its `:name` placeholders:
@@ -73,7 +76,8 @@ class Select(Generic[_C]):
     p14g parses the expression and writes each value as an escaped literal; nothing is pasted into the output.
     A list is allowed where the placeholder is the only item of an `IN (...)`. The expression may use
     columns and functions the rule does not otherwise allow, but not a subquery. A filter with no values can be
-    returned, or given, as a plain string.
+    returned, or given, as a plain string. Be as careful with the functions a filter calls as with those added to
+    `Policy(functions=...)`: p14g does not check them.
 
     In a `SELECT` the table is replaced by a subquery with the filter as its `WHERE`. Postgres may evaluate the
     statement's own conditions on a row before the filter's, so an error such as a division by zero can reveal
@@ -88,15 +92,15 @@ class Select(Generic[_C]):
     def __new__(
         cls,
         table: str,
+        columns: Sequence[str],
         *,
-        columns: Sequence[str] | None = None,
         only: bool = False,
         filter: _Filter[_C] | None = None,
     ) -> Select[_C]: ...
     @property
     def table(self) -> str: ...
     @property
-    def columns(self) -> list[str] | None: ...
+    def columns(self) -> list[str]: ...
     @property
     def only(self) -> bool: ...
 
@@ -236,14 +240,17 @@ class Policy(Generic[_C]):
 
     Args:
         rules: What may be read and written.
-        functions: Functions to allow on top of the defaults, as `name` or `schema.name`. Functions that
-            can change the role, `set_config` and those that run SQL such as `query_to_xml`, cannot be allowed.
+        functions: Functions to allow on top of the defaults, as `name` or `schema.name`. Please be extremely
+            careful about adding extra functions here unless you know exactly what they do: one that changes a
+            setting, runs SQL given as text, or is `SECURITY DEFINER` can change the role the statement runs as or
+            get round the policy. `DANGEROUS_FUNCTIONS.md` lists some known dangerous functions; it is not
+            exhaustive.
         deny_functions: Functions to forbid that would otherwise be allowed.
         default_functions: Whether to start from `DEFAULT_FUNCTIONS`.
         operators: The operators a statement may use, on any table and on none.
             The default is everything except regular expressions (`~` and `similar to`).
-        star_behaviour: What to do with `*`. `expand` replaces it with the columns the rule allows, `reject`
-            refuses it, and `allow` leaves it alone but refuses it on a table whose rule lists columns.
+        star_behaviour: What to do with `*`. `expand` replaces it with the columns the rule lists, `reject`
+            refuses it.
         literals: `inline` writes string literals into the SQL, escaped. `params` replaces them with
             placeholders and returns the values in `SafeSql.params`.
         quote_identifiers: `minimal` puts double quotes only around names that need them: anything that is not
@@ -265,7 +272,7 @@ class Policy(Generic[_C]):
         deny_functions: Sequence[str] | None = None,
         default_functions: bool = True,
         operators: Sequence[_Operator] | None = None,
-        star_behaviour: _Literal['expand', 'reject', 'allow'] = 'expand',
+        star_behaviour: _Literal['expand', 'reject'] = 'expand',
         literals: _Literal['inline', 'params'] = 'inline',
         quote_identifiers: _Literal['minimal', 'always'] = 'minimal',
         layout: _Literal['multiline', 'dense'] = 'multiline',

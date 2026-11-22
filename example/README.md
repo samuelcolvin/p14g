@@ -77,7 +77,7 @@ All tables are in schema `app`, owned by `example_owner`. See `schema.sql`.
 
 | table | untrusted SQL may |
 |---|---|
-| `countries` | read every row |
+| `countries` | read `code` and `name` of every row |
 | `organisations` | read `id` and `name` of its own org; not `plan` or `stripe_customer_id` |
 | `users` | read `id`, `name`, `email`, `created_at` in its own org; not `password_hash` |
 | `projects` | read, insert, update and delete in its own org |

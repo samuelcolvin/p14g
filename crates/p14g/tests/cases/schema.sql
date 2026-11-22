@@ -43,6 +43,15 @@ INSERT INTO app.events VALUES (1, 'click', 'x');
 INSERT INTO limited VALUES (1, 2, 3);
 INSERT INTO secrets VALUES (1, 'hunter2');
 
+-- Postgres reads `t.reset_role` as the call `reset_role(t)` when `t` has no column of that name, which is why
+-- every select rule lists its columns. These would reset the role, and PUBLIC can execute them as it can any
+-- new function; `tests/postgres.rs` checks that no accepted statement changes the role.
+CREATE FUNCTION reset_role(orders) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+CREATE FUNCTION reset_role(customers) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+CREATE FUNCTION reset_role(v) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+CREATE FUNCTION reset_role(cheap_orders) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+CREATE FUNCTION reset_role(scoped) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+
 -- grants that say the same thing as the policy in tests/common/mod.rs
 GRANT USAGE ON SCHEMA app TO p14g_test_role;
 GRANT SELECT (id, product, qty, customer_id) ON orders TO p14g_test_role;
@@ -51,12 +60,12 @@ GRANT UPDATE (qty) ON orders TO p14g_test_role;
 GRANT DELETE ON orders TO p14g_test_role;
 GRANT USAGE ON SEQUENCE orders_id_seq TO p14g_test_role;
 GRANT SELECT (id, name) ON customers TO p14g_test_role;
-GRANT SELECT ON v TO p14g_test_role;
+GRANT SELECT (id, product, qty, created, data, tags, "a""b", "MiXed") ON v TO p14g_test_role;
 GRANT SELECT (id, kind) ON app.events TO p14g_test_role;
 GRANT SELECT (a, b) ON limited TO p14g_test_role;
 GRANT INSERT (message, tenant_id) ON audit TO p14g_test_role;
 GRANT USAGE ON SEQUENCE audit_id_seq TO p14g_test_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO p14g_test_role;
+GRANT SELECT (id, product, qty), INSERT, UPDATE, DELETE ON cheap_orders TO p14g_test_role;
 GRANT SELECT (id, label), INSERT (id, label), UPDATE (label), DELETE ON family TO p14g_test_role;
 GRANT SELECT (id, val, org), INSERT (id, val, org), UPDATE (val), DELETE ON scoped TO p14g_test_role;
 GRANT SELECT (id, val) ON scoped_rls TO p14g_test_role;

@@ -149,7 +149,6 @@ fn postgres_agrees() {
     literals_round_trip(&mut client);
     identifiers_round_trip(&mut client);
     views_enforce_rows(&mut client);
-    star_allow(&mut client);
     only_leaves_out_children(&mut client);
     default_schema_is_not_shadowed(&mut client);
     generated_grants(&mut client);
@@ -169,10 +168,23 @@ fn role_changes_are_caught(client: &mut Client) {
         "SELECT set_config('role', 'none', true)",
         "SET LOCAL search_path = pg_catalog",
         "SET LOCAL row_security = off",
+        // What p14g would write for `select reset_role from v` if a rule could allow every column: Postgres reads it
+        // as `reset_role(v)`. The rule for `v` lists all of its columns, so the grants allow the whole row.
+        "SELECT v.reset_role FROM v",
     ] {
         let result = panic::catch_unwind(AssertUnwindSafe(|| run(client, sql, &[])));
         assert!(result.is_err(), "the role check in `run` did not notice {sql}");
     }
+    // The same on `orders`, whose rule leaves columns out: the call passes the whole row, which the grants refuse.
+    // So the grants stop this only for tables where some column is not granted; p14g has to stop it everywhere.
+    let sql = "SELECT orders.reset_role FROM orders";
+    let error = run(client, sql, &[]).expect_err(sql);
+    assert_eq!(
+        error.code().map(SqlState::code),
+        Some("42501"),
+        "{sql}: {}",
+        describe(&error)
+    );
     // the panics dropped their transactions, which rolled them back
     let mut transaction = client.transaction().unwrap();
     transaction.batch_execute(&format!("SET LOCAL ROLE {ROLE}")).unwrap();
@@ -287,19 +299,6 @@ fn views_enforce_rows(client: &mut Client) {
         let error = run_ok(client, sql).expect_err(sql);
         assert_eq!(error.code().map(SqlState::code), Some("44000"), "{sql}");
     }
-}
-
-/// `Star::Allow` passes `*` through, which is only sound because it is refused for tables with a column list.
-fn star_allow(client: &mut Client) {
-    let policy: Policy = common::builder()
-        .star_behaviour(p14g::Star::Allow)
-        .literals(Literals::Inline)
-        .build()
-        .unwrap();
-    let safe = policy.rewrite("select * from v", &()).unwrap();
-    assert_eq!(safe.sql, "SELECT * FROM v");
-    assert_eq!(run(client, &safe.sql, &[]).unwrap(), 3);
-    assert!(policy.rewrite("select * from orders", &()).is_err());
 }
 
 fn describe(error: &postgres::Error) -> String {
@@ -432,7 +431,7 @@ fn keywords_and_quoting(client: &mut Client) {
     // read something else or refuse it.
     for quote in [QuoteIdentifiers::Minimal, QuoteIdentifiers::Always] {
         let policy: Policy = Policy::builder()
-            .select(Select::table("t"))
+            // `t` is the CTE in each statement, which needs no rule
             .quote_identifiers(quote)
             .layout(Layout::Dense)
             .build()
@@ -544,8 +543,8 @@ fn filters_restrict_rows(client: &mut Client) {
     let org = |org: &i64| Filter::new("org = :org").bind("org", *org);
     let policy: Policy<i64> = Policy::builder()
         .layout(Layout::Dense)
-        .select(Select::table("scoped").columns(["id", "val"]).filter(org))
-        .select(Select::table("customers").columns(["id", "name"]))
+        .select(Select::table("scoped", ["id", "val"]).filter(org))
+        .select(Select::table("customers", ["id", "name"]))
         .insert(
             Insert::table("scoped")
                 .columns(["id", "val"])
@@ -636,11 +635,10 @@ fn filters_are_not_a_security_barrier(client: &mut Client) {
         .layout(Layout::Dense)
         .literals(Literals::Inline)
         .select(
-            Select::table("scoped")
-                .columns(["id", "val"])
+            Select::table("scoped", ["id", "val"])
                 .filter(|()| Filter::new("org in (:orgs)").bind("orgs", ORGS.to_vec())),
         )
-        .select(Select::table("scoped_rls").columns(["id", "val"]))
+        .select(Select::table("scoped_rls", ["id", "val"]))
         .build()
         .unwrap();
     let run_with_rls = |client: &mut Client, sql: &str| -> Result<usize, postgres::Error> {

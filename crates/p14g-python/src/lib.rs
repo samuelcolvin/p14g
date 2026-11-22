@@ -59,16 +59,15 @@ fn generic_alias<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyR
 
 // ------------------------------------------------------------------ rules
 
-/// Allows reading from a table or view.
+/// Allows reading the listed columns of a table or view.
 ///
-/// Every mention of a column counts as a read, wherever it is: in the select list, in a `WHERE` or
-/// `ORDER BY`, or in the `WHERE` of an `UPDATE`.
+/// For security reasons, all column names allowed need to be listed: see `p14g.pyi`.
 #[pyclass(frozen, module = "p14g", name = "Select")]
 struct PySelect {
     #[pyo3(get)]
     table: String,
     #[pyo3(get)]
-    columns: Option<Vec<String>>,
+    columns: Vec<String>,
     #[pyo3(get)]
     only: bool,
     filter: Option<Py<PyAny>>,
@@ -83,11 +82,11 @@ impl PySelect {
     }
 
     #[new]
-    #[pyo3(signature = (table, *, columns=None, only=false, filter=None))]
+    #[pyo3(signature = (table, columns, *, only=false, filter=None))]
     fn new(
         py: Python<'_>,
         table: String,
-        columns: Option<Vec<String>>,
+        columns: Vec<String>,
         only: bool,
         filter: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
@@ -104,7 +103,7 @@ impl PySelect {
         format!(
             "Select({:?}, columns={}, only={})",
             self.table,
-            repr_list(self.columns.as_ref()),
+            repr_list(Some(&self.columns)),
             repr_bool(self.only)
         )
     }
@@ -612,10 +611,7 @@ fn add_rule(
 ) -> PyResult<PolicyBuilder<Context>> {
     if let Ok(select) = rule.cast::<PySelect>() {
         let select = select.get();
-        let mut rule = p14g::Select::table(&select.table).only(select.only);
-        if let Some(columns) = &select.columns {
-            rule = rule.columns(columns);
-        }
+        let mut rule = p14g::Select::table(&select.table, &select.columns).only(select.only);
         if let Some(filter) = &select.filter {
             let filter = filter.clone_ref(py);
             rule = rule.try_filter(move |context: &Context| python_filter(&filter, context));

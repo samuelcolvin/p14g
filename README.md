@@ -121,7 +121,7 @@ fn by_tenant(r: &Request) -> Filter {
 }
 
 let policy: Policy<Request> = Policy::builder()
-    .select(Select::table("orders").columns(["id", "product", "qty"]).filter(by_tenant))
+    .select(Select::table("orders", ["id", "product", "qty"]).filter(by_tenant))
     .insert(Insert::table("orders").columns(["product", "qty"]).extra(|r: &Request| [("tenant_id", r.tenant_id)]))
     .update(Update::table("orders").columns(["qty"]).filter(by_tenant))
     .delete(Delete::table("orders").filter(by_tenant))
@@ -182,11 +182,16 @@ It does not replace database privileges, and it cannot limit how much work a per
 - p14g's output cannot change the role it runs as.
   It rejects `SET`, `RESET`, `DISCARD` and transaction control such as `COMMIT` and `ROLLBACK TO SAVEPOINT`, which
   would undo a `SET LOCAL ROLE`.
-  A policy cannot allow `set_config`, the built-in functions that run SQL given as text (`query_to_xml`,
-  `query_to_xml_and_xmlschema`, `ts_stat`, `ts_rewrite`) or `dblink`, in `functions=[...]` or in a filter, or an
-  `UPDATE` of `pg_settings`.
-  A function of your own can still do it if it is `SECURITY DEFINER` or changes settings itself, so do not add one
-  that does.
+  None of the default functions can change it, and p14g only writes names a `Select` rule lists as columns (see
+  [Why every column is listed](#why-every-column-is-listed)).
+  A function you add with `functions=[...]` or call in a filter can change it: `set_config`, anything that runs SQL
+  given as text such as `query_to_xml`, and anything `SECURITY DEFINER`.
+  Please be extremely careful about adding extra functions unless you know exactly what they do.
+  [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) lists some known dangerous functions; it is not exhaustive.
+- Revoke `EXECUTE` on your own functions from `PUBLIC`, and grant it back only where it is needed.
+  Postgres gives `PUBLIC` `EXECUTE` on every new function, and p14g's checks are the only thing between the SQL author
+  and them.
+  `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` does the same for functions created later.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.
@@ -234,7 +239,7 @@ A statement is rejected unless a rule allows it.
 
 | Rule | Allows |
 | --- | --- |
-| `Select(table, columns=None, only=False, filter=None)` | Reading the listed columns, or any column without `columns`. |
+| `Select(table, columns, only=False, filter=None)` | Reading the listed columns. |
 | `Insert(table, columns=None, extra=None)` | `INSERT ... VALUES` setting the listed columns. |
 | `Update(table, columns=None, allow_unfiltered=False, only=False, filter=None)` | `UPDATE ... SET` on the listed columns. |
 | `Delete(table, allow_unfiltered=False, only=False, filter=None)` | `DELETE FROM`. |
@@ -261,27 +266,52 @@ A statement is rejected unless a rule allows it.
 ### Columns
 
 p14g has no access to your schema.
-A table has the columns its rules list, or an unknown set of columns when a rule allows all of them.
+A table has the columns its rules list, and for security reasons every column allowed has to be listed.
+`'*'` in a `Select` rule's columns is an error.
 
 Every column reference is written fully qualified, `table.column`.
 If Postgres would have resolved a name differently from p14g, the rewritten query fails in the database.
-An unqualified name is bound to the table whose rule lists it, or, when no rule lists it, to the one table whose rule
-allows all columns.
-A name that two rules list, or that no rule lists when two tables allow all columns, is rejected; qualify it.
-A name that one rule lists is bound to that table even when another table allows all columns.
-Postgres would call the name ambiguous if that table has the column too, but the output reads the listed column,
-which the policy allows.
+An unqualified name is bound to the table whose rule lists it.
+A name that two rules list is rejected; qualify it.
+A name that one rule lists is bound to that table even if another table has an unlisted column of that name.
+Postgres would call the name ambiguous then, but the output reads the listed column, which the policy allows.
 
 Whole-row references such as `SELECT orders FROM orders` or `row_to_json(o)` are rejected, because `orders` is not a
 column.
-Against a table whose rule allows all columns, `SELECT v FROM v` reads `v` as a column and is written `v.v`, which
-fails in the database unless the table has a column `v`.
+System columns such as `ctid` and `xmin` are rejected unless a rule lists them.
 
 `star_behaviour` controls `*`:
 
-- `expand` (default): `*` becomes the columns the rule lists. For a rule that allows all columns it becomes `t.*`.
+- `expand` (default): `*` becomes the columns the rule lists.
 - `reject`: `*` is an error.
-- `allow`: `*` is left as it is, and is an error on a table whose rule lists columns.
+
+#### Why every column is listed
+
+Postgres reads `t.name` as the function call `name(t)` when `t` has no column called `name`.
+This is its "functional notation", and it works for any function that takes one argument of the table's row type, or
+of a type that accepts any row, such as `record` or `anyelement`:
+
+```sql
+CREATE FUNCTION reset_role(orders) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+
+SET ROLE restricted;
+SELECT orders.reset_role FROM orders;  -- calls reset_role(orders)
+SELECT current_user;                   -- no longer restricted
+```
+
+No spelling of a column reference avoids it: `"orders"."reset_role"`, `(orders).reset_role` and a subquery around the
+table all call the function.
+If a rule could allow every column, p14g could not tell a real column from a function, and a statement could call any
+such function on the `search_path`, without `functions=[...]` allowing it.
+That includes functions that change the role, functions that are `SECURITY DEFINER`, and built-ins such as
+`row_to_json`.
+Column grants are no defence on their own: the call passes the whole row, which they refuse only when some column of
+the table is not granted.
+
+With every column listed, the only names p14g writes after a table are ones you wrote down as columns, and Postgres
+reads a name that is a column as the column.
+A listed name that is not really a column of the table would still be read as a call, but `policy.grants()` catches
+that: `GRANT SELECT (name) ON t` fails if `t` has no column `name`, so running the grants checks every list.
 
 ### Operators
 
@@ -297,6 +327,12 @@ where those may appear.
 `WHERE sum(qty) > 1`, `rank()` without `OVER` and `lower(product) OVER ()` are accepted and fail in the database.
 `p14g.DEFAULT_FUNCTIONS` (`p14g::functions` in Rust) is allowed unless you pass `default_functions=False`.
 `functions=[...]` adds names and `deny_functions=[...]` removes them.
+
+Please be extremely careful about adding extra functions unless you know exactly what they do.
+p14g cannot see inside a function, and it allows whatever you add, as it does whatever a filter calls.
+A function that changes a setting, runs SQL given as text, or is `SECURITY DEFINER` can change the role the statement
+runs as or get round the policy.
+[DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) lists some known dangerous functions and why; it is not exhaustive.
 
 The defaults have no side effects, read nothing but their arguments, and cannot be made to allocate much more than
 their input.
@@ -455,7 +491,7 @@ relies on `AND` and `OR` binding more loosely than comparisons.
 ```python
 from p14g import Policy, Select
 
-policy = Policy(Select('orders'))
+policy = Policy(Select('orders', ['id', 'user', 'qty', 'a', 'b']))
 print(policy.rewrite('select id, "user" as "user" from orders where (qty + 1) * 2 > 4 and (a = 1 or b is null)').sql)
 """
 SELECT orders.id, orders.user AS "user"
@@ -511,7 +547,9 @@ Row-level security on its own has gaps that a filter covers:
 - The policy usually reads the user from a setting.
   Set it with `set_config(..., true)` or `SET LOCAL` inside the transaction: a plain `SET` stays on a pooled connection
   for the next client.
-  p14g rejects `SET` and never allows `set_config`, which is what stops the statement changing the setting itself.
+  p14g rejects `SET`, and `set_config` is not a default function, which is what stops the statement changing the
+  setting itself.
+  Do not add it with `functions=[...]`.
 
 Use both, with the same condition:
 

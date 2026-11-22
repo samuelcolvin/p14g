@@ -20,7 +20,7 @@ def add_tenant(context: dict[str, Any]) -> dict[str, Any]:
 def fixture_policy() -> Policy:
     return DensePolicy(
         Select('orders', columns=['id', 'product', 'qty']),
-        Select('v'),
+        Select('v', ['id', 'name']),
         Insert('orders', columns=['product', 'qty'], extra=add_tenant),
         Update('orders', columns=['qty']),
         Delete('orders'),
@@ -40,7 +40,7 @@ def test_select(policy: Policy):
 
 def test_star_is_expanded(policy: Policy):
     assert policy.rewrite('select * from orders').sql == ('SELECT orders.id, orders.product, orders.qty FROM orders')
-    assert policy.rewrite('select * from v').sql == 'SELECT v.* FROM v'
+    assert policy.rewrite('select * from v').sql == 'SELECT v.id, v.name FROM v'
 
 
 @pytest.mark.parametrize(
@@ -195,7 +195,9 @@ def test_allow(policy: Policy):
 
 
 def test_functions():
-    policy = DensePolicy(Select('orders'), functions=['app.order_total'], deny_functions=['random', 'now'])
+    policy = DensePolicy(
+        Select('orders', ['id', 'product']), functions=['app.order_total'], deny_functions=['random', 'now']
+    )
     assert policy.rewrite('select app.order_total(id), lower(product) from orders').sql == (
         'SELECT app.order_total(orders.id), lower(orders.product) FROM orders'
     )
@@ -206,23 +208,39 @@ def test_functions():
     with pytest.raises(P14gError, match='cannot deny function "pg_sleep": it is not an allowed function'):
         DensePolicy(deny_functions=['pg_sleep'])
 
-    bare = DensePolicy(Select('orders'), default_functions=False)
+    bare = DensePolicy(Select('orders', ['id']), default_functions=False)
     with pytest.raises(P14gError, match='function "count" is not allowed'):
         bare.rewrite('select count(*) from orders')
 
 
 def test_role_cannot_change():
-    for function in 'set_config', 'pg_catalog.set_config', 'query_to_xml', 'public.dblink_exec':
-        with pytest.raises(P14gError, match=f'cannot allow function "{function}"') as exc_info:
-            DensePolicy(functions=[function])
-        assert exc_info.value.kind == 'config'
-    with pytest.raises(P14gError, match='cannot allow updates to "pg_settings"'):
-        DensePolicy(Update('pg_settings', columns=['setting']))
-
-    policy = DensePolicy(Select('orders'))
-    for sql in 'set role postgres', 'reset role', 'commit', "select set_config('role', 'none', false)":
+    policy = DensePolicy(Select('orders', ['id']))
+    for sql in (
+        'set role postgres',
+        'reset role',
+        'commit',
+        "select set_config('role', 'none', false)",
+        # Postgres would read `orders.reset_role` as the call `reset_role(orders)`
+        'select reset_role from orders',
+        'select o.row_to_json from orders o',
+    ):
         with pytest.raises(P14gError):
             policy.rewrite(sql)
+
+    with pytest.raises(TypeError):
+        Select('orders')  # pyright: ignore[reportCallIssue]
+    with pytest.raises(P14gError, match='the select rule for table "orders" lists no columns') as exc_info:
+        DensePolicy(Select('orders', []))
+    assert exc_info.value.kind == 'config'
+    with pytest.raises(P14gError) as exc_info:
+        DensePolicy(Select('orders', ['id', '*']))
+    assert exc_info.value.message == (
+        'the select rule for table "orders" lists "*": for security reasons a select rule must list each column it '
+        'allows by name, see "Why every column is listed" in the README'
+    )
+    assert exc_info.value.kind == 'config'
+    with pytest.raises(P14gError, match='leave out `columns` to allow every column'):
+        DensePolicy(Update('orders', columns=['*']))
 
     assert 'count' in p14g.DEFAULT_FUNCTIONS
     assert 'pg_sleep' not in p14g.DEFAULT_FUNCTIONS
@@ -230,7 +248,7 @@ def test_role_cannot_change():
 
 
 def test_operators():
-    policy = DensePolicy(Select('orders'), operators=['=', 'and'])
+    policy = DensePolicy(Select('orders', ['id', 'qty', 'product']), operators=['=', 'and'])
     assert policy.rewrite('select id from orders where id = 1 and qty = 2').kind == 'select'
     with pytest.raises(P14gError, match='operator not allowed: <'):
         policy.rewrite('select id from orders where id < 1')
@@ -241,30 +259,27 @@ def test_operators():
         policy.rewrite('select 1 < 2')
 
     with pytest.raises(P14gError, match='operator not allowed: ~'):
-        DensePolicy(Select('orders')).rewrite("select id from orders where product ~ 'x'")
-    regex = DensePolicy(Select('orders'), operators=['~'])
+        DensePolicy(Select('orders', ['id', 'product'])).rewrite("select id from orders where product ~ 'x'")
+    regex = DensePolicy(Select('orders', ['id', 'product']), operators=['~'])
     assert regex.rewrite("select id from orders where product ~ 'x'").kind == 'select'
 
     with pytest.raises(P14gError, match='unknown operator "xor"') as exc_info:
         DensePolicy(operators=['xor'])  # pyright: ignore[reportArgumentType]
     assert exc_info.value.kind == 'config'
     with pytest.raises(TypeError, match='operators'):
-        Select('orders', operators=['='])  # pyright: ignore[reportCallIssue]
+        Select('orders', ['id'], operators=['='])  # pyright: ignore[reportCallIssue]
 
 
 def test_star_behaviour():
     with pytest.raises(P14gError, match=r'\* is not allowed, list the columns'):
-        DensePolicy(Select('v'), star_behaviour='reject').rewrite('select * from v')
-    allow = DensePolicy(Select('v'), Select('orders', columns=['id']), star_behaviour='allow')
-    assert allow.rewrite('select * from v').sql == 'SELECT * FROM v'
-    with pytest.raises(P14gError, match='only some of its columns are allowed'):
-        allow.rewrite('select * from orders')
-    with pytest.raises(P14gError, match='unknown star behaviour "maybe"'):
-        DensePolicy(star_behaviour='maybe')  # pyright: ignore[reportArgumentType]
+        DensePolicy(Select('v', ['id']), star_behaviour='reject').rewrite('select * from v')
+    for behaviour in 'maybe', 'allow':
+        with pytest.raises(P14gError, match=f'unknown star behaviour "{behaviour}"'):
+            DensePolicy(star_behaviour=behaviour)  # pyright: ignore[reportArgumentType]
 
 
 def test_params():
-    policy = DensePolicy(Select('orders'), literals='params')
+    policy = DensePolicy(Select('orders', ['id', 'product', 'qty', 'note']), literals='params')
     safe = policy.rewrite("select id from orders where product = 'tea' and qty = $1 and note = 'it''s'")
     assert safe.sql == (
         'SELECT orders.id FROM orders WHERE orders.product = $2 AND orders.qty = $1 AND orders.note = $3'
@@ -275,11 +290,11 @@ def test_params():
 
 
 def test_max_rows_dialect_limits():
-    policy = DensePolicy(Select('orders'), max_rows=10)
+    policy = DensePolicy(Select('orders', ['id']), max_rows=10)
     assert policy.rewrite('select id from orders').sql == 'SELECT orders.id FROM orders LIMIT 10'
     assert policy.rewrite('select id from orders limit 3').sql == 'SELECT orders.id FROM orders LIMIT 3'
 
-    mysql = DensePolicy(Select('orders'), dialect='mysql')
+    mysql = DensePolicy(Select('orders', ['id']), dialect='mysql')
     assert mysql.rewrite('select `id` from `orders`').sql == 'SELECT orders.id FROM orders'
     with pytest.raises(P14gError, match='unknown dialect "oracle"'):
         DensePolicy(dialect='oracle')  # pyright: ignore[reportArgumentType]
@@ -289,7 +304,7 @@ def test_max_rows_dialect_limits():
     assert limits.max_joins == 0
     assert limits.max_depth == 50
     assert repr(limits).startswith('Limits(max_sql_bytes=30, max_depth=50, ')
-    tight = DensePolicy(Select('orders'), limits=limits)
+    tight = DensePolicy(Select('orders', ['id', 'qty']), limits=limits)
     with pytest.raises(P14gError, match='SQL is 38 bytes, the limit is 30') as exc_info:
         tight.rewrite('select id from orders where qty > 1000')
     assert exc_info.value.kind == 'limit'
@@ -301,7 +316,7 @@ def test_rules():
     select = Select('orders', columns=('id', 'qty'))
     assert (select.table, select.columns) == ('orders', ['id', 'qty'])
     assert repr(select) == 'Select("orders", columns=["id", "qty"], only=False)'
-    assert repr(Select('v')) == 'Select("v", columns=None, only=False)'
+    assert repr(Select('v', ['a'])) == 'Select("v", columns=["a"], only=False)'
     insert = Insert('orders', columns=['id'])
     assert (insert.table, insert.columns) == ('orders', ['id'])
     assert repr(insert) == 'Insert("orders", columns=["id"])'
@@ -317,7 +332,7 @@ def test_rules():
     with pytest.raises(TypeError):
         Select('orders', columns='id')
     with pytest.raises(P14gError, match='invalid table name "a.b.c"') as exc_info:
-        DensePolicy(Select('a.b.c'))
+        DensePolicy(Select('a.b.c', ['a']))
     assert exc_info.value.kind == 'config'
 
 
@@ -330,7 +345,7 @@ def test_rules_cannot_be_pickled():
     import copy
     import pickle
 
-    for value in Select('a'), DensePolicy():
+    for value in Select('a', ['b']), DensePolicy():
         with pytest.raises(TypeError, match='cannot pickle'):
             pickle.dumps(value)
         with pytest.raises(TypeError, match='cannot pickle'):
@@ -338,7 +353,7 @@ def test_rules_cannot_be_pickled():
 
 
 def test_rules_are_immutable():
-    for value, attribute in (Select('a'), 'table'), (Limits(), 'max_depth'):
+    for value, attribute in (Select('a', ['b']), 'table'), (Limits(), 'max_depth'):
         with pytest.raises(AttributeError):
             setattr(value, attribute, 'x')
     safe = DensePolicy().rewrite('select 1')
@@ -360,7 +375,7 @@ def test_context_is_passed_through_unchanged():
         seen.append(context)
         return {}
 
-    policy = DensePolicy(Select('t', filter=filter), Insert('t', extra=extra))
+    policy = DensePolicy(Select('t', ['a'], filter=filter), Insert('t', extra=extra))
     policy.rewrite('insert into t (a) values (1)', context=marker)
     assert seen == [marker]
     seen.clear()
@@ -406,7 +421,7 @@ def test_extra_values():
 
 
 def test_policy_can_be_used_from_a_callback():
-    inner = DensePolicy(Select('v'))
+    inner = DensePolicy(Select('v', ['a']))
 
     def nested(context: Any) -> dict[str, Any]:
         return {'b': inner.rewrite('select a from v').sql}
@@ -458,7 +473,7 @@ def test_threads():
 
 
 def test_check_arguments():
-    policy = DensePolicy(Select('v'))
+    policy = DensePolicy(Select('v', ['a']))
     with pytest.raises(TypeError):
         policy.rewrite(b'select 1')  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError):
@@ -482,7 +497,7 @@ def test_policy_arguments():
     with pytest.raises(TypeError):
         DensePolicy(limits={'max_depth': 1})  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError):
-        DensePolicy(Select('v'), Select)  # pyright: ignore[reportArgumentType]
+        DensePolicy(Select('v', ['a']), Select)  # pyright: ignore[reportArgumentType]
     with pytest.raises((TypeError, OverflowError)):
         DensePolicy(max_rows=-1)
     with pytest.raises((TypeError, OverflowError)):
@@ -508,7 +523,7 @@ def test_all_limits():
     ) == (65536, 50, 10000, 8, 16, 8, 1000, 200, 1000)
 
     def rejected(sql: str, **limits: int) -> str:
-        policy = DensePolicy(Select('v'), Insert('v'), limits=Limits(**limits))
+        policy = DensePolicy(Select('v', ['a', 'b', 'c']), Insert('v'), limits=Limits(**limits))
         with pytest.raises(P14gError) as exc_info:
             policy.rewrite(sql)
         assert exc_info.value.kind == 'limit'
@@ -550,7 +565,7 @@ def test_only():
         Update('family', only=True),
         Delete('family', only=True),
         Insert('family'),
-        Select('orders'),
+        Select('orders', ['id']),
         Update('orders'),
     )
     assert policy.rewrite('select * from family f where id = 1').sql == (
@@ -572,14 +587,14 @@ def test_only():
     assert policy.rewrite('select id from orders').sql == 'SELECT orders.id FROM orders'
     assert policy.rewrite('select id from only family').sql == 'SELECT "family".id FROM ONLY "family"'
 
-    rules = Select('t', only=True), Update('t', only=True), Delete('t', only=True)
+    rules = Select('t', ['a'], only=True), Update('t', only=True), Delete('t', only=True)
     assert [rule.only for rule in rules] == [True, True, True]
     assert repr(rules[2]) == 'Delete("t", allow_unfiltered=False, only=True)'
-    assert not Select('t').only
+    assert not Select('t', ['a']).only
 
     for mismatched in (
-        [Select('t', only=True), Select('t')],
-        [Select('t'), Update('t', only=True)],
+        [Select('t', ['a'], only=True), Select('t', ['a'])],
+        [Select('t', ['a']), Update('t', only=True)],
         [Update('t', only=True), Delete('t')],
     ):
         with pytest.raises(P14gError, match='the rules for table "t" disagree about `only`') as exc_info:
@@ -607,7 +622,7 @@ def test_default_schema():
 def test_grants():
     policy = DensePolicy(
         Select('orders', columns=['id', 'qty']),
-        Select('app.events'),
+        Select('app.events', ['id', 'kind']),
         Insert('orders', columns=['qty'], extra=add_tenant),
         Update('orders', columns=['qty']),
         Delete('orders'),
@@ -618,7 +633,7 @@ def test_grants():
         'GRANT INSERT ("qty", "tenant_id", "created_by") ON "orders" TO "app_role"',
         'GRANT UPDATE ("qty") ON "orders" TO "app_role"',
         'GRANT DELETE ON "orders" TO "app_role"',
-        'GRANT SELECT ON "app"."events" TO "app_role"',
+        'GRANT SELECT ("id", "kind") ON "app"."events" TO "app_role"',
     ]
     # `extra` is called to learn its columns, so it needs a context it can work with
     with pytest.raises(P14gError) as exc_info:
@@ -629,15 +644,16 @@ def test_grants():
         policy.grants('', context={'tenant_id': 1, 'user': 'sam'})
     assert exc_info.value.kind == 'config'
     assert DensePolicy().grants('r') == []
-    assert DensePolicy(Select('t'), default_schema='s').grants('we"ird') == [
+    assert DensePolicy(Select('t', ['a']), default_schema='s').grants('we"ird') == [
         'GRANT USAGE ON SCHEMA "s" TO "we""ird"',
-        'GRANT SELECT ON "s"."t" TO "we""ird"',
+        'GRANT SELECT ("a") ON "s"."t" TO "we""ird"',
     ]
 
 
 def test_quote_identifiers():
-    minimal = Policy(Select('orders'), layout='dense')
-    always = Policy(Select('orders'), layout='dense', quote_identifiers='always')
+    columns = ['id', 'user', 'Mixed', 'with space', 'name', 'a']
+    minimal = Policy(Select('orders', columns), layout='dense')
+    always = Policy(Select('orders', columns), layout='dense', quote_identifiers='always')
     sql = 'select id, "user", "Mixed", "with space", name as "select", 1 as plain from orders o where "user" = 1'
     # only what needs quoting: anything not plain lower case, and keywords where they are not after a dot
     assert minimal.rewrite(sql).sql == (
@@ -648,7 +664,7 @@ def test_quote_identifiers():
         'FROM "orders" AS "o" WHERE "o"."user" = 1'
     )
     # a table called `user` must be quoted, or Postgres reads the current role
-    users = Policy(Select('user'), layout='dense')
+    users = Policy(Select('user', ['id']), layout='dense')
     assert users.rewrite('select id from "user"').sql == 'SELECT "user".id FROM "user"'
     assert minimal.rewrite('select lower(a), left(a, 1) from orders').sql == (
         'SELECT lower(orders.a), left(orders.a, 1) FROM orders'
@@ -657,11 +673,19 @@ def test_quote_identifiers():
         Policy(quote_identifiers='never')  # pyright: ignore[reportArgumentType]
     assert exc_info.value.kind == 'config'
     # grants are always quoted
-    assert minimal.grants('app') == ['GRANT SELECT ON "orders" TO "app"']
+    assert minimal.grants('app') == [
+        'GRANT SELECT ("id", "user", "Mixed", "with space", "name", "a") ON "orders" TO "app"'
+    ]
 
 
 def test_layout():
-    policy = Policy(Select('orders'), Select('customers'), Insert('orders'), Update('orders'), Delete('orders'))
+    policy = Policy(
+        Select('orders', ['id', 'qty', 'cid', 'a', 'b']),
+        Select('customers', ['id', 'name']),
+        Insert('orders'),
+        Update('orders'),
+        Delete('orders'),
+    )
     assert policy.rewrite(
         'with big as (select id from orders where qty > 1) '
         'select o.id, c.name, count(*) from orders o join customers c on c.id = o.cid left join big on big.id = o.id '
@@ -692,7 +716,7 @@ def test_layout():
     assert policy.rewrite('delete from orders where id = 1').sql == 'DELETE FROM orders\nWHERE orders.id = 1'
     assert policy.rewrite('select 1').sql == 'SELECT 1'
 
-    dense = Policy(Select('orders'), layout='dense')
+    dense = Policy(Select('orders', ['id', 'qty', 'cid', 'a', 'b']), layout='dense')
     assert dense.rewrite('select id from orders where qty > 1 order by id').sql == (
         'SELECT orders.id FROM orders WHERE orders.qty > 1 ORDER BY orders.id'
     )
@@ -702,7 +726,7 @@ def test_layout():
 
 
 def test_parentheses():
-    policy = Policy(Select('t'), layout='dense')
+    policy = Policy(Select('t', ['a', 'b', 'c']), layout='dense')
 
     def where(condition: str) -> str:
         return policy.rewrite(f'select a from t where {condition}').sql.removeprefix('SELECT t.a FROM t WHERE ')
@@ -733,11 +757,11 @@ def test_parentheses():
 
 def test_qualify_builtins():
     sql = "select count(*), lower(a), left(a, 1), position('x' in a), app.f(a) from t"
-    plain = Policy(Select('t'), functions=['app.f'], layout='dense')
+    plain = Policy(Select('t', ['a']), functions=['app.f'], layout='dense')
     assert plain.rewrite(sql).sql == (
         """SELECT count(*), lower(t.a), left(t.a, 1), "position"(t.a, 'x'), app.f(t.a) FROM t"""
     )
-    qualified = Policy(Select('t'), functions=['app.f'], layout='dense', qualify_builtins=True)
+    qualified = Policy(Select('t', ['a']), functions=['app.f'], layout='dense', qualify_builtins=True)
     assert qualified.rewrite(sql).sql == (
         "SELECT pg_catalog.count(*), pg_catalog.lower(t.a), pg_catalog.left(t.a, 1), pg_catalog.position(t.a, 'x'), "
         'app.f(t.a) FROM t'
@@ -752,7 +776,7 @@ def test_filter():
 
     policy = DensePolicy(
         Select('orders', columns=['id', 'qty'], filter=org),
-        Select('customers'),
+        Select('customers', ['id', 'name']),
         Insert('orders', columns=['qty'], extra=lambda context: {'org': context['org_id']}),
         Update('orders', columns=['qty', 'org'], filter=org),
         Delete('orders', filter=org),
@@ -783,7 +807,7 @@ def test_filter():
         policy.rewrite('update orders set org = 1 where id = 7', context=context)
     assert exc_info.value.kind == 'denied'
     assert policy.grants('app', context=context) == [
-        'GRANT SELECT ON "customers" TO "app"',
+        'GRANT SELECT ("id", "name") ON "customers" TO "app"',
         'GRANT SELECT ("id", "qty", "deleted_at", "org") ON "orders" TO "app"',
         'GRANT INSERT ("qty", "org") ON "orders" TO "app"',
         'GRANT UPDATE ("qty", "org") ON "orders" TO "app"',
@@ -796,9 +820,9 @@ def test_filter_values():
         def filter(context: Any) -> Any:
             return sql if values is None else (sql, values)
 
-        safe = DensePolicy(Select('t', filter=filter), **kwargs).rewrite('select a from t')
-        assert safe.sql.startswith('SELECT t.a FROM (SELECT * FROM t WHERE ') and safe.sql.endswith(') AS t')
-        where = safe.sql.removeprefix('SELECT t.a FROM (SELECT * FROM t WHERE ').removesuffix(') AS t')
+        safe = DensePolicy(Select('t', ['a'], filter=filter), **kwargs).rewrite('select a from t')
+        assert safe.sql.startswith('SELECT t.a FROM (SELECT t.a FROM t WHERE ') and safe.sql.endswith(') AS t')
+        where = safe.sql.removeprefix('SELECT t.a FROM (SELECT t.a FROM t WHERE ').removesuffix(') AS t')
         return (where, safe.params) if kwargs else where
 
     # values are written as literals, whatever is in them
@@ -817,8 +841,8 @@ def test_filter_values():
     )
     # a filter with nothing to bind can be returned, or given, as a string
     assert where('deleted_at is null') == 't.deleted_at IS NULL'
-    assert DensePolicy(Select('t', filter='not archived')).rewrite('select a from t').sql == (
-        'SELECT t.a FROM (SELECT * FROM t WHERE NOT t.archived) AS t'
+    assert DensePolicy(Select('t', ['a'], filter='not archived')).rewrite('select a from t').sql == (
+        'SELECT t.a FROM (SELECT t.a FROM t WHERE NOT t.archived) AS t'
     )
     # with parameters, strings from the filter are parameters
     assert where('a = :s and b = :n', {'s': 'x', 'n': 1}, literals='params') == ('t.a = $1 AND t.b = 1', ['x'])
@@ -831,9 +855,10 @@ def test_filter_context():
         seen.append(context)
         return 'org = :org', {'org': context}
 
-    policy = DensePolicy(Select('t', filter=filter), Delete('t', filter=filter))
+    policy = DensePolicy(Select('t', ['a'], filter=filter), Delete('t', filter=filter))
     assert policy.rewrite('select t1.a from t t1 join t t2 on true', context=5).sql == (
-        'SELECT t1.a FROM (SELECT * FROM t WHERE t.org = 5) AS t1 INNER JOIN (SELECT * FROM t WHERE t.org = 5) AS t2 ON TRUE'
+        'SELECT t1.a FROM (SELECT t.a FROM t WHERE t.org = 5) AS t1 INNER JOIN (SELECT t.a FROM t WHERE t.org = 5) AS t2 '
+        'ON TRUE'
     )
     # called for each use of the table
     assert seen == [5, 5]
@@ -875,7 +900,7 @@ FILTER_ERRORS: list[tuple[Any, str, type[Exception] | None]] = [
 @pytest.mark.parametrize('returned,message,cause', FILTER_ERRORS)
 def test_filter_errors(returned: Any, message: str, cause: type[Exception] | None):
     policy = DensePolicy(
-        Select('t', filter=lambda context: returned),
+        Select('t', ['a', 'b'], filter=lambda context: returned),
         Update('t', filter=lambda context: returned),
         Delete('t', filter=lambda context: returned),
     )
@@ -893,12 +918,12 @@ def test_filter_raises_and_arguments():
         raise KeyError('org_id')
 
     with pytest.raises(P14gError, match="callback failed: KeyError: 'org_id'") as exc_info:
-        DensePolicy(Select('t', filter=broken)).rewrite('select a from t')
+        DensePolicy(Select('t', ['a'], filter=broken)).rewrite('select a from t')
     assert isinstance(exc_info.value.__cause__, KeyError)
 
-    for rule in Select, Update, Delete:
+    for rule in partial(Select, columns=['a']), Update, Delete:
         with pytest.raises(TypeError, match=r'filter must be a callable returning \(sql, values\), or a str'):
-            rule('t', filter=42)  # pyright: ignore[reportArgumentType]
+            rule('t', filter=42)  # pyright: ignore[reportArgumentType, reportCallIssue]
     with pytest.raises(P14gError, match='there is more than one delete rule for table "t"') as exc_info:
         DensePolicy(Delete('t'), Delete('t', allow_unfiltered=True))
     assert exc_info.value.kind == 'config'
@@ -938,8 +963,8 @@ def test_context_type():
         policy.rewrite('select id from orders', context=42)  # pyright: ignore[reportArgumentType, reportCallIssue]
 
     # a policy whose callbacks take nothing in particular needs no context
-    assert_type(Policy(Select('orders')), Policy[Any])
-    Policy(Select('orders')).rewrite('select id from orders')
+    assert_type(Policy(Select('orders', ['id'])), Policy[Any])
+    Policy(Select('orders', ['id'])).rewrite('select id from orders')
 
 
 def test_context_type_subscript():
@@ -954,7 +979,7 @@ def test_context_type_subscript():
     for alias, cls in aliases:
         assert get_origin(alias) is cls
         assert get_args(alias) == (Request,)
-    policy: Policy[Request] = Policy[Request](Select('orders', filter=by_tenant))
+    policy: Policy[Request] = Policy[Request](Select('orders', ['id'], filter=by_tenant))
     assert policy.rewrite('select 1 from orders', context=Request(1)).sql.endswith(
         'WHERE orders.tenant_id = 1) AS orders'
     )

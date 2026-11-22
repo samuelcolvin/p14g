@@ -8,7 +8,7 @@
 //! use p14g::{Policy, Select};
 //!
 //! let policy: Policy = Policy::builder()
-//!     .select(Select::table("orders").columns(["id", "product", "qty"]))
+//!     .select(Select::table("orders", ["id", "product", "qty"]))
 //!     .build()?;
 //!
 //! let safe = policy.rewrite("select id from orders where qty < 3", &())?;
