@@ -153,14 +153,20 @@ select id from orders union select id from customers intersect select id from or
 
 -- a whole statement in parentheses: Postgres reads clauses outside them as part of the query inside
 (select id from orders limit 3)
-=> (SELECT orders.id FROM orders LIMIT 3)
+=> SELECT orders.id FROM orders LIMIT 3
 
 ((select id from orders limit 3)) order by id
-=> ((SELECT orders.id FROM orders LIMIT 3)) ORDER BY id
+=> SELECT orders.id FROM orders ORDER BY orders.id LIMIT 3
 
-((select id from orders order by id)) limit 2 offset 1
+(select id from orders limit 3) offset 1
+=> SELECT orders.id FROM orders LIMIT 3 OFFSET 1
+
+-- ORDER BY outside the parentheses sees the columns of the SELECT inside them, not only its output
+(select id from orders) order by qty
+=> SELECT orders.id FROM orders ORDER BY orders.qty
 
 with a as (select id from orders) (select id from a limit 1) order by id
+=> WITH a AS (SELECT orders.id FROM orders) SELECT a.id FROM a ORDER BY a.id LIMIT 1
 
 select o.id from orders o where o.qty > (select avg(o2.qty) from orders o2 where o2.customer_id = o.customer_id)
 => SELECT o.id FROM orders AS o WHERE o.qty > (SELECT avg(o2.qty) FROM orders AS o2 WHERE o2.customer_id = o.customer_id)

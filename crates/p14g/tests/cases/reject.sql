@@ -58,6 +58,7 @@ denied: select orders.secret from orders
 denied: select o.secret from orders o
 denied: select id from orders where secret = 'hidden'
 denied: select id from orders order by secret
+denied: (select id from orders) order by secret
 denied: select count(*) from orders group by secret
 denied: select count(*) from orders having max(secret) > 'a'
 denied: select o.id from orders o join customers c on c.email = o.product
@@ -236,12 +237,11 @@ unsupported: select distinct on (customer_id) id from orders
 unsupported: select id from orders fetch first 5 rows only
 unsupported: select id from orders limit qty
 unsupported: select id from orders limit (select count(*) from secrets)
--- a clause both inside and outside parentheses, which Postgres refuses: it merges them into one query
+-- a clause both inside and outside parentheses, which Postgres refuses: it reads them as one query
 unsupported: (select id from orders limit 100) limit 40
 unsupported: ((select id from orders limit 100) offset 5) limit 30
 unsupported: ((select id from orders order by qty desc) order by id)
 unsupported: (select id from orders offset 2) offset 3
-unsupported: (select id from orders limit 3) offset 1
 unsupported: select id from orders union ((select id from orders limit 2) limit 3)
 unsupported: with a as (select id from orders) (with b as (select id from orders) select id from b)
 unsupported: select id from orders group by rollup (id)

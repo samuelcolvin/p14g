@@ -9,31 +9,15 @@ use crate::{
     error::{Error, Result},
 };
 
-/// Rejects a clause that a query and the query in parentheses that is its body both have.
-///
-/// Postgres merges the clauses of `(q) ORDER BY ... LIMIT n` into `q`, through any number of parentheses, and refuses
-/// a clause that is already there: `(select 1 limit 2) limit 3` is "multiple LIMIT clauses not allowed". Written out
-/// as it is, such a statement would not run. `LIMIT` and `OFFSET` count as one clause because Postgres 17 and older
-/// also refuse `(select 1 limit 2) offset 1`. Each body was checked when it was lowered, so a chain has each clause
-/// on one query at most, which is what `check::apply_max_rows` relies on to find the `LIMIT` to lower.
-fn check_parenthesised_clauses(query: &Query) -> Result<()> {
-    type Has = fn(&Query) -> bool;
-    const CLAUSES: [(&str, Has); 3] = [
-        ("WITH", |q| !q.with.is_empty()),
-        ("ORDER BY", |q| !q.order_by.is_empty()),
-        ("LIMIT or OFFSET", Query::has_limit_or_offset),
-    ];
-    let SetExpr::Query(inner) = &query.body else {
-        return Ok(());
-    };
-    for (clause, has) in CLAUSES {
-        if has(query) && inner.chain_has(has) {
-            return Err(Error::unsupported(format!(
-                "{clause} both inside and outside parentheses"
-            )));
-        }
+/// One clause of a query and of the query in parentheses that is its body, which Postgres refuses to have twice.
+fn merge<T>(outer: T, inner: T, is_set: impl Fn(&T) -> bool, clause: &str) -> Result<T> {
+    match (is_set(&outer), is_set(&inner)) {
+        (true, true) => Err(Error::unsupported(format!(
+            "{clause} both inside and outside parentheses"
+        ))),
+        (true, false) => Ok(outer),
+        (false, _) => Ok(inner),
     }
-    Ok(())
 }
 
 impl Lower<'_> {
@@ -109,8 +93,39 @@ impl Lower<'_> {
             limit,
             offset,
         };
-        check_parenthesised_clauses(&query)?;
-        Ok(query)
+        Self::merge_parenthesised(query)
+    }
+
+    /// `(q) ORDER BY ... LIMIT n` as one query, with the clauses outside the parentheses moved onto `q`.
+    ///
+    /// Postgres reads it that way and refuses a clause that `q` already has: `(select 1 limit 2) limit 3` is "multiple
+    /// LIMIT clauses not allowed". The query in parentheses was merged when it was lowered, so one step is enough, and
+    /// no later stage sees a query whose body is a query in parentheses.
+    fn merge_parenthesised(query: Query) -> Result<Query> {
+        let Query {
+            with,
+            body: SetExpr::Query(inner),
+            order_by,
+            limit,
+            offset,
+        } = query
+        else {
+            return Ok(query);
+        };
+        let Query {
+            with: inner_with,
+            body,
+            order_by: inner_order_by,
+            limit: inner_limit,
+            offset: inner_offset,
+        } = *inner;
+        Ok(Query {
+            with: merge(with, inner_with, |w| !w.is_empty(), "WITH")?,
+            body,
+            order_by: merge(order_by, inner_order_by, |o| !o.is_empty(), "ORDER BY")?,
+            limit: merge(limit, inner_limit, Option::is_some, "LIMIT")?,
+            offset: merge(offset, inner_offset, Option::is_some, "OFFSET")?,
+        })
     }
 
     /// `LIMIT` and `OFFSET` take a number or a placeholder, nothing that needs resolving.

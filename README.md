@@ -324,6 +324,12 @@ print(policy.rewrite('select id, "user" as "user" from orders where (qty + 1) * 
 #> WHERE ((orders.qty + 1) * 2) > 4 AND (orders.a = 1 OR orders.b IS NULL)
 ```
 
+Parentheses around a whole statement are taken away.
+Postgres reads `(select id from orders limit 5) order by id` as one query with the `ORDER BY` added, and p14g does the
+same, so it writes `SELECT orders.id FROM orders ORDER BY orders.id LIMIT 5`.
+A clause both inside and outside the parentheses, such as `(select id from orders limit 5) limit 3`, is rejected,
+since Postgres refuses it.
+
 ### Mappers
 
 A mapper replaces a node of a statement that has passed the policy.
@@ -383,11 +389,6 @@ p14g does not recurse down such a tree beyond the nesting limit, but freeing it 
 to 1 KiB per token before parsing when the thread has less than that left.
 
 `max_rows` adds a `LIMIT` to a `SELECT` that has none and lowers one that is larger.
-For a statement in parentheses, such as `(select id from orders limit 500)`, it lowers the `LIMIT` inside them,
-and when only an `OFFSET` is inside, the `LIMIT` goes next to it.
-Postgres reads the clauses outside the parentheses as part of the query inside, so p14g rejects a statement with
-`WITH`, `ORDER BY`, or a `LIMIT` or `OFFSET` both inside and outside them, as Postgres does.
-`(select id from orders limit 5) offset 1` is rejected too: Postgres 18 accepts it but 17 and older do not.
 Postgres has no `LIMIT` for `UPDATE` or `DELETE`: to cap the rows a write touches, run it in a transaction and check
 the row count before committing.
 

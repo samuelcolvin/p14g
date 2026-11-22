@@ -48,13 +48,6 @@ pub(crate) fn apply_max_rows(statement: &mut Statement, max_rows: u64) -> Result
     let Statement::Query(query) = statement else {
         return Ok(());
     };
-    // Postgres reads `(q) LIMIT n` as `q` with the `LIMIT` added, so in a chain of parentheses the limit goes on the
-    // query that has the `LIMIT` or `OFFSET`; lowering lets only one have them, and Postgres 17 refuses them apart
-    let query = if query.chain_has(Query::has_limit_or_offset) {
-        limited_query(query)
-    } else {
-        query
-    };
     let cap = || Some(Expr::Literal(Literal::Number(max_rows.to_string())));
     match &query.limit {
         None => query.limit = cap(),
@@ -69,18 +62,6 @@ pub(crate) fn apply_max_rows(statement: &mut Statement, max_rows: u64) -> Result
         }
     }
     Ok(())
-}
-
-/// The query in a chain of parentheses that has a `LIMIT` or `OFFSET`, or the innermost when none has.
-fn limited_query(query: &mut Query) -> &mut Query {
-    // decided before borrowing the body, which the borrow checker cannot see is given back on the other path
-    if query.has_limit_or_offset() || !matches!(query.body, SetExpr::Query(_)) {
-        return query;
-    }
-    let SetExpr::Query(inner) = &mut query.body else {
-        unreachable!("the body was a query a line above")
-    };
-    limited_query(inner)
 }
 
 /// One table, view, subquery or CTE in a `FROM` clause, or the target of a write.
