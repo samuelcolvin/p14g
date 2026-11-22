@@ -9,6 +9,33 @@ use crate::{
     error::{Error, Result},
 };
 
+/// Rejects a clause that a query and the query in parentheses that is its body both have.
+///
+/// Postgres merges the clauses of `(q) ORDER BY ... LIMIT n` into `q`, through any number of parentheses, and refuses
+/// a clause that is already there: `(select 1 limit 2) limit 3` is "multiple LIMIT clauses not allowed". Written out
+/// as it is, such a statement would not run. `LIMIT` and `OFFSET` count as one clause because Postgres 17 and older
+/// also refuse `(select 1 limit 2) offset 1`. Each body was checked when it was lowered, so a chain has each clause
+/// on one query at most, which is what `check::apply_max_rows` relies on to find the `LIMIT` to lower.
+fn check_parenthesised_clauses(query: &Query) -> Result<()> {
+    type Has = fn(&Query) -> bool;
+    const CLAUSES: [(&str, Has); 3] = [
+        ("WITH", |q| !q.with.is_empty()),
+        ("ORDER BY", |q| !q.order_by.is_empty()),
+        ("LIMIT or OFFSET", Query::has_limit_or_offset),
+    ];
+    let SetExpr::Query(inner) = &query.body else {
+        return Ok(());
+    };
+    for (clause, has) in CLAUSES {
+        if has(query) && inner.chain_has(has) {
+            return Err(Error::unsupported(format!(
+                "{clause} both inside and outside parentheses"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Lower<'_> {
     pub(super) fn query(&mut self, query: sp::Query) -> Result<Query> {
         self.nested(|this| this.query_inner(query))
@@ -75,13 +102,15 @@ impl Lower<'_> {
             }
             Some(sp::LimitClause::OffsetCommaLimit { .. }) => return Err(Error::unsupported("LIMIT offset, limit")),
         };
-        Ok(Query {
+        let query = Query {
             with,
             body,
             order_by,
             limit,
             offset,
-        })
+        };
+        check_parenthesised_clauses(&query)?;
+        Ok(query)
     }
 
     /// `LIMIT` and `OFFSET` take a number or a placeholder, nothing that needs resolving.

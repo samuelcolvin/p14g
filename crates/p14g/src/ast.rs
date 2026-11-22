@@ -114,6 +114,20 @@ pub struct Query {
     pub offset: Option<Expr>,
 }
 
+impl Query {
+    /// Whether this query, or a query in parentheses that is its whole body, however deep, has a clause.
+    ///
+    /// Postgres reads such a chain as one query, so lowering allows each clause on one query of it at most.
+    pub(crate) fn chain_has(&self, has: fn(&Self) -> bool) -> bool {
+        has(self) || matches!(&self.body, SetExpr::Query(inner) if inner.chain_has(has))
+    }
+
+    /// Whether the query has a `LIMIT` or an `OFFSET`, which are one clause in a chain of parentheses.
+    pub(crate) fn has_limit_or_offset(&self) -> bool {
+        self.limit.is_some() || self.offset.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cte {
     pub name: Ident,

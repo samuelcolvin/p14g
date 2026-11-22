@@ -158,6 +158,10 @@ select id from orders union select id from customers intersect select id from or
 ((select id from orders limit 3)) order by id
 => ((SELECT orders.id FROM orders LIMIT 3)) ORDER BY id
 
+((select id from orders order by id)) limit 2 offset 1
+
+with a as (select id from orders) (select id from a limit 1) order by id
+
 select o.id from orders o where o.qty > (select avg(o2.qty) from orders o2 where o2.customer_id = o.customer_id)
 => SELECT o.id FROM orders AS o WHERE o.qty > (SELECT avg(o2.qty) FROM orders AS o2 WHERE o2.customer_id = o.customer_id)
 

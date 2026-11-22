@@ -636,6 +636,15 @@ fn max_rows() {
         rewrite(&policy, "(select id from orders)"),
         "(SELECT orders.id FROM orders) LIMIT 100"
     );
+    // Postgres 17 refuses `(q OFFSET 2) LIMIT 100`, so the limit goes with the offset
+    assert_eq!(
+        rewrite(&policy, "((select id from orders offset 2)) order by id"),
+        "((SELECT orders.id FROM orders LIMIT 100 OFFSET 2)) ORDER BY id"
+    );
+    assert_eq!(
+        kind(&policy, "(select id from orders limit 5) limit 3"),
+        ErrorKind::Unsupported
+    );
     assert_eq!(
         rewrite(
             &policy,

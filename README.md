@@ -384,7 +384,10 @@ to 1 KiB per token before parsing when the thread has less than that left.
 
 `max_rows` adds a `LIMIT` to a `SELECT` that has none and lowers one that is larger.
 For a statement in parentheses, such as `(select id from orders limit 500)`, it lowers the `LIMIT` inside them,
-since Postgres refuses a second one outside.
+and when only an `OFFSET` is inside, the `LIMIT` goes next to it.
+Postgres reads the clauses outside the parentheses as part of the query inside, so p14g rejects a statement with
+`WITH`, `ORDER BY`, or a `LIMIT` or `OFFSET` both inside and outside them, as Postgres does.
+`(select id from orders limit 5) offset 1` is rejected too: Postgres 18 accepts it but 17 and older do not.
 Postgres has no `LIMIT` for `UPDATE` or `DELETE`: to cap the rows a write touches, run it in a transaction and check
 the row count before committing.
 
