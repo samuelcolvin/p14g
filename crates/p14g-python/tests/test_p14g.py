@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, get_args, get_origin
 
 import p14g
 import pytest
@@ -20,7 +21,7 @@ from p14g import (
     Update,
     mapper,
 )
-from typing_extensions import LiteralString
+from typing_extensions import LiteralString, assert_type
 
 # every statement on one line, which is easier to compare against
 DensePolicy = partial(Policy, layout='dense')
@@ -1289,3 +1290,65 @@ def test_filter_raises_and_arguments():
     with pytest.raises(P14gError, match='there is more than one delete rule for table "t"') as exc_info:
         DensePolicy(Delete('t'), Delete('t', allow_unfiltered=True))
     assert exc_info.value.kind == 'config'
+
+
+@dataclass
+class Request:
+    tenant_id: int
+
+
+def by_tenant(request: Request) -> tuple[LiteralString, dict[str, int]]:
+    return 'tenant_id = :tenant_id', {'tenant_id': request.tenant_id}
+
+
+def test_context_type():
+    @mapper(Table)
+    def per_tenant(table: Table, request: Request) -> Table:
+        return Table(f'{table.name}_{request.tenant_id}', alias=table.name)
+
+    # not DensePolicy: functools.partial loses the type parameter
+    policy = Policy(
+        Select('orders', columns=['id'], filter=by_tenant),
+        # rules with no callback take any context
+        Insert('orders', columns=['qty']),
+        Delete('orders'),
+        mappers=[per_tenant],
+        layout='dense',
+    )
+    assert_type(policy, Policy[Request])
+    assert policy.rewrite('select id from orders', context=Request(42)).sql == (
+        'SELECT orders.id FROM (SELECT orders.id FROM orders_42 AS orders WHERE orders.tenant_id = 42) AS orders'
+    )
+    assert policy.grants('app', context=Request(42)) == [
+        'GRANT SELECT ("id", "tenant_id") ON "orders" TO "app"',
+        'GRANT INSERT ("qty") ON "orders" TO "app"',
+        'GRANT DELETE ON "orders" TO "app"',
+    ]
+    # the context is required, and must be a Request
+    with pytest.raises(P14gError, match="callback failed: AttributeError: 'NoneType' object has no attribute"):
+        policy.rewrite('select id from orders')  # pyright: ignore[reportCallIssue]
+    with pytest.raises(P14gError, match="callback failed: AttributeError: 'int' object has no attribute"):
+        policy.rewrite('select id from orders', context=42)  # pyright: ignore[reportArgumentType, reportCallIssue]
+
+    # a policy whose callbacks take nothing in particular needs no context
+    assert_type(Policy(Select('orders')), Policy[Any])
+    Policy(Select('orders')).rewrite('select id from orders')
+
+
+def test_context_type_subscript():
+    """The generic classes can be subscripted at run time, for annotations evaluated then."""
+    aliases: list[tuple[object, type]] = [
+        (Policy[Request], Policy),
+        (Select[Request], Select),
+        (Insert[Request], Insert),
+        (Update[Request], Update),
+        (Delete[Request], Delete),
+        (p14g.Mapper[Request], p14g.Mapper),
+    ]
+    for alias, cls in aliases:
+        assert get_origin(alias) is cls
+        assert get_args(alias) == (Request,)
+    policy: Policy[Request] = Policy[Request](Select('orders', filter=by_tenant))
+    assert policy.rewrite('select 1 from orders', context=Request(1)).sql.endswith(
+        'WHERE orders.tenant_id = 1) AS orders'
+    )
