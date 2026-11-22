@@ -11,7 +11,7 @@ rust-version = { workspace = true }
 publish = false
 
 [dependencies]
-pyo3 = { workspace = true, features = ["abi3-py310", "generate-import-lib"] }
+pyo3 = { workspace = true, features = ["abi3-py311", "generate-import-lib"] }
 p14g = { path = "../p14g" }
 
 [features]

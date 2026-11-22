@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, get_args, get_origin
+from typing import Any, LiteralString, assert_type, get_args, get_origin
 
 import p14g
 import pytest
@@ -21,7 +21,6 @@ from p14g import (
     Update,
     mapper,
 )
-from typing_extensions import LiteralString, assert_type
 
 # every statement on one line, which is easier to compare against
 DensePolicy = partial(Policy, layout='dense')
