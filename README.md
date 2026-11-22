@@ -403,6 +403,8 @@ With `literals='params'`, each string literal becomes a placeholder and its valu
 Numbers, booleans and `NULL` stay inline.
 Placeholders already in the input keep their numbers and p14g's are numbered after the highest of them, so append
 `params` to your own parameters.
+Postgres binds at most 65535 parameters, so a placeholder above `$65535` in the input is rejected, and so is a
+statement whose literals would need one.
 
 A parameter has no type until Postgres infers one, which differs from an inline literal in two ways:
 

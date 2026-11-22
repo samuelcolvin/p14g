@@ -14,8 +14,8 @@ use std::mem;
 use crate::{
     ast::{
         BinaryOperator, Column, DataType, DateField, Delete, Expr, Function, FunctionArgs, Ident, Insert, IsTest, Join,
-        JoinKind, KeyExpr, LikeKind, Literal, OrderBy, Query, Select, SelectItem, SetExpr, SetOperator, SortExpr,
-        Statement, Table, TableFactor, TrimSide, UnaryOperator, Update, VariadicFunction,
+        JoinKind, KeyExpr, LikeKind, Literal, MAX_PLACEHOLDER, OrderBy, Query, Select, SelectItem, SetExpr,
+        SetOperator, SortExpr, Statement, Table, TableFactor, TrimSide, UnaryOperator, Update, VariadicFunction,
     },
     error::{Error, ErrorKind, Result},
     policy::Literals,
@@ -183,11 +183,16 @@ impl<'a, S: Syntax> Writer<'a, S> {
         let mut sql = String::new();
         for (index, segment) in self.segments.iter().enumerate() {
             sql.push_str(segment);
-            let offset = u32::try_from(index + 1).map_err(|_| invalid("too many parameters"))?;
-            let number = self
-                .max_placeholder
-                .checked_add(offset)
-                .ok_or_else(|| invalid("too many parameters"))?;
+            // numbered after the input's placeholders, and refused rather than written past what Postgres binds
+            let number = u32::try_from(index + 1)
+                .ok()
+                .and_then(|offset| self.max_placeholder.checked_add(offset))
+                .filter(|&number| number <= MAX_PLACEHOLDER)
+                .ok_or_else(|| {
+                    Error::limit(format!(
+                        "the statement needs a placeholder above ${MAX_PLACEHOLDER}, the most Postgres binds"
+                    ))
+                })?;
             self.syntax.placeholder(&mut sql, number);
         }
         sql.push_str(&self.out);
@@ -663,8 +668,10 @@ impl<'a, S: Syntax> Writer<'a, S> {
             }
             Expr::Literal(literal) => self.literal(literal),
             Expr::Placeholder(number) => {
-                if *number == 0 {
-                    return Err(invalid("placeholders are numbered from 1"));
+                if !(1..=MAX_PLACEHOLDER).contains(number) {
+                    return Err(invalid(format!(
+                        "placeholders are numbered from 1 to {MAX_PLACEHOLDER}"
+                    )));
                 }
                 self.max_placeholder = self.max_placeholder.max(*number);
                 self.syntax.placeholder(&mut self.out, *number);
