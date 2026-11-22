@@ -323,7 +323,7 @@ jobs:
 
       - run: uv pip install --python test-env --no-index --find-links dist p14g
 
-      - run: uv pip install --python test-env pytest
+      - run: uv pip install --python test-env pytest typing-extensions
 
       - run: uv run --no-project --python test-env pytest crates/p14g-python/tests
 
