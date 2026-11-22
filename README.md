@@ -1,5 +1,10 @@
 # Parental Guidance (p14g)
 
+[![CI](https://github.com/samuelcolvin/p14g/actions/workflows/ci.yml/badge.svg)](https://github.com/samuelcolvin/p14g/actions/workflows/ci.yml?query=branch%3Amain)
+[![pypi](https://img.shields.io/pypi/v/p14g.svg)](https://pypi.org/project/p14g/)
+[![crates.io](https://img.shields.io/crates/v/p14g.svg)](https://crates.io/crates/p14g)
+[![license](https://img.shields.io/github/license/samuelcolvin/p14g.svg)](https://github.com/samuelcolvin/p14g/blob/main/LICENSE)
+
 Check untrusted SQL against an allowlist and rewrite it so it is safe to run on Postgres.
 
 Parental Guidance (p14g) is for running SQL written by someone you do not trust, such as an LLM or an end user,
