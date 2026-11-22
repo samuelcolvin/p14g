@@ -80,8 +80,8 @@ def test_tasks_only_own_org(client: TestClient):
         'ORDER BY tasks.id\n'
         'LIMIT 1000'
     )
-    assert r['columns'] == ['id', 'project_id', 'assignee_id', 'title', 'status', 'due_date', 'created_at']
-    assert [row[3] for row in r['rows']] == ['Order wheels', 'Fit rocket', 'Source magnet']
+    assert list(r['rows'][0]) == ['id', 'project_id', 'assignee_id', 'title', 'status', 'due_date', 'created_at']
+    assert [row['title'] for row in r['rows']] == ['Order wheels', 'Fit rocket', 'Source magnet']
 
 
 def test_join(client: TestClient):
@@ -96,11 +96,14 @@ def test_join(client: TestClient):
         order by p.name
         """,
     )
-    assert r['rows'] == [['Giant magnet', 'United Kingdom', 1], ['Rocket skates', 'United States', 2]]
+    assert r['rows'] == [
+        {'name': 'Giant magnet', 'country': 'United Kingdom', 'tasks': 1},
+        {'name': 'Rocket skates', 'country': 'United States', 'tasks': 2},
+    ]
 
 
 def test_own_organisation(client: TestClient):
-    assert query(client, 'select * from organisations')['rows'] == [[ORG_ID, 'Acme']]
+    assert query(client, 'select * from organisations')['rows'] == [{'id': ORG_ID, 'name': 'Acme'}]
     r = query(client, 'select stripe_customer_id from organisations')
     assert r['error'] == 'denied'
 
@@ -114,8 +117,8 @@ def test_blocked_tables(client: TestClient, table: str):
 def test_password_hash(client: TestClient):
     assert query(client, 'select password_hash from users')['error'] == 'denied'
     r = query(client, 'select * from users order by id')
-    assert r['columns'] == ['id', 'name', 'email', 'created_at']
-    assert [row[1] for row in r['rows']] == ['Anne', 'Bob']
+    assert list(r['rows'][0]) == ['id', 'name', 'email', 'created_at']
+    assert [row['name'] for row in r['rows']] == ['Anne', 'Bob']
 
 
 def test_org_id_hidden(client: TestClient):
@@ -145,11 +148,10 @@ def test_insert_sets_org(client: TestClient):
     r = query(
         client, f"insert into tasks (project_id, title) values ('{GIANT_MAGNET}', 'Polish magnet') returning id, title"
     )
-    assert r['kind'] == 'insert'
     assert r['status'] == 'INSERT 0 1'
     assert 'org_id' in r['sql']
-    (task_id, title) = r['rows'][0]
-    assert title == 'Polish magnet'
+    task_id = r['rows'][0]['id']
+    assert r['rows'][0]['title'] == 'Polish magnet'
 
     assert query(client, f"delete from tasks where id = '{task_id}'")['status'] == 'DELETE 1'
 
@@ -180,7 +182,7 @@ def test_unfiltered_update_rejected(client: TestClient):
 def test_division_probe(client: TestClient):
     """Like the probe in p14g's README: with RLS it never sees Globex's "Classified" task, so no division by zero."""
     r = query(client, "select title from tasks where 1 / (strpos(title, 'Classified') - 1) < 0 order by id")
-    assert r['rows'] == [['Order wheels'], ['Fit rocket'], ['Source magnet']]
+    assert [row['title'] for row in r['rows']] == ['Order wheels', 'Fit rocket', 'Source magnet']
 
 
 def test_audit_log(client: TestClient):

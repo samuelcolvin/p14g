@@ -13,10 +13,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import date, datetime
-from decimal import Decimal
-from typing import Annotated, Any, Literal
-from uuid import UUID
+from typing import Annotated, Any
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -58,13 +55,11 @@ class Query(BaseModel):
 
 
 class QueryResult(BaseModel):
-    kind: Literal['select', 'insert', 'update', 'delete']
     sql: str
     """The statement as p14g rewrote it, which is what ran."""
     status: str
     """Postgres's command tag, e.g. `UPDATE 2`."""
-    columns: list[str]
-    rows: list[list[Any]]
+    rows: list[dict[str, Any]]
 
 
 class QueryError(BaseModel):
@@ -102,7 +97,6 @@ async def run_query(
             )
             stmt = await conn.prepare(safe.sql)
             records = await stmt.fetch()
-            columns = [a.name for a in stmt.get_attributes()]
             status = stmt.get_statusmsg()
     except asyncpg.PostgresError as e:
         # Only the SQLSTATE goes back: messages can quote values from rows Anne may not see, e.g. a unique
@@ -114,13 +108,7 @@ async def run_query(
         ) from e
 
     await audit(owner, query.sql, safe.sql, None)
-    return QueryResult(
-        kind=safe.kind,
-        sql=safe.sql,
-        status=status,
-        columns=columns,
-        rows=[[to_json(v) for v in r.values()] for r in records],
-    )
+    return QueryResult(sql=safe.sql, status=status, rows=[dict(r) for r in records])
 
 
 async def audit(pool: asyncpg.Pool, sql_in: str, sql_out: str | None, error: str | None) -> None:
@@ -131,13 +119,3 @@ async def audit(pool: asyncpg.Pool, sql_in: str, sql_out: str | None, error: str
         sql_out,
         error,
     )
-
-
-def to_json(value: Any) -> Any:
-    if isinstance(value, datetime | date):
-        return value.isoformat()
-    if isinstance(value, Decimal | UUID):
-        return str(value)
-    if isinstance(value, bytes):
-        return value.hex()
-    return value

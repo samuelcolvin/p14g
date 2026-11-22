@@ -39,11 +39,9 @@ The response holds the rewritten SQL, which is what ran:
 
 ```json
 {
-  "kind": "select",
   "sql": "SELECT p.name, pg_catalog.count(t.id)\nFROM (SELECT projects.id, projects.name, projects.country_code, projects.created_at FROM app.projects WHERE projects.org_id = '10000000-0000-4000-8000-000000000001') AS p\nLEFT JOIN (SELECT tasks.id, ... FROM app.tasks WHERE tasks.org_id = '10000000-0000-4000-8000-000000000001') AS t ON t.project_id = p.id\nGROUP BY p.name\nLIMIT 1000",
   "status": "SELECT 2",
-  "columns": ["name", "count"],
-  "rows": [["Giant magnet", 1], ["Rocket skates", 2]]
+  "rows": [{"name": "Giant magnet", "count": 1}, {"name": "Rocket skates", "count": 2}]
 }
 ```
 
