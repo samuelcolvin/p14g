@@ -1,0 +1,11 @@
+# The build context is the repository root; send only what the image needs.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/p14g
+!crates/p14g-python
+!example
+**/target
+**/.venv
+**/__pycache__
+example/tests
