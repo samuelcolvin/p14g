@@ -113,10 +113,12 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
         return ModelResponse(parts=[ToolCallPart('run_code', {'code': CODE})])
 
     session = Session(oracle, tmp_path, turns=5)
-    repository = copy_repository(session.files, tmp_path / 'repo')
-    agent = attacker.build(FunctionModel(model), repository)
+    copy_repository(session.files)
 
-    assert agent.run_sync('attack', deps=session).output == 'summary'
+    def run() -> str:
+        return attacker.agent.run_sync('attack', model=FunctionModel(model), deps=session).output
+
+    assert run() == 'summary'
     # the file tools are gone: the agent reads the mounted copy and calls `rewrite` from Python
     assert tools_offered == [['run_code'], ['run_code']]
     [output] = returned
@@ -124,10 +126,10 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     assert 'False' in output
     assert 'SELECT customers.id' in output
     assert session.tried == ['accepted: select id from customers']
-    assert not (repository / 'written').exists()
+    assert not (attacker.REPOSITORY / 'written').exists()
 
     # on the last turn of a round there is no `run_code` either, so the reply is the summary
     tools_offered.clear()
     session.turns = 1
-    assert agent.run_sync('attack', deps=session).output == 'summary'
+    assert run() == 'summary'
     assert tools_offered == [[]]

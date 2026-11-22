@@ -13,7 +13,6 @@ from typing import Any
 import logfire
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
-from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
@@ -24,14 +23,8 @@ from .oracle import Finding, Oracle
 
 ROOT = Path(__file__).resolve().parents[3]
 PACKAGE = Path(__file__).resolve().parent
-
-# shown to the agent in full; it can read anything else in the repository from `run_code`
-BRIEFING = [
-    'README.md',
-    'AGENTS.md',
-    '.agents/skills/review-security/SKILL.md',
-    'crates/fuzz-agent/fuzz_agent/target.py',
-]
+REPOSITORY = PACKAGE.parent / 'repository'
+"""The copy of the repository the agent reads, mounted read-only at `/repo`; ignored by git."""
 
 # one per round, so that a run covers the library and does not spend itself on the first idea
 FOCUS = [
@@ -126,10 +119,15 @@ When you are out of ideas for the area you were given, stop and reply with a sho
 p14g did, and what you would try next. On your last turn `run_code` is taken away, and the reply you write then
 is that summary. The next round starts from it and nothing else you saw.
 
-## Reference
+## Start here
 
-The files below are the project's documentation, its own security checklist, and the definition of the database
-and policy you are attacking.
+Read these in your first `run_code` call:
+
+- `/repo/README.md`: what p14g accepts and what it turns it into;
+- `/repo/AGENTS.md`: how the code is laid out;
+- `/repo/.agents/skills/review-security/SKILL.md`: the project's own security checklist;
+- `/repo/crates/fuzz-agent/fuzz_agent/target.py`: the database and policy you are attacking, and what the policy
+  is meant to allow.
 """
 
 
@@ -191,23 +189,21 @@ class Session:
         return self._files
 
 
-def copy_repository(files: frozenset[str], destination: Path) -> Path:
-    """Copy `files` from the checkout to `destination`, which the agent's sandbox mounts read-only.
+def copy_repository(files: frozenset[str]) -> None:
+    """Replace the contents of `REPOSITORY` with `files` from the checkout.
 
     The checkout itself is not mounted: it has `.env`, the virtual environment and the runs of this fuzzer in it.
+    `REPOSITORY` is emptied rather than removed, since the mount holds the directory itself open.
     """
+    for child in REPOSITORY.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
     for name in files:
-        target = destination / name
+        target = REPOSITORY / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
-    return destination
-
-
-def instructions() -> str:
-    parts = [INSTRUCTIONS]
-    for name in BRIEFING:
-        parts.append(f'<file path="{name}">\n{(ROOT / name).read_text()}\n</file>')
-    return '\n\n'.join(parts)
 
 
 TESTING_BY = 3
@@ -255,66 +251,64 @@ def turn_instructions(ctx: RunContext[Session]) -> str:
     return f'You have {left} turns left in this round, counting this one.'
 
 
-def build(model: Model | str, repository: Path) -> Agent[Session, str]:
-    """The agent, with `repository`, a copy made by `copy_repository`, mounted read-only at `/repo`."""
-    mount = MountDir(host_path=repository, virtual_path='/repo', mode='read-only')
-    agent = Agent(
-        model,
-        deps_type=Session,
-        instructions=[instructions(), turn_instructions],
-        capabilities=[
-            LastTurnWithoutTools(),
-            # `rewrite` and `report_finding` are called from Python in the sandbox, so one request can read
-            # files and try a batch of statements
-            CodeMode(mount=mount),
-        ],
-        model_settings=AnthropicModelSettings(
-            thinking='high',
-            # the briefing is long and the same on every request; other providers ignore these
-            anthropic_cache_instructions=True,
-            anthropic_cache_tool_definitions=True,
-            anthropic_cache_messages=True,
-        ),
-        retries=3,
-    )
+REPOSITORY.mkdir(exist_ok=True)
 
-    @agent.tool
-    async def rewrite(ctx: RunContext[Session], sql: str) -> str:
-        """Run p14g on a statement with the target policy, run every check on the output, and say what happened.
+agent = Agent(
+    deps_type=Session,
+    instructions=[INSTRUCTIONS, turn_instructions],
+    capabilities=[
+        LastTurnWithoutTools(),
+        # `rewrite` and `report_finding` are called from Python in the sandbox, so one request can read files and
+        # try a batch of statements
+        CodeMode(mount=MountDir(host_path=REPOSITORY, virtual_path='/repo', mode='read-only')),
+    ],
+    model_settings=AnthropicModelSettings(
+        thinking='high',
+        # the instructions are the same on every request; other providers ignore these
+        anthropic_cache_instructions=True,
+        anthropic_cache_tool_definitions=True,
+        anthropic_cache_messages=True,
+    ),
+    retries=3,
+)
 
-        Args:
-            sql: One SQL statement, exactly as the untrusted author would send it.
-        """
-        session = ctx.deps
-        session.attempts += 1
-        # the agent calls this tool several at a time, so each call keeps its own number
-        number = session.attempts
-        # written before anything is run, so a statement that crashes the process is the last line of the file
-        session.record('attempts', {'n': number, 'sql': sql})
-        attempt = await asyncio.to_thread(session.oracle.attempt, sql)
-        if attempt.output is not None:
-            session.accepted += 1
-        status = 'rejected' if attempt.output is None else 'accepted'
-        flat = ' '.join(sql.split())
-        print(f'{number:4} {status}: {flat[:120]}')
-        outcome = 'accepted' if attempt.output is not None else f'rejected ({(attempt.rejection or "")[:100]})'
-        if attempt.findings:
-            outcome += ', FINDING ' + ', '.join(finding.kind for finding in attempt.findings)
-        session.tried.append(f'{outcome}: {flat[:160]}')
-        for finding in attempt.findings:
-            session.found(finding)
-        return attempt.render()
 
-    @agent.tool
-    def report_finding(ctx: RunContext[Session], title: str, sql: str, explanation: str) -> str:
-        """Record a problem that the checks behind `rewrite` cannot see.
+@agent.tool
+async def rewrite(ctx: RunContext[Session], sql: str) -> str:
+    """Run p14g on a statement with the target policy, run every check on the output, and say what happened.
 
-        Args:
-            title: The problem in one line.
-            sql: The exact statement that shows it.
-            explanation: What p14g did, what it should have done, and why it matters.
-        """
-        ctx.deps.found(Finding('claimed', f'{title}\n{explanation}', sql))
-        return 'recorded'
+    Args:
+        sql: One SQL statement, exactly as the untrusted author would send it.
+    """
+    session = ctx.deps
+    session.attempts += 1
+    # the agent calls this tool several at a time, so each call keeps its own number
+    number = session.attempts
+    # written before anything is run, so a statement that crashes the process is the last line of the file
+    session.record('attempts', {'n': number, 'sql': sql})
+    attempt = await asyncio.to_thread(session.oracle.attempt, sql)
+    if attempt.output is not None:
+        session.accepted += 1
+    status = 'rejected' if attempt.output is None else 'accepted'
+    flat = ' '.join(sql.split())
+    print(f'{number:4} {status}: {flat[:120]}')
+    outcome = 'accepted' if attempt.output is not None else f'rejected ({(attempt.rejection or "")[:100]})'
+    if attempt.findings:
+        outcome += ', FINDING ' + ', '.join(finding.kind for finding in attempt.findings)
+    session.tried.append(f'{outcome}: {flat[:160]}')
+    for finding in attempt.findings:
+        session.found(finding)
+    return attempt.render()
 
-    return agent
+
+@agent.tool
+def report_finding(ctx: RunContext[Session], title: str, sql: str, explanation: str) -> str:
+    """Record a problem that the checks behind `rewrite` cannot see.
+
+    Args:
+        title: The problem in one line.
+        sql: The exact statement that shows it.
+        explanation: What p14g did, what it should have done, and why it matters.
+    """
+    ctx.deps.found(Finding('claimed', f'{title}\n{explanation}', sql))
+    return 'recorded'

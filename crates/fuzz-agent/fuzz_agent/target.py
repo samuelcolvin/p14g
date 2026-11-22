@@ -1,6 +1,6 @@
 """What the agent attacks: a database, a policy over it, and what that policy is meant to allow.
 
-The agent is shown this file, so it is written to be read. Everything the policy does not allow holds a canary:
+The agent reads this file first, so it is written to be read. Everything the policy does not allow holds a canary:
 a random value made when the database is set up, which the agent is never told. A canary in a result, or in an
 error message from Postgres, means something was read that should not have been.
 """
