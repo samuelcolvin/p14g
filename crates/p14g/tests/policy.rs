@@ -555,6 +555,31 @@ fn limits() {
         ErrorKind::Limit
     );
 
+    // RETURNING is a select list too
+    let writes: Policy = dense()
+        .select(orders())
+        .insert(Insert::table("orders"))
+        .update(Update::table("orders").columns(["qty"]))
+        .delete(Delete::table("orders"))
+        .limits(Limits {
+            max_projection: 3,
+            ..Limits::default()
+        })
+        .build()
+        .unwrap();
+    assert!(
+        writes
+            .rewrite("delete from orders where id = 1 returning id, id, id", &())
+            .is_ok()
+    );
+    for sql in [
+        "insert into orders (qty) values (1) returning id, id, id, id",
+        "update orders set qty = 1 returning id, id, id, id",
+        "delete from orders where id = 1 returning id, id, id, id",
+    ] {
+        assert_eq!(kind(&writes, sql), ErrorKind::Limit, "{sql}");
+    }
+
     config_error(
         dense::<()>()
             .limits(Limits {

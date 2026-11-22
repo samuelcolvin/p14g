@@ -217,7 +217,7 @@ pub struct Limits {
     pub max_set_operations: usize,
     /// Most items in one `IN (...)` list.
     pub max_in_list: usize,
-    /// Most items in one select list.
+    /// Most items in one select list or `RETURNING`.
     pub max_projection: usize,
     /// Most rows in one `INSERT ... VALUES`.
     pub max_values_rows: usize,

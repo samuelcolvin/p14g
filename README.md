@@ -379,7 +379,8 @@ becomes.
 ## Limits
 
 `Limits` bounds the input before any rule is checked: 64 KiB of SQL, 10,000 tokens, nesting 50 deep, 8 joins,
-16 subqueries, 8 set operations, 1,000 items in an `IN` list, 200 select items and 1,000 inserted rows by default.
+16 subqueries, 8 set operations, 1,000 items in an `IN` list, 200 items in a select list or `RETURNING` and 1,000
+inserted rows by default.
 The select-list limit is checked again once `*` is expanded, since each level of nested subqueries can multiply
 the columns of the one below.
 

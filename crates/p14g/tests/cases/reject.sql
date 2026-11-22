@@ -217,6 +217,8 @@ denied: select id from orders union select id from customers order by 'x'
 
 -- star expanded past the select-list limit: each level multiplies the one below
 limit: select a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.*, a.* from (select o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.*, o.* from orders o) a
+-- RETURNING is held to the select-list limit too
+limit: insert into orders (product) values ('x') returning 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 
 -- select syntax p14g has no representation for
 unsupported: select id from orders for update
