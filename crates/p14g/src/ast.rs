@@ -12,6 +12,9 @@ use crate::error::{Error, ErrorKind, Result};
 /// are distinct to p14g collide in the database.
 pub const MAX_IDENT_BYTES: usize = 63;
 
+/// The highest placeholder number, `$65535`: Postgres binds at most 65535 parameters to a statement.
+pub const MAX_PLACEHOLDER: u32 = 65_535;
+
 /// A validated identifier: not empty, no NUL byte, at most [`MAX_IDENT_BYTES`] bytes.
 ///
 /// Holds the name exactly as Postgres will see it; it is always written double-quoted.

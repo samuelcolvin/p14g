@@ -7,7 +7,7 @@ use std::thread;
 use p14g::{
     Delete, Dialect, Error, ErrorKind, Filter, Insert, Layout, Limits, Literals, Mapper, Op, Policy, PolicyBuilder,
     QuoteIdentifiers, Select, Star, StatementKind, Update,
-    ast::{Expr, Function, Ident, Literal, Table},
+    ast::{Expr, Function, Ident, Literal, MAX_PLACEHOLDER, Table},
     functions,
 };
 
@@ -697,6 +697,23 @@ fn params_are_numbered_after_the_input_placeholders() {
         .unwrap();
     assert_eq!(safe.sql, "INSERT INTO orders (product, note) VALUES ($1, $2), ($3, $4)");
     assert_eq!(safe.params, ["a", "from the policy", "b", "from the policy"]);
+
+    // Postgres binds at most 65535 parameters, so no placeholder is written past `$65535`
+    let safe = policy.rewrite("select $65534, 'x' from orders", &()).unwrap();
+    assert_eq!(safe.sql, "SELECT $65534, $65535 FROM orders");
+    assert_eq!(kind(&policy, "select $65535, 'x' from orders"), ErrorKind::Limit);
+    assert_eq!(kind(&policy, "select $65534, 'x', 'y' from orders"), ErrorKind::Limit);
+}
+
+#[test]
+fn mapped_placeholder_past_the_limit() {
+    // a mapper is trusted, but the writer still refuses a placeholder Postgres cannot bind
+    let policy: Policy = dense()
+        .select(orders())
+        .map_literal(|_, ()| Ok(Expr::Placeholder(MAX_PLACEHOLDER + 1)))
+        .build()
+        .unwrap();
+    assert_eq!(kind(&policy, "select 'x' from orders"), ErrorKind::Unsupported);
 }
 
 struct Tenant {

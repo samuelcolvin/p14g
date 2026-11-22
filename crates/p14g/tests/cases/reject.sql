@@ -195,6 +195,8 @@ unsupported: select id from orders where qty = :name
 unsupported: select id from orders where qty = $0
 unsupported: select id from orders where qty = $name
 unsupported: select id from orders where qty = $999999
+-- Postgres binds at most 65535 parameters
+unsupported: select id from orders where qty = $65536
 
 -- identifiers
 unsupported: select aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa from v

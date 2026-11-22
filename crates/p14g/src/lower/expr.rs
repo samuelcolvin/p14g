@@ -4,7 +4,7 @@ use super::{Lower, ident, location, name_location, object_name, qualified_name, 
 use crate::{
     ast::{
         BinaryOperator, Column, DataType, DateField, Expr, Function, FunctionArgs, Ident, IsTest, LikeKind, Literal,
-        TrimSide, UnaryOperator, VariadicFunction, Window,
+        MAX_PLACEHOLDER, TrimSide, UnaryOperator, VariadicFunction, Window,
     },
     error::{Error, Location, Result},
     functions,
@@ -364,11 +364,9 @@ impl<'a> Lower<'a> {
             sp::Value::Placeholder(placeholder) => {
                 let number = placeholder
                     .strip_prefix('$')
-                    .filter(|digits| {
-                        !digits.is_empty() && digits.len() <= 5 && digits.bytes().all(|b| b.is_ascii_digit())
-                    })
+                    .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
                     .and_then(|digits| digits.parse::<u32>().ok())
-                    .filter(|&n| n > 0)
+                    .filter(|&n| (1..=MAX_PLACEHOLDER).contains(&n))
                     .ok_or_else(|| Error::unsupported(format!("the placeholder {placeholder:?} (use $1, $2, ...)")))?;
                 self.max_placeholder = self.max_placeholder.max(number);
                 Ok(Expr::Placeholder(number))
