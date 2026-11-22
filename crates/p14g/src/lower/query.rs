@@ -268,13 +268,7 @@ impl Lower<'_> {
         if projection.is_empty() {
             return Err(Error::unsupported("an empty select list"));
         }
-        if projection.len() > self.limits.max_projection {
-            return Err(Error::limit(format!(
-                "select list has more than {} items",
-                self.limits.max_projection
-            )));
-        }
-        let projection = self.select_items(projection)?;
+        let projection = self.select_items(projection, "select list")?;
         let from = from
             .into_iter()
             .enumerate()
@@ -308,7 +302,14 @@ impl Lower<'_> {
     }
 
     /// Lower a select list, also used for `RETURNING`.
-    pub(super) fn select_items(&mut self, items: Vec<sp::SelectItem>) -> Result<Vec<SelectItem>> {
+    /// A select list or a `RETURNING` list, `what` in the error when it is longer than `max_projection`.
+    pub(super) fn select_items(&mut self, items: Vec<sp::SelectItem>, what: &str) -> Result<Vec<SelectItem>> {
+        if items.len() > self.limits.max_projection {
+            return Err(Error::limit(format!(
+                "{what} has more than {} items",
+                self.limits.max_projection
+            )));
+        }
         items.into_iter().map(|item| self.select_item(item)).collect()
     }
 

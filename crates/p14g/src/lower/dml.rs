@@ -88,7 +88,7 @@ impl Lower<'_> {
                 )));
             }
         }
-        let returning = self.select_items(returning.unwrap_or_default())?;
+        let returning = self.select_items(returning.unwrap_or_default(), "RETURNING")?;
         Ok(Insert {
             table,
             columns,
@@ -195,7 +195,7 @@ impl Lower<'_> {
             table,
             assignments,
             selection: selection.map(|e| self.expr(e)).transpose()?,
-            returning: self.select_items(returning.unwrap_or_default())?,
+            returning: self.select_items(returning.unwrap_or_default(), "RETURNING")?,
         })
     }
 
@@ -230,7 +230,7 @@ impl Lower<'_> {
         Ok(Delete {
             table: self.write_target(target, "DELETE")?,
             selection: selection.map(|e| self.expr(e)).transpose()?,
-            returning: self.select_items(returning.unwrap_or_default())?,
+            returning: self.select_items(returning.unwrap_or_default(), "RETURNING")?,
         })
     }
 
