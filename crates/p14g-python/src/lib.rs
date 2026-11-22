@@ -6,6 +6,7 @@ use pyo3::{
     create_exception,
     exceptions::{PyTypeError, PyValueError},
     prelude::*,
+    sync::PyOnceLock,
     types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType},
 };
 
@@ -59,7 +60,10 @@ fn repr_list(items: Option<&Vec<String>>) -> String {
 
 /// A `types.GenericAlias` for `cls[item]`, so the generic classes in `p14g.pyi` can be subscripted.
 fn generic_alias<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    cls.py().import("types")?.getattr("GenericAlias")?.call1((cls, item))
+    static GENERIC_ALIAS: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    GENERIC_ALIAS
+        .import(cls.py(), "types", "GenericAlias")?
+        .call1((cls, item))
 }
 
 // ------------------------------------------------------------------ rules
