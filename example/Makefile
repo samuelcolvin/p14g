@@ -1,21 +1,20 @@
 .DEFAULT_GOAL := help
 
-# a Postgres just for this example; port 54331 to stay clear of the main repo's `make postgres` on 54329
-PORT ?= 54331
-
 .PHONY: install
 install: ## Create the python environment, building p14g from this repository
 	uv sync
 
 .PHONY: db
-db: ## Start Postgres 18 in Docker
-	docker run -d --rm --name p14g-example -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=example \
-		-p 127.0.0.1:$(PORT):5432 postgres:18
-	@until docker exec p14g-example pg_isready -U postgres -d example >/dev/null 2>&1; do sleep 0.5; done
+db: ## Start Postgres 18 in Docker on 127.0.0.1:54331, the compose file's `db` service
+	docker compose up -d --wait db
 
-.PHONY: db-stop
-db-stop: ## Stop the Postgres container
-	docker stop p14g-example
+.PHONY: up
+up: ## Build and run everything in Docker: Postgres, setup, and the server on http://127.0.0.1:8014
+	docker compose up --build
+
+.PHONY: down
+down: ## Stop the containers
+	docker compose down
 
 .PHONY: setup
 setup: ## (Re)create roles, tables, row-level security, seed data and grants

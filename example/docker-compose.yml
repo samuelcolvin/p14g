@@ -1,0 +1,40 @@
+# `docker compose up --build` starts Postgres, creates the roles, tables and grants, then runs the server on
+# http://127.0.0.1:8014. Postgres is on 127.0.0.1:54331, where `make test` and `make run` expect it.
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: example
+    ports:
+      - 127.0.0.1:54331:5432
+    healthcheck:
+      test: [CMD, pg_isready, -U, postgres, -d, example]
+      interval: 1s
+      retries: 30
+
+  # runs `setup()` once, then exits
+  setup:
+    image: p14g-example
+    build: &build
+      context: ..
+      dockerfile: example/Dockerfile
+    command: [python, -m, p14g_example.db]
+    environment: &environment
+      EXAMPLE_ADMIN_DSN: postgres://postgres:postgres@db:5432/example
+      EXAMPLE_OWNER_DSN: postgres://example_owner:owner@db:5432/example
+      EXAMPLE_AUTHENTICATOR_DSN: postgres://example_authenticator:authenticator@db:5432/example
+    depends_on:
+      db:
+        condition: service_healthy
+
+  server:
+    image: p14g-example
+    build: *build
+    environment: *environment
+    ports:
+      - 127.0.0.1:8014:8000
+    depends_on:
+      setup:
+        condition: service_completed_successfully

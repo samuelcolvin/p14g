@@ -13,11 +13,20 @@ It uses the three layers the p14g README recommends:
 
 ## Running it
 
-You need Docker, uv and a Rust toolchain: p14g is built from this repository.
+With only Docker:
+
+```bash
+docker compose up --build   # or `make up`
+```
+
+This starts Postgres, runs `setup()`, and serves on http://127.0.0.1:8014. The image is built from the repository
+root, since p14g is compiled from `crates/`.
+
+To run the server and tests locally you also need uv and a Rust toolchain:
 
 ```bash
 make install   # uv sync
-make db        # Postgres 18 in Docker on 127.0.0.1:54331
+make db        # just the compose file's Postgres, on 127.0.0.1:54331
 make setup     # roles, tables, RLS, seed data and grants; prints the grants
 make run       # http://127.0.0.1:8014, docs at /docs
 make test
