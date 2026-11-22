@@ -9,6 +9,17 @@ use crate::{
     error::{Error, Result},
 };
 
+/// One clause of a query and of the query in parentheses that is its body, which Postgres refuses to have twice.
+fn merge<T>(outer: T, inner: T, is_set: impl Fn(&T) -> bool, clause: &str) -> Result<T> {
+    match (is_set(&outer), is_set(&inner)) {
+        (true, true) => Err(Error::unsupported(format!(
+            "{clause} both inside and outside parentheses"
+        ))),
+        (true, false) => Ok(outer),
+        (false, _) => Ok(inner),
+    }
+}
+
 impl Lower<'_> {
     pub(super) fn query(&mut self, query: sp::Query) -> Result<Query> {
         self.nested(|this| this.query_inner(query))
@@ -75,12 +86,45 @@ impl Lower<'_> {
             }
             Some(sp::LimitClause::OffsetCommaLimit { .. }) => return Err(Error::unsupported("LIMIT offset, limit")),
         };
-        Ok(Query {
+        let query = Query {
             with,
             body,
             order_by,
             limit,
             offset,
+        };
+        Self::merge_parenthesised(query)
+    }
+
+    /// `(q) ORDER BY ... LIMIT n` as one query, with the clauses outside the parentheses moved onto `q`.
+    ///
+    /// Postgres reads it that way and refuses a clause that `q` already has: `(select 1 limit 2) limit 3` is "multiple
+    /// LIMIT clauses not allowed". The query in parentheses was merged when it was lowered, so one step is enough, and
+    /// no later stage sees a query whose body is a query in parentheses.
+    fn merge_parenthesised(query: Query) -> Result<Query> {
+        let Query {
+            with,
+            body: SetExpr::Query(inner),
+            order_by,
+            limit,
+            offset,
+        } = query
+        else {
+            return Ok(query);
+        };
+        let Query {
+            with: inner_with,
+            body,
+            order_by: inner_order_by,
+            limit: inner_limit,
+            offset: inner_offset,
+        } = *inner;
+        Ok(Query {
+            with: merge(with, inner_with, |w| !w.is_empty(), "WITH")?,
+            body,
+            order_by: merge(order_by, inner_order_by, |o| !o.is_empty(), "ORDER BY")?,
+            limit: merge(limit, inner_limit, Option::is_some, "LIMIT")?,
+            offset: merge(offset, inner_offset, Option::is_some, "OFFSET")?,
         })
     }
 

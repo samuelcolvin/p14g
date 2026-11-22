@@ -622,19 +622,15 @@ fn max_rows() {
     );
     assert_eq!(kind(&policy, "select id from orders limit $1"), ErrorKind::Denied);
 
-    // Postgres reads `(q) LIMIT n` as `q` with the `LIMIT` added, and refuses it when `q` has one already, so
-    // the limit inside the parentheses is the one lowered
+    // lowering moves clauses outside parentheses onto the query inside them, as Postgres reads them, so the limit
+    // to lower is always on the outermost query
     assert_eq!(
         rewrite(&policy, "(select id from orders limit 500)"),
-        "(SELECT orders.id FROM orders LIMIT 100)"
+        "SELECT orders.id FROM orders LIMIT 100"
     );
     assert_eq!(
-        rewrite(&policy, "((select id from orders limit 5)) order by id"),
-        "((SELECT orders.id FROM orders LIMIT 5)) ORDER BY id"
-    );
-    assert_eq!(
-        rewrite(&policy, "(select id from orders)"),
-        "(SELECT orders.id FROM orders) LIMIT 100"
+        rewrite(&policy, "((select id from orders offset 2)) order by id"),
+        "SELECT orders.id FROM orders ORDER BY orders.id LIMIT 100 OFFSET 2"
     );
     assert_eq!(
         rewrite(
