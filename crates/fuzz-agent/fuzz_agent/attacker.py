@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import logfire
-from pydantic_ai import Agent, ModelRetry, RunContext
-from pydantic_ai.capabilities import Hooks
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
+from pydantic_ai_harness import CodeMode
+from pydantic_monty import MountDir
 
 from .judge import Judge
 from .oracle import Finding, Oracle
@@ -23,7 +26,7 @@ from .oracle import Finding, Oracle
 ROOT = Path(__file__).resolve().parents[3]
 PACKAGE = Path(__file__).resolve().parent
 
-# shown to the agent in full; it can read anything else in the repository with its tools
+# shown to the agent in full; it can read anything else in the repository from `run_code`
 BRIEFING = [
     'README.md',
     'AGENTS.md',
@@ -78,9 +81,24 @@ yours to change.
 
 ## How to work
 
-- Read the source before guessing. `read_file`, `list_files` and `search` cover the whole repository. The Rust
-  under `crates/p14g/src/` is the implementation, `crates/p14g/tests/cases/reject.sql` is what has already been
-  thought of, and `accept.sql` is what is known to work.
+- You have one tool, `run_code`, which runs Python in a sandbox. Inside it, `await rewrite(sql=...)` and
+  `await report_finding(...)` are the functions described below, and the repository is a read-only directory at
+  `/repo`, with the same layout as the checkout. Read it with `pathlib` and search it with `re`, for example:
+
+      import re
+      from pathlib import Path
+
+      for path in Path('/repo/crates/p14g/src').rglob('*.rs'):
+          for number, line in enumerate(path.read_text().splitlines(), 1):
+              if re.search(r'fn member', line):
+                  print(f'{path}:{number}: {line.strip()}')
+
+  The sandbox runs a subset of Python: the standard library modules it has include `re`, `pathlib`, `json`,
+  `asyncio`, `itertools` and `collections`, and not every method of each is there. Paths do not compare, so sort
+  them with `key=str`. Print only what you need, as everything printed comes back to you.
+- Read the source before guessing. The Rust under `/repo/crates/p14g/src/` is the implementation,
+  `/repo/crates/p14g/tests/cases/reject.sql` is what has already been thought of, and `accept.sql` is what is
+  known to work.
 - Form a specific hypothesis about one piece of code ("`member` does not quote keywords, so a column named X after
   a dot ..."), then test it with `rewrite`. Statements that are plainly forbidden, such as
   `select password from secrets`, are rejected and teach you nothing. Look for the place where p14g's model of the
@@ -95,7 +113,8 @@ yours to change.
       any change to a row the policy does not allow is caught by comparing the tables before and after.
   A line starting `FINDING` in the result means a check failed. That is a success: it is recorded for you, so move
   on to a different idea, or find out how far it goes.
-- Call several tools in one turn when the calls do not depend on each other. You have a limited number of turns.
+- You have a limited number of turns, and one `run_code` call can do a lot: read several files, or try a batch of
+  statements in a loop or with `asyncio.gather`, printing what each one returned.
 - Reading is only worth what it leads you to try. Call `rewrite` within your first three or four turns, and from
   then on try statements in most turns, several at once, reading more only to explain a result or to find the
   next idea. A round that reads the whole library and tries nothing has found nothing.
@@ -105,7 +124,7 @@ yours to change.
 - The database is rebuilt for each run and nothing you do to it is kept.
 
 When you are out of ideas for the area you were given, stop and reply with a short summary: what you tried, what
-p14g did, and what you would try next. On your last turn the tools are taken away, and the reply you write then
+p14g did, and what you would try next. On your last turn `run_code` is taken away, and the reply you write then
 is that summary. The next round starts from it and nothing else you saw.
 
 ## Reference
@@ -174,11 +193,17 @@ class Session:
             self._files = frozenset(files)
         return self._files
 
-    def path(self, name: str) -> Path:
-        name = name.strip().removeprefix('./').rstrip('/')
-        if name not in self.files:
-            raise ModelRetry(f'{name!r} is not a file in the repository; use list_files to see what there is')
-        return ROOT / name
+
+def copy_repository(files: frozenset[str], destination: Path) -> Path:
+    """Copy `files` from the checkout to `destination`, which the agent's sandbox mounts read-only.
+
+    The checkout itself is not mounted: it has `.env`, the virtual environment and the runs of this fuzzer in it.
+    """
+    for name in files:
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    return destination
 
 
 def instructions() -> str:
@@ -201,6 +226,21 @@ def last_turn_without_tools(ctx: RunContext[Session], tool_defs: list[ToolDefini
     return [] if _last_turn(ctx) else tool_defs
 
 
+@dataclass
+class LastTurnWithoutTools(AbstractCapability[Session]):
+    """Offer no tools on the round's last request, so that its reply is the summary.
+
+    It wraps `CodeMode`, so it sees `run_code` itself: a `prepare_tools` hook is applied inside `CodeMode` and only
+    sees the tools `run_code` calls, so `run_code` would still be offered.
+    """
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position='outermost', wraps=[CodeMode])
+
+    def get_wrapper_toolset(self, toolset: AbstractToolset[Session]) -> AbstractToolset[Session]:
+        return PreparedToolset(toolset, last_turn_without_tools)
+
+
 def turn_instructions(ctx: RunContext[Session]) -> str:
     """Instructions for this request only: the summary on the last turn, and a push to start testing."""
     if _last_turn(ctx):
@@ -213,17 +253,24 @@ def turn_instructions(ctx: RunContext[Session]) -> str:
     if ctx.usage.requests >= TESTING_BY and ctx.deps.attempts == ctx.deps.round_start:
         return (
             f'You have not tried a statement this round and have {left} turns left. Stop reading and call '
-            '`rewrite` now, with several statements at once.'
+            '`rewrite` from `run_code` now, with several statements at once.'
         )
     return f'You have {left} turns left in this round, counting this one.'
 
 
-def build(model: Model | str) -> Agent[Session, str]:
+def build(model: Model | str, repository: Path) -> Agent[Session, str]:
+    """The agent, with `repository`, a copy made by `copy_repository`, mounted read-only at `/repo`."""
+    mount = MountDir(host_path=repository, virtual_path='/repo', mode='read-only')
     agent = Agent(
         model,
         deps_type=Session,
         instructions=[instructions(), turn_instructions],
-        capabilities=[Hooks[Session](prepare_tools=last_turn_without_tools)],
+        capabilities=[
+            LastTurnWithoutTools(),
+            # `rewrite` and `report_finding` are called from Python in the sandbox, so one request can read
+            # files and try a batch of statements
+            CodeMode(mount=mount),
+        ],
         model_settings=AnthropicModelSettings(
             thinking='high',
             # the briefing is long and the same on every request; other providers ignore these
@@ -276,63 +323,6 @@ def build(model: Model | str) -> Agent[Session, str]:
         """
         ctx.deps.found(Finding('claimed', f'{title}\n{explanation}', sql))
         return 'recorded'
-
-    @agent.tool
-    def list_files(ctx: RunContext[Session], directory: str = '') -> str:
-        """List the files of the repository under a directory.
-
-        Args:
-            directory: A path relative to the repository root, such as `crates/p14g/src`. Empty for everything.
-        """
-        prefix = directory.strip().removeprefix('./').strip('/')
-        names = sorted(name for name in ctx.deps.files if not prefix or name.startswith(f'{prefix}/'))
-        return '\n'.join(names) or f'nothing under {directory!r}'
-
-    @agent.tool
-    def read_file(ctx: RunContext[Session], path: str, first_line: int = 1, lines: int = 400) -> str:
-        """Read a file of the repository, with line numbers.
-
-        Args:
-            path: A path relative to the repository root, such as `crates/p14g/src/check.rs`.
-            first_line: The line to start from.
-            lines: How many lines to return, at most 800.
-        """
-        try:
-            text = ctx.deps.path(path).read_text().splitlines()
-        except (OSError, UnicodeDecodeError):
-            return f'{path} is not text'
-        start = max(first_line, 1) - 1
-        chunk = text[start : start + min(max(lines, 1), 800)]
-        body = '\n'.join(f'{start + n + 1:5}  {line}' for n, line in enumerate(chunk))
-        return f'{path}, lines {start + 1} to {start + len(chunk)} of {len(text)}\n{body}'
-
-    @agent.tool
-    def search(ctx: RunContext[Session], pattern: str, directory: str = 'crates/p14g') -> str:
-        """Search the repository's files for a regular expression, and return the matching lines.
-
-        Args:
-            pattern: A Python regular expression, matched against each line.
-            directory: Only search files under this path. Empty for everything.
-        """
-        try:
-            regex = re.compile(pattern)
-        except re.error as e:
-            raise ModelRetry(f'not a regular expression: {e}') from e
-        prefix = directory.strip().removeprefix('./').strip('/')
-        matches: list[str] = []
-        for name in sorted(ctx.deps.files):
-            if prefix and not name.startswith(f'{prefix}/') and name != prefix:
-                continue
-            try:
-                text = (ROOT / name).read_text()
-            except (UnicodeDecodeError, OSError):
-                continue
-            for number, line in enumerate(text.splitlines(), start=1):
-                if regex.search(line):
-                    matches.append(f'{name}:{number}: {line.strip()[:200]}')
-                    if len(matches) == 100:
-                        return '\n'.join(matches) + '\n(stopped at 100 matches)'
-        return '\n'.join(matches) or 'no matches'
 
     return agent
 

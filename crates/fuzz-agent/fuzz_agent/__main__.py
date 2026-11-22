@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import os
 import sys
+import tempfile
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 
 import logfire
 from pydantic_ai import UsageLimitExceeded
@@ -21,7 +23,7 @@ from pydantic_ai.providers.gateway import gateway_provider  # pyright: ignore[re
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from . import attacker
-from .attacker import FOCUS, PACKAGE, Session
+from .attacker import FOCUS, PACKAGE, Session, copy_repository
 from .judge import Judge
 from .oracle import Oracle
 
@@ -90,10 +92,12 @@ async def run(args: argparse.Namespace) -> int:
     directory = PACKAGE.parent / 'runs' / datetime.now().strftime('%Y-%m-%dT%H-%M-%S-%f')
     directory.mkdir(parents=True)
     oracle = Oracle(args.database_url)
+    # the copy of the repository the agent reads, removed when the run ends
+    repository = tempfile.TemporaryDirectory(prefix='p14g-fuzz-agent-')
     try:
         judge = Judge(args.judge_model, args.judge_threshold) if args.judge_model else None
         session = Session(oracle, judge, directory, turns=args.turns)
-        agent = attacker.build(model(args.model))
+        agent = attacker.build(model(args.model), copy_repository(session.files, Path(repository.name)))
 
         print(f'model: {args.model}')
         print(f'judge: {args.judge_model or "none (set TYPESAFE_API_KEY or pass --judge-model)"}')
@@ -165,6 +169,7 @@ async def run(args: argparse.Namespace) -> int:
         return 1 if kinds.keys() - OPINIONS else 0
     finally:
         oracle.close()
+        repository.cleanup()
 
 
 def model(name: str) -> Model:

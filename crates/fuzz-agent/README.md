@@ -5,8 +5,14 @@ the repository and submits SQL that tries to escape a fixed policy. Every accept
 an optional second model gives an independent opinion.
 
 The attacker receives the project README, `AGENTS.md`, the security-review checklist and the complete target policy
-and schema in its initial instructions. It can then use `list_files`, `search` and `read_file` over every tracked or
-unignored text file in the repository. Its `rewrite` tool runs both inline-literal and parameterized p14g policies.
+and schema in its initial instructions. It has one tool, `run_code`, from Pydantic AI Harness's
+[Code Mode](https://pydantic.dev/docs/ai/harness/): Python that runs in the [Monty](https://github.com/pydantic/monty)
+sandbox. From that code it calls `rewrite`, which runs both inline-literal and parameterized p14g policies, and
+`report_finding`, and it reads the repository with `pathlib` at `/repo`. That is a read-only mount of a copy of every
+tracked or unignored file, made for the run in a temporary directory, so the sandbox never sees `.env`, the virtual
+environment or earlier runs. One request can read several files, or try a batch of statements in a loop.
+
+The fuzzer needs Python 3.11 or later, for Code Mode.
 
 ## Run it
 

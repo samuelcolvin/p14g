@@ -20,11 +20,16 @@ fuzz-agent = [
     # Postgres's own parser, to check what p14g emits
     "pglast",
     "logfire[psycopg]",
+    "pydantic-ai-harness[code-mode]>=0.68.0",
 ]
 
 [tool.uv]
 # only use package versions that have been published for at least 7 days
 exclude-newer = "7 days"
+
+[tool.uv.dependency-groups]
+# Code Mode (pydantic-ai-harness) needs Python 3.11; p14g itself supports 3.10
+fuzz-agent = { requires-python = ">=3.11" }
 
 [tool.uv.workspace]
 members = ["crates/p14g-python"]

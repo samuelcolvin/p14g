@@ -5,15 +5,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from fuzz_agent import attacker
 from fuzz_agent.__main__ import usable_summary
 from fuzz_agent.attacker import (
     Session,
+    copy_repository,
     last_turn_without_tools,
     turn_instructions,
 )
 from fuzz_agent.judge import Judge
 from fuzz_agent.oracle import Oracle
 from fuzz_agent.worker import Worker
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.decision import (
     DecisionModel,
     DecisionModelSettings,
@@ -22,6 +25,7 @@ from pydantic_ai.models.decision import (
     NoulAnswer,
     NoulQuestion,
 )
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.providers import InterfaceClient
 
 
@@ -137,3 +141,53 @@ def test_usable_summary() -> None:
     pretend = '<tool_call>read_file<arg_value>first_line</arg_key><arg_value>200</arg_value></tool_call>'
     assert usable_summary(pretend) == 'The model wrote no summary.'
     assert usable_summary('  ') == 'The model wrote no summary.'
+
+
+# what the scripted model runs in the sandbox: read the mounted copy, try to write to it, and try a statement
+CODE = """
+from pathlib import Path
+print(Path('/repo/crates/p14g/src/check.rs').read_text().splitlines()[0])
+print(Path('/repo/.env').exists())
+try:
+    Path('/repo/written').write_text('x')
+except PermissionError:
+    print('read-only')
+print(await rewrite(sql='select id from customers'))
+"""
+
+
+def test_code_mode(tmp_path: Path) -> None:
+    tools_offered: list[list[str]] = []
+    returned: list[str] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        tools_offered.append([tool.name for tool in info.function_tools])
+        returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+        if returns or not info.function_tools:
+            returned.extend(str(part.content) for part in returns)
+            return ModelResponse(parts=[TextPart('summary')])
+        return ModelResponse(parts=[ToolCallPart('run_code', {'code': CODE})])
+
+    oracle = Oracle(None)
+    try:
+        session = Session(oracle, None, tmp_path, turns=5)
+        repository = copy_repository(session.files, tmp_path / 'repo')
+        agent = attacker.build(FunctionModel(model), repository)
+
+        assert agent.run_sync('attack', deps=session).output == 'summary'
+        # the file tools are gone: the agent reads the mounted copy and calls `rewrite` from Python
+        assert tools_offered == [['run_code'], ['run_code']]
+        [output] = returned
+        assert 'read-only' in output
+        assert 'False' in output
+        assert 'SELECT customers.id' in output
+        assert session.tried == ['accepted: select id from customers']
+        assert not (repository / 'written').exists()
+
+        # on the last turn of a round there is no `run_code` either, so the reply is the summary
+        tools_offered.clear()
+        session.turns = 1
+        assert agent.run_sync('attack', deps=session).output == 'summary'
+        assert tools_offered == [[]]
+    finally:
+        oracle.close()
