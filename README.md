@@ -182,9 +182,11 @@ It does not replace database privileges, and it cannot limit how much work a per
 - p14g's output cannot change the role it runs as.
   It rejects `SET`, `RESET`, `DISCARD` and transaction control such as `COMMIT` and `ROLLBACK TO SAVEPOINT`, which
   would undo a `SET LOCAL ROLE`.
-  A policy cannot allow `set_config` or an `UPDATE` of `pg_settings`.
-  A function you add with `functions=[...]` can still do it if it is `SECURITY DEFINER` or changes settings itself, so
-  do not add one that does.
+  A policy cannot allow `set_config`, the built-in functions that run SQL given as text (`query_to_xml`,
+  `query_to_xml_and_xmlschema`, `ts_stat`, `ts_rewrite`) or `dblink`, in `functions=[...]` or in a filter, or an
+  `UPDATE` of `pg_settings`.
+  A function of your own can still do it if it is `SECURITY DEFINER` or changes settings itself, so do not add one
+  that does.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.

@@ -105,6 +105,31 @@ pub const ARRAYS: &[&str] = &["array_length", "cardinality", "array_position"];
 
 pub const OTHER: &[&str] = &["gen_random_uuid"];
 
+/// Functions no policy can allow, in `functions` or in a rule's `filter`, in any schema.
+///
+/// Each can change the role a statement runs as: `set_config` sets `role` and `session_authorization`, the
+/// others run SQL given as text, which can call it. Postgres 18 has no other built-in function that does either.
+/// The `dblink` functions are from an extension, and connect as whoever their connection string names.
+pub const FORBIDDEN: &[&str] = &[
+    "set_config",
+    "query_to_xml",
+    "query_to_xml_and_xmlschema",
+    "ts_stat",
+    "ts_rewrite",
+    "dblink",
+    "dblink_exec",
+    "dblink_connect",
+    "dblink_connect_u",
+    "dblink_open",
+    "dblink_send_query",
+];
+
+/// Whether `name`, without its schema, is in [`FORBIDDEN`].
+#[must_use]
+pub fn is_forbidden(name: &str) -> bool {
+    FORBIDDEN.contains(&name)
+}
+
 /// Every group that makes up the default set.
 pub const DEFAULT_GROUPS: &[&[&str]] = &[
     AGGREGATES,

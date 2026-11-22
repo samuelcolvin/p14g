@@ -692,9 +692,10 @@ impl<C> PolicyBuilder<C> {
 
     /// Allow more functions, by `name` or `schema.name`, on top of the defaults.
     ///
-    /// `set_config` cannot be allowed: [`build`](Self::build) fails if it is. A function added here runs with the
-    /// privileges of its owner if it is `SECURITY DEFINER`, and can change settings itself, so only add functions
-    /// that do neither.
+    /// The functions in [`functions::FORBIDDEN`](crate::functions::FORBIDDEN), such as `set_config` and
+    /// `query_to_xml`, cannot be allowed: [`build`](Self::build) fails if one is. A function added here runs with
+    /// the privileges of its owner if it is `SECURITY DEFINER`, and can change settings itself, so only add
+    /// functions that do neither.
     #[must_use]
     pub fn functions<S: Into<String>>(mut self, functions: impl IntoIterator<Item = S>) -> Self {
         self.functions.extend(functions.into_iter().map(Into::into));
@@ -847,7 +848,7 @@ impl<C> PolicyBuilder<C> {
         let mut updates: BTreeMap<TableKey, Vec<UpdateRule<C>>> = BTreeMap::new();
         for rule in self.updates {
             let key = table_key(&rule.table)?;
-            // an update of `pg_catalog.pg_settings` is a call to `set_config`, see below
+            // an update of `pg_catalog.pg_settings` is a call to `set_config`
             if key.name.as_str() == "pg_settings" && key.schema.as_ref().is_none_or(|s| s.as_str() == "pg_catalog") {
                 return Err(Error::config(format!(
                     "cannot allow updates to {:?}: updating it changes the session's settings",
@@ -887,7 +888,14 @@ impl<C> PolicyBuilder<C> {
             allowed.extend(functions::defaults().map(str::to_owned));
         }
         for function in self.functions {
-            allowed.insert(function_key(&function)?);
+            let key = function_key(&function)?;
+            // nothing p14g accepts may change the role, see `functions::FORBIDDEN`
+            if key.rsplit('.').next().is_some_and(functions::is_forbidden) {
+                return Err(Error::config(format!(
+                    "cannot allow function {function:?}: it can change the role the statement runs as"
+                )));
+            }
+            allowed.insert(key);
         }
         for function in self.deny_functions {
             let key = function_key(&function)?;
@@ -896,13 +904,6 @@ impl<C> PolicyBuilder<C> {
                     "cannot deny function {function:?}: it is not an allowed function"
                 )));
             }
-        }
-
-        // `set_config` can set `role` and `session_authorization`, and nothing p14g accepts may change the role
-        if allowed.contains(FORBIDDEN_FUNCTION) {
-            return Err(Error::config(
-                "cannot allow function \"set_config\": it can change the role the statement runs as",
-            ));
         }
 
         if self.limits.max_depth == 0 {
@@ -932,10 +933,6 @@ impl<C> PolicyBuilder<C> {
         })
     }
 }
-
-/// The built-in function that changes settings, `role` and `session_authorization` among them. No policy can
-/// allow it.
-const FORBIDDEN_FUNCTION: &str = "set_config";
 
 /// Normalise a function name from the configuration to the key used for lookups: `name` or `schema.name`,
 /// with a `pg_catalog.` prefix dropped.

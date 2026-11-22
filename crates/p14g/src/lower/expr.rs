@@ -446,6 +446,12 @@ impl<'a> Lower<'a> {
         reject(&within_group, "WITHIN GROUP")?;
         reject(&null_treatment, "IGNORE / RESPECT NULLS")?;
         let (schema, name) = qualified_name(name, "a function name")?;
+        // a filter is trusted, but still may not change the role: see `functions::FORBIDDEN`
+        if self.filter.is_some() && functions::is_forbidden(name.as_str()) {
+            return Err(Error::denied(format!(
+                "function {name:?} can change the role the statement runs as"
+            )));
+        }
         // `pg_catalog.lower` and `lower` are the same builtin: keep one spelling so both are written alike
         let schema = schema.filter(|schema| !(schema.as_str() == "pg_catalog" && functions::is_default(name.as_str())));
 

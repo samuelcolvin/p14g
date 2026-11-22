@@ -1,7 +1,7 @@
 //! The policy and case files shared by the test suites.
 #![allow(dead_code, reason = "each test binary uses a different part of this module")]
 
-use p14g::{Delete, ErrorKind, Insert, Layout, Literals, Policy, PolicyBuilder, Select, Update};
+use p14g::{Delete, ErrorKind, Insert, Layout, Literals, Policy, PolicyBuilder, Select, Update, functions};
 
 /// The policy the case files are written against. `cases/schema.sql` grants a database role the same
 /// access, so Postgres can be used to check p14g's answers.
@@ -112,8 +112,39 @@ fn parse_rejects(file: &'static str) -> Vec<Reject> {
         .collect()
 }
 
-/// Panic unless Postgres's own parser reads `sql` as one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls no
-/// `set_config` and updates no `pg_settings`: a statement that cannot change the role it runs as.
+/// Every function call in `parsed`, as `schema.name` or `name`, wherever it is in the statement.
+///
+/// `ParseResult::functions()` and `nodes()` miss calls in `VALUES`, `RETURNING`, `FILTER`, `OVER`, `LIMIT`,
+/// `ARRAY[...]` and under `COLLATE`, so this serializes the whole tree and looks at every node.
+/// `crates/fuzz/src/lib.rs` has the same function.
+pub fn called_functions(parsed: &pg_query::ParseResult) -> Vec<String> {
+    fn walk(value: &Value, calls: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(call) = map.get("FuncCall") {
+                    let names = call["funcname"].as_array().into_iter().flatten();
+                    let names: Vec<&str> = names
+                        .filter_map(|name| name.pointer("/node/String/sval").and_then(Value::as_str))
+                        .collect();
+                    calls.push(names.join("."));
+                }
+                map.values().for_each(|value| walk(value, calls));
+            }
+            Value::Array(values) => values.iter().for_each(|value| walk(value, calls)),
+            _ => {}
+        }
+    }
+
+    use serde_json::Value;
+
+    let tree = serde_json::to_value(&parsed.protobuf).expect("a parse tree serializes");
+    let mut calls = Vec::new();
+    walk(&tree, &mut calls);
+    calls
+}
+
+/// Panic unless Postgres's own parser reads `sql` as one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls none
+/// of [`functions::FORBIDDEN`] and updates no `pg_settings`: a statement that cannot change the role it runs as.
 ///
 /// Every other kind of statement is a utility statement or `MERGE`, and none of those can appear inside these
 /// four in Postgres's grammar. `crates/fuzz/src/lib.rs` makes the same check.
@@ -133,9 +164,9 @@ pub fn assert_cannot_change_role(sql: &str, context: &str) {
         ),
         "{context}: not a SELECT, INSERT, UPDATE or DELETE: {sql}"
     );
-    for function in parsed.functions() {
+    for function in called_functions(&parsed) {
         assert!(
-            function.rsplit('.').next() != Some("set_config"),
+            !function.rsplit('.').next().is_some_and(functions::is_forbidden),
             "{context}: calls {function}: {sql}"
         );
     }

@@ -32,7 +32,7 @@ fn assert_within_policy(sql: &str, line: usize) {
             "line {line}: Postgres sees table {table:?} in {sql}"
         );
     }
-    for function in parsed.functions() {
+    for function in common::called_functions(&parsed) {
         // builtins are written by name unless the policy sets `qualify_builtins`; the grammar qualifies the
         // ones it produces itself, `btrim` for `TRIM` and `like_escape` for `LIKE ... ESCAPE`
         let name = function.strip_prefix("pg_catalog.").unwrap_or(&function);
@@ -65,7 +65,9 @@ fn rejected_cases_name_forbidden_things() {
         .filter_map(|case| pg_query::parse(case.sql).ok())
         .filter(|parsed| {
             parsed.tables().iter().any(|t| !TABLES.contains(&t.as_str()))
-                || parsed.functions().iter().any(|f| !functions::is_default(f))
+                || common::called_functions(parsed)
+                    .iter()
+                    .any(|f| !functions::is_default(f))
         })
         .count();
     assert!(

@@ -544,6 +544,7 @@ version = "0.0.2"
 dependencies = [
  "pg_query",
  "postgres",
+ "serde_json",
  "sqlparser",
  "stacker",
 ]

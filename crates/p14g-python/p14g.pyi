@@ -236,8 +236,8 @@ class Policy(Generic[_C]):
 
     Args:
         rules: What may be read and written.
-        functions: Functions to allow on top of the defaults, as `name` or `schema.name`. `set_config`
-            cannot be allowed, since it can change the role.
+        functions: Functions to allow on top of the defaults, as `name` or `schema.name`. Functions that
+            can change the role, `set_config` and those that run SQL such as `query_to_xml`, cannot be allowed.
         deny_functions: Functions to forbid that would otherwise be allowed.
         default_functions: Whether to start from `DEFAULT_FUNCTIONS`.
         operators: The operators a statement may use, on any table and on none.

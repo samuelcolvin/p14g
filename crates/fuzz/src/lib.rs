@@ -24,6 +24,7 @@ use std::{
 use p14g::{Delete, ErrorKind, Filter, Insert, Literals, Policy, PolicyBuilder, Select, Update, functions};
 use pg_query::{NodeEnum, ParseResult};
 use postgres::{Client, Config, NoTls, SimpleQueryMessage, error::SqlState};
+use serde_json::Value;
 
 /// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
 /// table, and writes.
@@ -137,6 +138,11 @@ fn explain(input: &str, output: &str) {
     };
     let mut database = database.lock().unwrap();
     let result = database.client.simple_query(&format!("EXPLAIN {output}"));
+    if let Err(error) = &result
+        && error.as_db_error().is_none()
+    {
+        panic!("lost the connection to Postgres: {error}");
+    }
     let now = identity(&mut database.client);
     assert_eq!(
         now, database.identity,
@@ -145,9 +151,7 @@ fn explain(input: &str, output: &str) {
     let Err(error) = result else {
         return;
     };
-    let Some(db_error) = error.as_db_error() else {
-        panic!("lost the connection to Postgres: {error}");
-    };
+    let db_error = error.as_db_error().expect("checked above");
     let problem = match db_error.code() {
         code if *code == SqlState::INSUFFICIENT_PRIVILEGE => "Postgres refused something the policy allowed",
         code if *code == SqlState::SYNTAX_ERROR => "Postgres cannot parse the output",
@@ -157,8 +161,37 @@ fn explain(input: &str, output: &str) {
     panic!("{problem}: {}\n input: {input}\noutput: {output}", db_error.message());
 }
 
-/// Panic unless `parsed` is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls no `set_config` and names no
-/// `pg_settings`, whose `UPDATE` rule calls `set_config`.
+/// Every function call in `parsed`, as `schema.name` or `name`, wherever it is in the statement.
+///
+/// `ParseResult::functions()` and `nodes()` miss calls in `VALUES`, `RETURNING`, `FILTER`, `OVER`, `LIMIT`,
+/// `ARRAY[...]` and under `COLLATE`, so this serializes the whole tree and looks at every node.
+/// `tests/common/mod.rs` has the same function.
+fn called_functions(parsed: &ParseResult) -> Vec<String> {
+    fn walk(value: &Value, calls: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(call) = map.get("FuncCall") {
+                    let names = call["funcname"].as_array().into_iter().flatten();
+                    let names: Vec<&str> = names
+                        .filter_map(|name| name.pointer("/node/String/sval").and_then(Value::as_str))
+                        .collect();
+                    calls.push(names.join("."));
+                }
+                map.values().for_each(|value| walk(value, calls));
+            }
+            Value::Array(values) => values.iter().for_each(|value| walk(value, calls)),
+            _ => {}
+        }
+    }
+
+    let tree = serde_json::to_value(&parsed.protobuf).expect("a parse tree serializes");
+    let mut calls = Vec::new();
+    walk(&tree, &mut calls);
+    calls
+}
+
+/// Panic unless `parsed` is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls none of
+/// [`functions::FORBIDDEN`] and names no `pg_settings`, whose `UPDATE` rule calls `set_config`.
 ///
 /// Every other kind of statement is a utility statement or `MERGE`, and Postgres's grammar has no way to put one
 /// inside these four. `tests/common/mod.rs` makes the same check on the test cases.
@@ -176,9 +209,9 @@ fn assert_cannot_change_role(parsed: &ParseResult, input: &str, output: &str) {
         ),
         "not a SELECT, INSERT, UPDATE or DELETE\n input: {input}\noutput: {output}"
     );
-    for function in parsed.functions() {
+    for function in called_functions(parsed) {
         assert!(
-            function.rsplit('.').next() != Some("set_config"),
+            !function.rsplit('.').next().is_some_and(functions::is_forbidden),
             "calls {function}\n input: {input}\noutput: {output}"
         );
     }
@@ -218,7 +251,7 @@ pub fn check(sql: &str) {
                 safe.sql
             );
         }
-        for function in parsed.functions() {
+        for function in called_functions(&parsed) {
             // builtins are written by name; the grammar qualifies the ones it produces itself
             let name = function.strip_prefix("pg_catalog.").unwrap_or(&function);
             let allowed = functions::is_default(name) || name == "btrim" || name == "like_escape";
@@ -310,6 +343,9 @@ pub const FRAGMENTS: &[&str] = &[
     // ways to change or reset the role, or the settings that decide what it reaches: see `tests/cases/role.sql`
     " set_config('role','none',false) ",
     " pg_catalog.set_config(",
+    " query_to_xml('select 1',true,true,'') ",
+    " ts_stat('select 1') ",
+    " dblink_exec('','reset role') ",
     " \"set_config\"(",
     " pg_settings ",
     " pg_catalog.pg_settings ",

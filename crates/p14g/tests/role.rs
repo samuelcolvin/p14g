@@ -6,8 +6,10 @@
 
 mod common;
 
+use std::panic;
+
 use common::{assert_cannot_change_role, builder, policy, role_cases};
-use p14g::{Dialect, Literals, Policy, Select, Update};
+use p14g::{Dialect, Filter, Literals, Policy, Select, Update, functions};
 
 #[test]
 fn role_cases_are_rejected() {
@@ -60,12 +62,23 @@ fn role_cases_are_rejected_in_every_dialect() {
     assert!(accepted.len() <= 3, "{}", accepted.join("\n"));
 }
 
-/// A policy cannot allow `set_config`, or an `UPDATE` of `pg_settings`, which calls it.
+/// A policy cannot allow a function that can change the role, in any schema or in a filter, or an `UPDATE` of
+/// `pg_settings`, which calls `set_config`.
 #[test]
 fn policy_cannot_allow_changing_the_role() {
-    for function in ["set_config", "pg_catalog.set_config"] {
-        let error = Policy::<()>::builder().functions([function]).build().err().unwrap();
-        assert!(error.message().contains("set_config"), "{function}: {error}");
+    for name in functions::FORBIDDEN {
+        for function in [
+            (*name).to_owned(),
+            format!("pg_catalog.{name}"),
+            format!("public.{name}"),
+        ] {
+            let error = Policy::<()>::builder()
+                .functions([function.as_str()])
+                .build()
+                .err()
+                .unwrap_or_else(|| panic!("{function} was allowed"));
+            assert!(error.message().contains("change the role"), "{function}: {error}");
+        }
     }
     let error = Policy::<()>::builder()
         .default_functions(false)
@@ -83,22 +96,7 @@ fn policy_cannot_allow_changing_the_role() {
             .unwrap();
         assert!(error.message().contains("pg_settings"), "{table}: {error}");
     }
-
-    // a function of that name in another schema is another function
-    let policy: Policy = Policy::builder()
-        .select(Select::table("orders").columns(["id"]))
-        .functions(["app.set_config"])
-        .build()
-        .unwrap();
-    assert!(policy.rewrite("select app.set_config(id) from orders", &()).is_ok());
-    assert!(policy.rewrite("select set_config('role', 'none', false)", &()).is_err());
-    assert!(
-        policy
-            .rewrite("select pg_catalog.set_config('role', 'none', false)", &())
-            .is_err()
-    );
-
-    // and so is a table of that name in another schema
+    // a table of that name in another schema is another table
     Policy::<()>::builder()
         .update(Update::table("app.pg_settings").columns(["setting"]))
         .build()
@@ -108,4 +106,55 @@ fn policy_cannot_allow_changing_the_role() {
         .update(Update::table("pg_settings").columns(["setting"]))
         .build()
         .unwrap();
+}
+
+/// A filter is trusted, but it cannot change the role either.
+#[test]
+fn filter_cannot_change_the_role() {
+    for condition in [
+        "set_config('role', 'none', false) is not null",
+        "pg_catalog.set_config('role', 'none', false) is not null",
+        "org = 1 and query_to_xml('select 1', true, true, '') is not null",
+        "length(ts_stat('select 1')::text) > 0",
+    ] {
+        let policy: Policy = Policy::builder()
+            .select(
+                Select::table("orders")
+                    .columns(["id"])
+                    .filter(move |()| Filter::new(condition)),
+            )
+            .build()
+            .unwrap();
+        let error = policy.rewrite("select id from orders", &()).unwrap_err();
+        assert!(error.message().contains("change the role"), "{condition}: {error}");
+    }
+}
+
+/// `called_functions` finds a call wherever it is, including the places `ParseResult::functions()` misses.
+#[test]
+fn every_call_is_seen() {
+    for sql in [
+        "SELECT set_config('role', 'none', false)",
+        "SELECT * FROM set_config('role', 'none', false)",
+        "INSERT INTO t (a) VALUES (set_config('role', 'none', false))",
+        "INSERT INTO t (a) VALUES (1), (set_config('role', 'none', false))",
+        "INSERT INTO t (a) VALUES (1) RETURNING set_config('role', 'none', false)",
+        "SELECT * FROM (VALUES (set_config('role', 'none', false))) v",
+        "SELECT count(*) FILTER (WHERE set_config('role', 'none', false) = 'x') FROM t",
+        "SELECT string_agg(a, ',' ORDER BY set_config('role', 'none', false)) FROM t",
+        "SELECT count(*) OVER (PARTITION BY set_config('role', 'none', false)) FROM t",
+        "SELECT count(*) OVER (ORDER BY set_config('role', 'none', false)) FROM t",
+        "SELECT a FROM t LIMIT length(set_config('role', 'none', false))",
+        "SELECT a FROM t OFFSET length(set_config('role', 'none', false))",
+        "SELECT ARRAY[set_config('role', 'none', false)]",
+        "SELECT a FROM t ORDER BY set_config('role', 'none', false) COLLATE \"C\"",
+        "SELECT \"pg_catalog\".\"set_config\"('role', 'none', false)",
+        "SELECT query_to_xml('select 1', true, true, '')",
+        "SELECT * FROM public.dblink('', 'select 1') AS d (x int)",
+    ] {
+        let caught = panic::catch_unwind(|| assert_cannot_change_role(sql, "test"));
+        assert!(caught.is_err(), "not caught: {sql}");
+    }
+    // and only those
+    assert_cannot_change_role("SELECT lower(a), count(*) OVER (ORDER BY b) FROM t LIMIT 3", "test");
 }

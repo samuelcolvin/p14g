@@ -167,3 +167,10 @@ parse: select 'a'; reset role; select 'b'
 parse: select $$x$$; reset role
 parse: select E'\''; reset role --'
 parse: select 'x\'; reset role --'
+-- built-in functions that run SQL given as text, which can call set_config
+denied: select query_to_xml('select set_config(''role'', ''none'', false)', true, true, '')
+denied: select query_to_xml_and_xmlschema('select 1', true, true, '')
+denied: select pg_catalog.query_to_xml('select 1', true, true, '')
+denied: select count(*) from orders where ts_stat('select 1') is not null
+denied: select ts_rewrite(product, 'select 1') from orders
+denied: select public.dblink('user=postgres', 'reset role')

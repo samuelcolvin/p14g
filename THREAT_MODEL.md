@@ -59,7 +59,8 @@ For any statement `rewrite()` accepts, in a deployment that does the above:
   This is the guarantee the rest depend on, since the grants and row-level security belong to that role.
   `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET`, and `COMMIT`, `ROLLBACK` and
   `ROLLBACK TO SAVEPOINT`, which undo a `SET LOCAL ROLE`, are all statements other than the four below.
-  `set_config` cannot be added to a policy, and neither can an `UPDATE` rule for `pg_settings`, which calls it.
+  A policy cannot add `set_config`, or a built-in function that runs SQL given as text such as `query_to_xml`, even in
+  a filter, and cannot have an `UPDATE` rule for `pg_settings`, which calls `set_config`.
 - The output is one `SELECT`, `INSERT`, `UPDATE` or `DELETE`, and Postgres parses it as the statement p14g checked.
   No text from the input reaches the output: names are validated and quoted, literals are escaped, and everything else
   is written from a fixed set of tokens.
@@ -104,8 +105,8 @@ The README's [Rows](README.md#rows) section has more on filters.
   How long a statement takes can depend on rows the author cannot read.
 - Mistakes in the policy: a column or table allowed that should not be, an added function with side effects, an
   `Insert` on a filtered table with no `extra` for the filter's column.
-  An added function that is `SECURITY DEFINER` runs as its owner, and one that calls `set_config` or runs SQL can
-  change the role.
+  An added function of your own that is `SECURITY DEFINER` runs as its owner, and one that calls `set_config` or runs
+  SQL can change the role.
 - Sequences that inserted rows take defaults from, which the grants do not cover.
   The grants also cannot express a filter, so they let the role read and write every row.
 - A compromised database, application, or Python process.
@@ -166,10 +167,10 @@ Include the policy, the input SQL, the output, and what the output did when you 
   or `session_replication_role`.
   It also checks the keyword list against the server and that filters hold through joins, subqueries and writes.
 - `tests/pg_query.rs` parses the output with libpg_query, Postgres's own parser, and checks it is one `SELECT`,
-  `INSERT`, `UPDATE` or `DELETE` with no call to `set_config`.
+  `INSERT`, `UPDATE` or `DELETE` with no call to a function that can change the role.
 - The fuzzers in `crates/fuzz` run hostile and mutated input through `rewrite()` and check that the output reads back
   as itself.
-  They check every output is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` with no call to `set_config`, and splice in
+  They check every output is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` with no call to such a function, and splice in
   statements and calls that change the role.
   With `P14G_TEST_DATABASE_URL` set they also run each output through `EXPLAIN`, fail on a permission, syntax or
   undefined-table error, and check the session is still the restricted role afterwards.

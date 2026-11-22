@@ -212,9 +212,9 @@ def test_functions():
 
 
 def test_role_cannot_change():
-    for functions in ['set_config'], ['pg_catalog.set_config']:
-        with pytest.raises(P14gError, match='cannot allow function "set_config"') as exc_info:
-            DensePolicy(functions=functions)
+    for function in 'set_config', 'pg_catalog.set_config', 'query_to_xml', 'public.dblink_exec':
+        with pytest.raises(P14gError, match=f'cannot allow function "{function}"') as exc_info:
+            DensePolicy(functions=[function])
         assert exc_info.value.kind == 'config'
     with pytest.raises(P14gError, match='cannot allow updates to "pg_settings"'):
         DensePolicy(Update('pg_settings', columns=['setting']))
