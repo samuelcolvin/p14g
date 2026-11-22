@@ -157,6 +157,10 @@ It does not replace database privileges, and it cannot limit how much work a per
 - Connect as a role that has been granted only what the policy allows.
   `policy.grants('app_role')` returns the `GRANT` statements for a policy's tables and columns.
   It does not cover sequences that inserted rows take defaults from, or tables a mapper renames statements to.
+- If a rule's `filter` keeps one user's rows from another, put row-level security on the same table as well.
+  A filter decides which rows a statement returns and changes.
+  It does not stop the statement finding out that other rows exist, with a condition that fails on them.
+  See [Why you should use `filter` and RLS together](#why-you-should-use-filter-and-rls-together).
 - Set a time limit on every query: `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout` on
   that role.
   A cross join of two large tables you allowed is a valid query, and p14g does not estimate how long a query will run.
@@ -171,8 +175,6 @@ It does not replace database privileges, and it cannot limit how much work a per
   Built-in functions are then written `pg_catalog.lower(...)`.
   Postgres looks in `pg_catalog` first, but between functions with different argument types it picks the closest
   match wherever it is in the path, so a `public.lower(varchar)` would be called for a `varchar` argument.
-- For rows that must not leak even through error messages or timing, use row-level security or a `security_barrier`
-  view as well as, or in place of, a rule's `filter` (see [Rows](#rows)).
 - Do not show database error messages to the author of the SQL unless you are content for them to see them.
   A unique-violation error says that a value exists.
 
@@ -331,11 +333,11 @@ print(policy.rewrite('delete from orders where id = 7 or true', context={'org_id
   Several `Select` or `Update` rules are still alternatives, each with its own filter, so one rule can allow some
   columns of every row and another all the columns of the user's own rows.
 
-A filter is weaker than Postgres's own row controls in one way.
-Postgres may evaluate the statement's conditions on a row before the filter's, so an error such as a division by zero
-can reveal something about a row the filter excludes.
-p14g's limits on functions and operators narrow that, and do not close it.
-Row-level security, or a view declared `WITH (security_barrier = true)`, does:
+A statement can find out about rows its filter excludes, because Postgres may evaluate the statement's conditions on a
+row before the filter's.
+Row-level security closes that, and so does a view declared `WITH (security_barrier = true)`.
+For row-level security, see [Why you should use `filter` and RLS together](#why-you-should-use-filter-and-rls-together).
+A view takes the place of a filter:
 
 ```sql
 CREATE VIEW cheap_orders WITH (security_barrier = true) AS
@@ -455,6 +457,82 @@ Postgres, not functions, so a `Function` mapper is not called for them.
 They are still allowed and denied by name with `functions` and `deny_functions`.
 What a mapper returns is not checked against the policy, so a mapper is trusted code.
 It is written by the same writer as the rest of the statement, so it cannot produce unescaped SQL.
+
+## Why you should use `filter` and RLS together
+
+A filter decides which rows a statement returns, updates and deletes.
+It does not stop the statement learning that other rows exist.
+p14g puts the filtered table in a subquery, Postgres flattens it into the outer query, and the planner then orders all
+the conditions on the table by estimated cost.
+A condition in the statement that is cheaper than the filter runs first, on every row, including rows the filter will
+exclude.
+
+With `filter=lambda c: ('org in (:orgs)', {'orgs': c['orgs']})` and eight orgs in the list, this statement fails with
+a division by zero if a row with `id = 3` exists in any org:
+
+```sql
+select id from orders where 1 / (id - 3) > 0
+```
+
+Repeating it with other values reads the table one bit per statement, from success or failure.
+Hiding database error messages does not help, because the failure is the signal.
+A cast such as `product::int` that fails also puts the value in the error message.
+`/`, `%` and casts are allowed by default.
+Taking operators and functions out narrows this, and does not close it.
+A filter with a single cheap comparison such as `org = :org` is evaluated first today, but only because of the
+planner's cost estimates, which a later Postgres or a different plan can change.
+`filters_are_not_a_security_barrier` in `tests/postgres.rs` runs the statement above against Postgres.
+
+Row-level security does not have this problem.
+Postgres evaluates a policy's condition before any condition in the statement that is not `LEAKPROOF`, so the
+statement never sees a row the policy excludes.
+`WITH CHECK` also covers `INSERT`, which a filter does not.
+
+Row-level security on its own has gaps that a filter covers:
+
+- It does not apply to the table's owner unless the table has `FORCE ROW LEVEL SECURITY`, or to superusers and roles
+  with `BYPASSRLS`.
+  Connected as one of those, every statement runs with no error and sees every row.
+  A filter is in the SQL p14g writes, whatever role runs it.
+- It is defined in the database, not in the policy, and p14g's output does not show whether it is there.
+  You can test a filter by reading `rewrite()`'s output, without a database.
+- The policy usually reads the user from a setting.
+  Set it with `set_config(..., true)` or `SET LOCAL` inside the transaction: a plain `SET` stays on a pooled connection
+  for the next client.
+  p14g rejects `SET` and does not allow `set_config` by default, which is what stops the statement changing the
+  setting itself.
+
+Use both, with the same condition:
+
+```sql
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY by_org ON orders
+    USING (org = current_setting('app.org_id')::int)
+    WITH CHECK (org = current_setting('app.org_id')::int);
+```
+
+```python
+def org(context):
+    return 'org = :org_id', {'org_id': context['org_id']}
+
+
+policy = Policy(
+    Select('orders', columns=['id', 'qty'], filter=org),
+    Insert('orders', columns=['qty'], extra=lambda context: {'org': context['org_id']}),
+    Update('orders', columns=['qty'], filter=org),
+    Delete('orders', filter=org),
+)
+
+# with psycopg 3
+with conn.transaction():
+    conn.execute("select set_config('app.org_id', %s, true)", [str(org_id)])
+    rows = conn.execute(policy.rewrite(sql, context={'org_id': org_id}).sql).fetchall()
+```
+
+If row-level security is missing or bypassed, the filter still limits which rows the statement returns and changes.
+If the statement tries the division above, row-level security stops it.
+Neither one hides what a unique-violation or foreign key error says about other rows, because Postgres checks
+constraints without row-level security.
 
 ## Supported SQL
 

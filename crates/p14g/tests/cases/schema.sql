@@ -30,6 +30,12 @@ INSERT INTO family_child VALUES (10, 'child', 'x'), (11, 'child', 'y'), (12, 'ch
 -- rows of two orgs, for rules with a filter
 CREATE TABLE scoped (id int, val text, org int, hidden text);
 INSERT INTO scoped VALUES (1, 'a', 1, 'h'), (2, 'b', 1, 'h'), (3, 'c', 2, 'h'), (4, 'd', 2, 'h'), (5, 'e', 2, 'h');
+-- the same rows behind row-level security, with the orgs a session may see in the setting `p14g.orgs`
+CREATE TABLE scoped_rls (id int, val text, org int);
+INSERT INTO scoped_rls SELECT id, val, org FROM scoped;
+ALTER TABLE scoped_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY by_org ON scoped_rls
+    USING (org = ANY (string_to_array(current_setting('p14g.orgs', true), ',')::int[]));
 
 INSERT INTO customers VALUES (1, 'alice', 'a@example.com'), (2, 'bob', 'b@example.com');
 INSERT INTO orders (product, qty, customer_id, tenant_id) VALUES ('tea', 2, 1, 42), ('coffee', 20, 2, 42), ('milk', 0, 1, 7);
@@ -53,3 +59,4 @@ GRANT USAGE ON SEQUENCE audit_id_seq TO p14g_test_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO p14g_test_role;
 GRANT SELECT (id, label), INSERT (id, label), UPDATE (label), DELETE ON family TO p14g_test_role;
 GRANT SELECT (id, val, org), INSERT (id, val, org), UPDATE (val), DELETE ON scoped TO p14g_test_role;
+GRANT SELECT (id, val) ON scoped_rls TO p14g_test_role;

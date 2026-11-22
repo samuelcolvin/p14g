@@ -129,6 +129,7 @@ fn postgres_agrees() {
     keywords_and_quoting(&mut client);
     function_names(&mut client);
     filters_restrict_rows(&mut client);
+    filters_are_not_a_security_barrier(&mut client);
 }
 
 const NASTY: &[&str] = &[
@@ -570,4 +571,59 @@ fn filters_restrict_rows(client: &mut Client) {
             .unwrap()
             .contains(&r#"GRANT SELECT ("id", "val", "org") ON "scoped" TO "someone""#.to_owned())
     );
+}
+
+/// The README's warning about filters: Postgres may evaluate the statement's own conditions on a row before
+/// the filter's, so whether a statement fails can depend on rows the filter excludes. Row-level security
+/// evaluates its condition first, and closes that.
+///
+/// The leak depends on the planner's cost estimates: a filter that costs more than the statement's condition
+/// is evaluated after it. If a Postgres release changes that, this test fails, and the README should be
+/// checked rather than the test relaxed.
+fn filters_are_not_a_security_barrier(client: &mut Client) {
+    // a user who belongs to org 1 and to orgs that have no rows; eight values make `IN` cost more than the
+    // statement's condition
+    const ORGS: [i64; 8] = [1, 11, 12, 13, 14, 15, 16, 17];
+    let policy: Policy = Policy::builder()
+        .layout(Layout::Dense)
+        .literals(Literals::Inline)
+        .select(
+            Select::table("scoped")
+                .columns(["id", "val"])
+                .filter(|()| Filter::new("org in (:orgs)").bind("orgs", ORGS.to_vec())),
+        )
+        .select(Select::table("scoped_rls").columns(["id", "val"]))
+        .build()
+        .unwrap();
+    let run_with_rls = |client: &mut Client, sql: &str| -> Result<usize, postgres::Error> {
+        let safe = policy.rewrite(sql, &()).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let mut transaction = client.transaction()?;
+        let orgs = ORGS.map(|org| org.to_string()).join(",");
+        transaction.batch_execute(&format!("SET LOCAL ROLE {ROLE}; SET LOCAL p14g.orgs = '{orgs}'"))?;
+        let rows = transaction
+            .simple_query(&safe.sql)?
+            .iter()
+            .filter(|message| matches!(message, SimpleQueryMessage::Row(_)))
+            .count();
+        transaction.rollback()?;
+        Ok(rows)
+    };
+
+    // the filter hides rows 3 to 5, which belong to org 2
+    assert_eq!(run_with_rls(client, "select id from scoped").unwrap(), 2);
+    assert_eq!(
+        run_with_rls(client, "select id from scoped where 1 / (id - 99) > 0").unwrap(),
+        0
+    );
+    // but dividing by zero on row 3 fails the statement, which says that row 3 exists in another org
+    let sql = "select id from scoped where 1 / (id - 3) > 0";
+    let error = run_with_rls(client, sql).expect_err(sql);
+    assert_eq!(error.code().map(SqlState::code), Some("22012"), "{sql}");
+
+    // row-level security hides the same rows, and the same statement cannot see past it
+    assert_eq!(run_with_rls(client, "select id from scoped_rls").unwrap(), 2);
+    for id in [3, 4, 5, 99] {
+        let sql = format!("select id from scoped_rls where 1 / (id - {id}) > 0");
+        assert_eq!(run_with_rls(client, &sql).unwrap(), 0, "{sql}");
+    }
 }

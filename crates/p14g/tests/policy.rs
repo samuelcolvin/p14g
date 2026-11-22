@@ -1655,6 +1655,17 @@ fn filters() {
         rewrite("with o as (select id from orders) select o.id, plain.x from o, plain"),
         format!("WITH o AS (SELECT orders.id FROM {orders} AS orders) SELECT o.id, plain.x FROM o, plain")
     );
+    // each filter goes on its own table when the FROM list mixes CTEs, derived tables and joins
+    assert_eq!(
+        rewrite(
+            "with p as (select x from plain) select 1 from p, (select id from orders) d join plain on true, \
+             plain p2 join orders o on o.id = d.id"
+        ),
+        format!(
+            "WITH p AS (SELECT plain.x FROM plain) SELECT 1 FROM p, (SELECT orders.id FROM {orders} AS orders) AS d \
+             INNER JOIN plain ON TRUE, plain AS p2 INNER JOIN {orders} AS o ON o.id = d.id"
+        )
+    );
     // the columns the filter reads are not thereby readable by the statement
     assert_eq!(
         policy.rewrite("select org from orders", &tenant).unwrap_err().kind(),
