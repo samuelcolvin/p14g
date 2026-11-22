@@ -308,16 +308,31 @@ impl<'p, C> Checker<'p, C> {
     fn filter_tables(&mut self, from: &mut [TableWithJoins]) -> Result<()> {
         let instances = self.scopes.last().expect("select pushed a scope").instances.clone();
         // instances were added in this order: each FROM item, then the tables it joins
-        let factors = from.iter_mut().flat_map(|table| {
-            iter::once(&mut table.relation).chain(table.joins.iter_mut().map(|join| &mut join.relation))
-        });
+        let factors: Vec<&mut TableFactor> = from
+            .iter_mut()
+            .flat_map(|table| {
+                iter::once(&mut table.relation).chain(table.joins.iter_mut().map(|join| &mut join.relation))
+            })
+            .collect();
+        // If the pairing below went wrong, a table would be left unfiltered, or get another table's
+        // filter. Neither can happen today; refuse the statement rather than rely on that.
+        if factors.len() != instances.len() {
+            return Err(filter_not_applied("a table in FROM"));
+        }
         for (index, factor) in instances.into_iter().zip(factors) {
-            let Some(rule) = self.instances[index].rule else {
+            let instance = &self.instances[index];
+            let Some(rule) = instance.rule else {
                 continue;
             };
-            let (Some(filter), TableFactor::Table(table)) = (&rule.filter, &*factor) else {
+            let Some(filter) = &rule.filter else {
                 continue;
             };
+            let TableFactor::Table(table) = &*factor else {
+                return Err(filter_not_applied(instance.alias.as_str()));
+            };
+            if table.reference_name() != &instance.alias {
+                return Err(filter_not_applied(instance.alias.as_str()));
+            }
             let filter = filter(self.context)?;
             // inside the subquery the table has no alias, its columns go by its own name
             let bound = filter::bind(&filter, &table.name, &table.name, &self.policy.limits)?;
@@ -1173,6 +1188,11 @@ fn ordinal(number: &str, columns: usize) -> Result<u32> {
         .ok()
         .filter(|&n| n >= 1 && n as usize <= columns)
         .ok_or_else(|| Error::denied(format!("{number} is not a position in the select list")))
+}
+
+/// A filter that could not be put on a table: the statement is refused rather than run unfiltered.
+fn filter_not_applied(table: &str) -> Error {
+    Error::denied(format!("the policy's filter for {table:?} could not be applied"))
 }
 
 fn first_duplicate(columns: &[Ident]) -> Option<&Ident> {
