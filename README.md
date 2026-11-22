@@ -7,18 +7,16 @@
 
 Check untrusted SQL against an allowlist and rewrite it so it is safe to run on Postgres.
 
-Parental Guidance (p14g) is for running SQL written by someone you do not trust, such as an LLM or an end user,
-directly against a Postgres database.
+## Why
+
+_"Just use Postgres"_ is great, so is _"Just give the Agent SQL"_. However, the two rules are generally mutually exclusive.
+
+Parental Guidance (`p14g`) lets you have both. It allows agents to run SQL against your production database safely.
+
 You give it rules for which tables, columns, operators and functions may be used.
 It parses each statement with [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs), lowers it to a simple AST, checks it against the rules, and writes out new SQL for you to run.
 
 It is a Rust library, `p14g`, with a Python package of the same name built with PyO3.
-
-## Why
-
-"Just use Postgres" is still a great principle, so is "Just give the Agent SQL". However, the two rules are generally mutually exclusive.
-
-p14g allows you to just use SQL AND give the Agent SQL access.
 
 ## Security and Threat Model
 
@@ -26,7 +24,7 @@ p14g should be used together with role permissions and row-level security.
 
 See [Security Considerations](#security-considerations) for more details on how to use p14g safely.
 
-See [THREAT_MODEL.md](THREAT_MODEL.md) for details on the threat model.
+See [THREAT_MODEL.md](https://github.com/samuelcolvin/p14g/blob/main/THREAT_MODEL.md) for details on the threat model.
 
 ## Python Example
 
