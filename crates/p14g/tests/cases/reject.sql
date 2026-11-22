@@ -235,6 +235,8 @@ unsupported: select * from (select 1)
 unsupported: select * from (values (1), (2)) as t (a)
 unsupported: select distinct on (customer_id) id from orders
 unsupported: select id from orders fetch first 5 rows only
+-- Postgres reads a varchar length as an int4 constant
+unsupported: select cast(product as varchar(2147483648)) from orders
 unsupported: select id from orders limit qty
 unsupported: select id from orders limit (select count(*) from secrets)
 -- a clause both inside and outside parentheses, which Postgres refuses: it reads them as one query

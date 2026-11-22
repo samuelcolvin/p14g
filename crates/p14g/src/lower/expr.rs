@@ -704,7 +704,12 @@ fn lower_data_type(data_type: sp::DataType) -> Result<DataType> {
         sp::DataType::Varchar(length) | sp::DataType::CharacterVarying(length) | sp::DataType::CharVarying(length) => {
             Ok(DataType::Varchar(match length {
                 None => None,
-                Some(sp::CharacterLength::IntegerLength { length, unit: None }) => Some(narrow(length, "length")?),
+                Some(sp::CharacterLength::IntegerLength { length, unit: None }) => {
+                    // Postgres's grammar reads the length as an int4 constant, and a larger one is a syntax error;
+                    // it came from a u64, so it is not negative
+                    let length: i32 = narrow(length, "length")?;
+                    Some(length.unsigned_abs())
+                }
                 Some(_) => return Err(Error::unsupported("this varchar length")),
             }))
         }
