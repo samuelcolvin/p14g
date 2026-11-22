@@ -20,8 +20,8 @@ from pydantic_ai.providers import Provider, infer_provider
 from pydantic_ai.providers.gateway import gateway_provider  # pyright: ignore[reportUnknownVariableType]
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from . import attacker
-from .attacker import FOCUS, PACKAGE, Session, copy_repository
+from . import attacker, library
+from .attacker import FOCUS, PACKAGE, Session
 from .oracle import Oracle
 
 TRIED_IN_NOTES = 60
@@ -78,7 +78,7 @@ async def run(args: argparse.Namespace) -> int:
     oracle = Oracle(args.database_url)
     try:
         session = Session(oracle, directory, turns=args.turns)
-        copy_repository()
+        library.refresh()
         attacking_model = model(args.model)
 
         print(f'model: {args.model}')

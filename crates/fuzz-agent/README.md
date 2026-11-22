@@ -7,12 +7,12 @@ and run on Postgres.
 The attacker has one tool, `run_code`, from Pydantic AI Harness's [Code Mode](https://pydantic.dev/docs/ai/harness/):
 Python that runs in the [Monty](https://github.com/pydantic/monty) sandbox. From that code it calls `rewrite`, which
 runs both inline-literal and parameterized p14g policies, and `report_finding`, and it reads the repository with
-`pathlib` at `/repo`. One request can read several files, or try a batch of statements in a loop. Its instructions
+`pathlib` at `/library`. One request can read several files, or try a batch of statements in a loop. Its instructions
 tell it to start with the project README, `AGENTS.md`, the security-review checklist and `fuzz_agent/target.py`,
 which defines the policy and schema it attacks.
 
-`/repo` is a read-only mount of `crates/fuzz-agent/repository/`, which each run fills with a copy of every tracked or
-unignored file, so the sandbox never sees `.env`, the virtual environment or earlier runs.
+`/library` is a read-only mount of `crates/fuzz-agent/.library/`, which each run empties and fills with a fresh copy of
+every tracked or unignored file, so the sandbox never sees `.env`, the virtual environment or earlier runs.
 
 The fuzzer needs Python 3.11 or later, for Code Mode.
 

@@ -63,8 +63,8 @@ quote-style = "single"
 
 [tool.basedpyright]
 include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests", "crates/fuzz-agent"]
-# the copy of the repository the fuzz agent reads, and its runs
-exclude = ["crates/fuzz-agent/repository", "crates/fuzz-agent/runs", "**/__pycache__", "**/.*"]
+# the fuzz agent's runs, and hidden directories such as its copy of the repository, `.library`
+exclude = ["crates/fuzz-agent/runs", "**/__pycache__", "**/.*"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingModuleSource = false

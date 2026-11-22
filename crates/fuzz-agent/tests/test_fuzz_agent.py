@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
-from fuzz_agent import attacker
+from fuzz_agent import attacker, library
 from fuzz_agent.__main__ import usable_summary
-from fuzz_agent.attacker import Session, copy_repository, repository_files
+from fuzz_agent.attacker import Session
 from fuzz_agent.oracle import Oracle
 from fuzz_agent.worker import Worker
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -29,7 +29,7 @@ def test_oracle(oracle: Oracle) -> None:
     assert "docs.status IN ('draft', 'published')" in filtered.output
     assert filtered.findings == []
 
-    files = repository_files()
+    files = library.files()
     assert 'crates/p14g/src/check.rs' in files
     assert '.env' not in files
 
@@ -81,10 +81,10 @@ def test_usable_summary() -> None:
 # what the scripted model runs in the sandbox: read the mounted copy, try to write to it, and try a statement
 CODE = """
 from pathlib import Path
-print(Path('/repo/crates/p14g/src/check.rs').read_text().splitlines()[0])
-print(Path('/repo/.env').exists())
+print(Path('/library/crates/p14g/src/check.rs').read_text().splitlines()[0])
+print(Path('/library/.env').exists())
 try:
-    Path('/repo/written').write_text('x')
+    Path('/library/written').write_text('x')
 except PermissionError:
     print('read-only')
 print(await rewrite(sql='select id from customers'))
@@ -107,7 +107,7 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
         return ModelResponse(parts=[ToolCallPart('run_code', {'code': CODE})])
 
     session = Session(oracle, tmp_path, turns=5)
-    copy_repository()
+    library.refresh()
 
     def run() -> str:
         return attacker.agent.run_sync('attack', model=FunctionModel(model), deps=session).output
@@ -121,7 +121,7 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     assert 'False' in output
     assert 'SELECT customers.id' in output
     assert session.tried == ['accepted: select id from customers']
-    assert not (attacker.REPOSITORY / 'written').exists()
+    assert not (library.PATH / 'written').exists()
 
     # on the last turn of a round the model may not call `run_code`, so the reply is the summary
     tool_choices.clear()

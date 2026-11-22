@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
-import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,12 +14,10 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness import CodeMode
 from pydantic_monty import MountDir
 
+from . import library
 from .oracle import Finding, Oracle
 
-ROOT = Path(__file__).resolve().parents[3]
 PACKAGE = Path(__file__).resolve().parent
-REPOSITORY = PACKAGE.parent / 'repository'
-"""The copy of the repository the agent reads, mounted read-only at `/repo`; ignored by git."""
 
 # one per round, so that a run covers the library and does not spend itself on the first idea
 FOCUS = [
@@ -72,12 +68,12 @@ yours to change.
 
 - You have one tool, `run_code`, which runs Python in a sandbox. Inside it, `await rewrite(sql=...)` and
   `await report_finding(...)` are the functions described below, and the repository is a read-only directory at
-  `/repo`, with the same layout as the checkout. Read it with `pathlib` and search it with `re`, for example:
+  `/library`, with the same layout as the checkout. Read it with `pathlib` and search it with `re`, for example:
 
       import re
       from pathlib import Path
 
-      for path in Path('/repo/crates/p14g/src').rglob('*.rs'):
+      for path in Path('/library/crates/p14g/src').rglob('*.rs'):
           for number, line in enumerate(path.read_text().splitlines(), 1):
               if re.search(r'fn member', line):
                   print(f'{path}:{number}: {line.strip()}')
@@ -85,8 +81,8 @@ yours to change.
   The sandbox runs a subset of Python: the standard library modules it has include `re`, `pathlib`, `json`,
   `asyncio`, `itertools` and `collections`, and not every method of each is there. Paths do not compare, so sort
   them with `key=str`. Print only what you need, as everything printed comes back to you.
-- Read the source before guessing. The Rust under `/repo/crates/p14g/src/` is the implementation,
-  `/repo/crates/p14g/tests/cases/reject.sql` is what has already been thought of, and `accept.sql` is what is
+- Read the source before guessing. The Rust under `/library/crates/p14g/src/` is the implementation,
+  `/library/crates/p14g/tests/cases/reject.sql` is what has already been thought of, and `accept.sql` is what is
   known to work.
 - Form a specific hypothesis about one piece of code ("`member` does not quote keywords, so a column named X after
   a dot ..."), then test it with `rewrite`. Statements that are plainly forbidden, such as
@@ -120,10 +116,10 @@ is that summary. The next round starts from it and nothing else you saw.
 
 Read these in your first `run_code` call:
 
-- `/repo/README.md`: what p14g accepts and what it turns it into;
-- `/repo/AGENTS.md`: how the code is laid out;
-- `/repo/.agents/skills/review-security/SKILL.md`: the project's own security checklist;
-- `/repo/crates/fuzz-agent/fuzz_agent/target.py`: the database and policy you are attacking, and what the policy
+- `/library/README.md`: what p14g accepts and what it turns it into;
+- `/library/AGENTS.md`: how the code is laid out;
+- `/library/.agents/skills/review-security/SKILL.md`: the project's own security checklist;
+- `/library/crates/fuzz-agent/fuzz_agent/target.py`: the database and policy you are attacking, and what the policy
   is meant to allow.
 """
 
@@ -185,50 +181,13 @@ class Session:
         return f'You have {left} turns left in this round, counting this one.'
 
 
-def repository_files() -> list[str]:
-    """Files the agent may read: those git tracks or would track, so nothing ignored and nothing outside."""
-    listed = subprocess.run(
-        ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    root = ROOT.resolve()
-    # `resolve` follows a symlink, which must not lead out of the checkout
-    return [
-        name
-        for name in listed.stdout.splitlines()
-        if (ROOT / name).is_file() and (ROOT / name).resolve().is_relative_to(root)
-    ]
-
-
-def copy_repository() -> None:
-    """Replace the contents of `REPOSITORY` with the files of the checkout the agent may read.
-
-    The checkout itself is not mounted: it has `.env`, the virtual environment and the runs of this fuzzer in it.
-    `REPOSITORY` is emptied rather than removed, since the mount holds the directory itself open.
-    """
-    for child in REPOSITORY.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    for name in repository_files():
-        target = REPOSITORY / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / name, target)
-
-
-REPOSITORY.mkdir(exist_ok=True)
-
 agent = Agent(
     deps_type=Session,
     instructions=[INSTRUCTIONS, lambda ctx: ctx.deps.turn_instructions(ctx.usage.requests)],
     capabilities=[
         # `rewrite` and `report_finding` are called from Python in the sandbox, so one request can read files and
         # try a batch of statements
-        CodeMode(mount=MountDir(host_path=REPOSITORY, virtual_path='/repo', mode='read-only')),
+        CodeMode(mount=MountDir(host_path=library.PATH, virtual_path='/library', mode='read-only')),
     ],
     # on the last turn no tool may be called, so the reply is the round's summary
     model_settings=lambda ctx: ModelSettings(

@@ -12,6 +12,6 @@ __pycache__
 htmlcov/
 *.profraw
 /crates/fuzz-agent/runs/
-/crates/fuzz-agent/repository/
+/crates/fuzz-agent/.library/
 .logfire/
 .env
