@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import asyncpg
+import logfire
 from fastapi import Depends, FastAPI, HTTPException, Request
 from p14g import P14gError
 from pydantic import BaseModel
@@ -24,6 +25,11 @@ from .policy import ORG_ID, UNTRUSTED_ROLE, policy
 from .settings import settings
 
 __all__ = ('app',)
+
+# Sends to Logfire when `LOGFIRE_TOKEN` is set, and prints to the console either way.
+logfire.configure(service_name='p14g-example', send_to_logfire='if-token-present')
+# a span for every query on either pool, before the pools are created
+logfire.instrument_asyncpg()
 
 
 @asynccontextmanager
@@ -40,6 +46,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title='p14g example', lifespan=lifespan)
+logfire.instrument_fastapi(app)
 
 
 def owner_pool(request: Request) -> asyncpg.Pool:
@@ -107,8 +114,10 @@ async def run_query(
             detail=QueryError(error='database', message=f'SQLSTATE {e.sqlstate}', sql=safe.sql).model_dump(),
         ) from e
 
+    rows = [dict(r) for r in records]
+    logfire.info('ran {status}', sql_in=query.sql, sql=safe.sql, status=status, rows=rows)
     await audit(owner, query.sql, safe.sql, None)
-    return QueryResult(sql=safe.sql, status=status, rows=[dict(r) for r in records])
+    return QueryResult(sql=safe.sql, status=status, rows=rows)
 
 
 async def audit(pool: asyncpg.Pool, sql_in: str, sql_out: str | None, error: str | None) -> None:

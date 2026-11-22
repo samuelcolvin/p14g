@@ -25,6 +25,8 @@ services:
       EXAMPLE_ADMIN_DSN: postgres://postgres:postgres@db:5432/example
       EXAMPLE_OWNER_DSN: postgres://example_owner:owner@db:5432/example
       EXAMPLE_AUTHENTICATOR_DSN: postgres://example_authenticator:authenticator@db:5432/example
+      # set it in your shell or in example/.env to send the server's traces to Logfire
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy

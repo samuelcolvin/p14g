@@ -39,6 +39,10 @@ Settings are in `p14g_example/settings.py`, a pydantic-settings model read from 
 `EXAMPLE_AUTHENTICATOR_DSN`, `EXAMPLE_OWNER_POOL_SIZE`, `EXAMPLE_AUTHENTICATOR_POOL_SIZE` and `EXAMPLE_MAX_ROWS`.
 The defaults match the database `make db` starts.
 
+The server is instrumented with [Logfire](https://logfire.pydantic.dev): a span for each request and each query on
+either pool, and a `ran ...` log with the input SQL, the SQL that ran, its status and its rows.
+Set `LOGFIRE_TOKEN` to send them to Logfire; without it they are printed to the console.
+
 ```bash
 curl -s localhost:8014/query -H 'content-type: application/json' \
   -d '{"sql": "select p.name, count(t.id) from projects p left join tasks t on t.project_id = p.id group by p.name"}'
