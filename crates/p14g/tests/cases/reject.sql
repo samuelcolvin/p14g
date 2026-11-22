@@ -8,21 +8,18 @@ parse: ;
 parse: select from where
 parse: select id from orders where product = 'unterminated
 
--- statements other than select, insert, update, delete
+-- statements other than select, insert, update, delete (those that change the role are in role.sql)
 unsupported: drop table orders
 unsupported: truncate orders
 unsupported: explain select id from orders
 unsupported: explain analyze delete from orders where id = 1
 unsupported: copy orders to stdout
 unsupported: copy orders from program 'cat /etc/passwd'
-unsupported: set role postgres
-unsupported: set search_path = evil
 unsupported: show server_version
 unsupported: begin
 unsupported: commit
 unsupported: create table t (a int)
 unsupported: create function f() returns int language sql as 'select 1'
-unsupported: grant all on orders to public
 unsupported: call some_procedure()
 unsupported: prepare p as select 1
 unsupported: execute p
@@ -114,7 +111,6 @@ denied: select pg_ls_dir('.')
 denied: select lo_import('/etc/passwd')
 denied: select dblink('host=evil', 'select 1')
 denied: select query_to_xml('select * from secrets', true, true, '')
-denied: select set_config('role', 'postgres', false)
 denied: select current_setting('server_version')
 denied: select version()
 denied: select current_database()

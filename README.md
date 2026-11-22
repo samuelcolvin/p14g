@@ -179,6 +179,14 @@ It does not replace database privileges, and it cannot limit how much work a per
   Consider `max_parallel_workers_per_gather = 0` as well, so that one query cannot use several processes.
 - Put these settings on the role that logs in.
   If you connect as one role and switch with `SET ROLE`, the settings of the role you switch to do not apply.
+- p14g's output cannot change the role it runs as.
+  It rejects `SET`, `RESET`, `DISCARD` and transaction control such as `COMMIT` and `ROLLBACK TO SAVEPOINT`, which
+  would undo a `SET LOCAL ROLE`.
+  A policy cannot allow `set_config`, the built-in functions that run SQL given as text (`query_to_xml`,
+  `query_to_xml_and_xmlschema`, `ts_stat`, `ts_rewrite`) or `dblink`, in `functions=[...]` or in a filter, or an
+  `UPDATE` of `pg_settings`.
+  A function of your own can still do it if it is `SECURITY DEFINER` or changes settings itself, so do not add one
+  that does.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.
@@ -503,8 +511,7 @@ Row-level security on its own has gaps that a filter covers:
 - The policy usually reads the user from a setting.
   Set it with `set_config(..., true)` or `SET LOCAL` inside the transaction: a plain `SET` stays on a pooled connection
   for the next client.
-  p14g rejects `SET` and does not allow `set_config` by default, which is what stops the statement changing the
-  setting itself.
+  p14g rejects `SET` and never allows `set_config`, which is what stops the statement changing the setting itself.
 
 Use both, with the same condition:
 

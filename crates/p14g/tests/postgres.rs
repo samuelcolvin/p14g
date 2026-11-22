@@ -9,7 +9,10 @@
 
 mod common;
 
-use std::env;
+use std::{
+    env,
+    panic::{self, AssertUnwindSafe},
+};
 
 use common::{accept_cases, params_policy, policy};
 use p14g::{Delete, Filter, Insert, Layout, Literals, Policy, QuoteIdentifiers, Select, Update, functions};
@@ -38,10 +41,31 @@ fn connect() -> Option<Client> {
     Some(client)
 }
 
+/// Who the session is and the settings that decide what it can reach. No statement p14g accepts may change any
+/// of them.
+const IDENTITY: &str = "SELECT current_user, session_user, current_setting('role'), \
+    current_setting('search_path'), current_setting('row_security'), current_setting('session_replication_role'), \
+    current_setting('transaction_read_only')";
+
+fn identity(transaction: &mut postgres::Transaction<'_>) -> Result<Vec<Option<String>>, postgres::Error> {
+    let messages = transaction.simple_query(IDENTITY)?;
+    let Some(row) = messages.iter().find_map(|message| match message {
+        SimpleQueryMessage::Row(row) => Some(row),
+        _ => None,
+    }) else {
+        panic!("no row from {IDENTITY}");
+    };
+    Ok((0..row.len()).map(|i| row.get(i).map(str::to_owned)).collect())
+}
+
 /// Run one statement as the restricted role and roll it back. Returns the number of rows it produced.
+///
+/// Panics if the statement changed the role or the settings in [`IDENTITY`].
 fn run(client: &mut Client, sql: &str, params: &[String]) -> Result<usize, postgres::Error> {
     let mut transaction = client.transaction()?;
     transaction.batch_execute(&format!("SET LOCAL ROLE {ROLE}"))?;
+    let before = identity(&mut transaction)?;
+    assert_eq!(before[0].as_deref(), Some(ROLE));
     let count = |messages: Vec<SimpleQueryMessage>| {
         messages
             .iter()
@@ -58,6 +82,8 @@ fn run(client: &mut Client, sql: &str, params: &[String]) -> Result<usize, postg
         let values: Vec<String> = params.iter().map(|p| format!("$p14g_v${p}$p14g_v$")).collect();
         count(transaction.simple_query(&format!("EXECUTE p14g_p({})", values.join(", ")))?)
     };
+    let after = identity(&mut transaction)?;
+    assert_eq!(before, after, "the role or a setting changed: {sql}");
     transaction.rollback()?;
     Ok(rows)
 }
@@ -119,6 +145,7 @@ fn postgres_agrees() {
         "{indeterminate} statements could not run with parameters"
     );
 
+    role_changes_are_caught(&mut client);
     literals_round_trip(&mut client);
     identifiers_round_trip(&mut client);
     views_enforce_rows(&mut client);
@@ -130,6 +157,27 @@ fn postgres_agrees() {
     function_names(&mut client);
     filters_restrict_rows(&mut client);
     filters_are_not_a_security_barrier(&mut client);
+}
+
+/// `run` checks that every statement leaves the role and settings as they were. Make sure that check would see
+/// statements that do change them, run directly rather than through p14g, which rejects them all
+/// (`tests/role.rs`).
+fn role_changes_are_caught(client: &mut Client) {
+    for sql in [
+        "RESET ROLE",
+        "SET ROLE NONE",
+        "SELECT set_config('role', 'none', true)",
+        "SET LOCAL search_path = pg_catalog",
+        "SET LOCAL row_security = off",
+    ] {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| run(client, sql, &[])));
+        assert!(result.is_err(), "the role check in `run` did not notice {sql}");
+    }
+    // the panics dropped their transactions, which rolled them back
+    let mut transaction = client.transaction().unwrap();
+    transaction.batch_execute(&format!("SET LOCAL ROLE {ROLE}")).unwrap();
+    assert_eq!(identity(&mut transaction).unwrap()[0].as_deref(), Some(ROLE));
+    transaction.rollback().unwrap();
 }
 
 const NASTY: &[&str] = &[

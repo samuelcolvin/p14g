@@ -2,11 +2,14 @@
 //!
 //! Whatever the input, `Policy::rewrite` must not panic. When it accepts a statement:
 //!
-//! * Postgres's own parser (`libpg_query`) must parse the output as one statement that only names tables and
-//!   functions the policy allows;
+//! * Postgres's own parser (`libpg_query`) must parse the output as one `SELECT`, `INSERT`, `UPDATE` or `DELETE`
+//!   that calls no `set_config` and updates no `pg_settings`, so it cannot change the role it runs as. Nothing
+//!   matters more than this;
+//! * that statement must only name tables and functions the policy allows;
 //! * p14g reading its own output back must produce the same SQL again;
 //! * if `P14G_TEST_DATABASE_URL` is set, Postgres itself must be willing to plan the output for a role
-//!   that has been granted exactly what the policy allows.
+//!   that has been granted exactly what the policy allows, and doing so must leave the role and settings as
+//!   they were.
 //!
 //! The last is the only one that sees columns. `EXPLAIN` runs Postgres's permission checks without running
 //! the statement, so a column, table or whole-row reference that p14g let through but the grants do not
@@ -19,7 +22,9 @@ use std::{
 };
 
 use p14g::{Delete, ErrorKind, Filter, Insert, Literals, Policy, PolicyBuilder, Select, Update, functions};
-use postgres::{Client, Config, NoTls, error::SqlState};
+use pg_query::{NodeEnum, ParseResult};
+use postgres::{Client, Config, NoTls, SimpleQueryMessage, error::SqlState};
+use serde_json::Value;
 
 /// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
 /// table, and writes.
@@ -74,8 +79,30 @@ const SCHEMA: &str = "
     DO $$ BEGIN CREATE ROLE p14g_fuzz_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ";
 
+/// Who the session is and the settings that decide what it can reach.
+const IDENTITY: &str = "SELECT current_user, session_user, current_setting('role'), \
+    current_setting('search_path'), current_setting('row_security'), current_setting('session_replication_role')";
+
+fn identity(client: &mut Client) -> Vec<Option<String>> {
+    let messages = client.simple_query(IDENTITY).expect(IDENTITY);
+    let row = messages
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .expect(IDENTITY);
+    (0..row.len()).map(|i| row.get(i).map(str::to_owned)).collect()
+}
+
+struct Database {
+    client: Client,
+    /// [`IDENTITY`] once the connection has switched to the restricted role.
+    identity: Vec<Option<String>>,
+}
+
 /// A connection acting as a role with the grants the fuzz policy generates, or `None` without a database.
-static DATABASE: LazyLock<Option<Mutex<Client>>> = LazyLock::new(|| {
+static DATABASE: LazyLock<Option<Mutex<Database>>> = LazyLock::new(|| {
     let url = env::var("P14G_TEST_DATABASE_URL").ok()?;
     let mut config: Config = url
         .parse()
@@ -96,10 +123,12 @@ static DATABASE: LazyLock<Option<Mutex<Client>>> = LazyLock::new(|| {
     client
         .batch_execute(&format!("SET ROLE {ROLE}; SET statement_timeout = '2s'"))
         .unwrap();
-    Some(Mutex::new(client))
+    let identity = identity(&mut client);
+    assert_eq!(identity[0].as_deref(), Some(ROLE));
+    Some(Mutex::new(Database { client, identity }))
 });
 
-/// Ask Postgres to plan `output` as the restricted role.
+/// Ask Postgres to plan `output` as the restricted role, then check the session is still that role.
 ///
 /// Most errors mean nothing here: the fuzzer writes statements that are allowed but wrong, such as a text
 /// column added to a number, and the view `v` accepts any column name. Three do mean p14g got it wrong.
@@ -107,13 +136,22 @@ fn explain(input: &str, output: &str) {
     let Some(database) = &*DATABASE else {
         return;
     };
-    let mut client = database.lock().unwrap();
-    let Err(error) = client.simple_query(&format!("EXPLAIN {output}")) else {
+    let mut database = database.lock().unwrap();
+    let result = database.client.simple_query(&format!("EXPLAIN {output}"));
+    if let Err(error) = &result
+        && error.as_db_error().is_none()
+    {
+        panic!("lost the connection to Postgres: {error}");
+    }
+    let now = identity(&mut database.client);
+    assert_eq!(
+        now, database.identity,
+        "the role or a setting changed\n input: {input}\noutput: {output}"
+    );
+    let Err(error) = result else {
         return;
     };
-    let Some(db_error) = error.as_db_error() else {
-        panic!("lost the connection to Postgres: {error}");
-    };
+    let db_error = error.as_db_error().expect("checked above");
     let problem = match db_error.code() {
         code if *code == SqlState::INSUFFICIENT_PRIVILEGE => "Postgres refused something the policy allowed",
         code if *code == SqlState::SYNTAX_ERROR => "Postgres cannot parse the output",
@@ -121,6 +159,68 @@ fn explain(input: &str, output: &str) {
         _ => return,
     };
     panic!("{problem}: {}\n input: {input}\noutput: {output}", db_error.message());
+}
+
+/// Every function call in `parsed`, as `schema.name` or `name`, wherever it is in the statement.
+///
+/// `ParseResult::functions()` and `nodes()` miss calls in `VALUES`, `RETURNING`, `FILTER`, `OVER`, `LIMIT`,
+/// `ARRAY[...]` and under `COLLATE`, so this serializes the whole tree and looks at every node.
+/// `tests/common/mod.rs` has the same function.
+fn called_functions(parsed: &ParseResult) -> Vec<String> {
+    fn walk(value: &Value, calls: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(call) = map.get("FuncCall") {
+                    let names = call["funcname"].as_array().into_iter().flatten();
+                    let names: Vec<&str> = names
+                        .filter_map(|name| name.pointer("/node/String/sval").and_then(Value::as_str))
+                        .collect();
+                    calls.push(names.join("."));
+                }
+                map.values().for_each(|value| walk(value, calls));
+            }
+            Value::Array(values) => values.iter().for_each(|value| walk(value, calls)),
+            _ => {}
+        }
+    }
+
+    let tree = serde_json::to_value(&parsed.protobuf).expect("a parse tree serializes");
+    let mut calls = Vec::new();
+    walk(&tree, &mut calls);
+    calls
+}
+
+/// Panic unless `parsed` is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls none of
+/// [`functions::FORBIDDEN`] and names no `pg_settings`, whose `UPDATE` rule calls `set_config`.
+///
+/// Every other kind of statement is a utility statement or `MERGE`, and Postgres's grammar has no way to put one
+/// inside these four. `tests/common/mod.rs` makes the same check on the test cases.
+fn assert_cannot_change_role(parsed: &ParseResult, input: &str, output: &str) {
+    assert_eq!(
+        parsed.protobuf.stmts.len(),
+        1,
+        "more than one statement\n input: {input}\noutput: {output}"
+    );
+    let node = parsed.protobuf.stmts[0].stmt.as_ref().and_then(|stmt| stmt.node.as_ref());
+    assert!(
+        matches!(
+            node,
+            Some(NodeEnum::SelectStmt(_) | NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::DeleteStmt(_))
+        ),
+        "not a SELECT, INSERT, UPDATE or DELETE\n input: {input}\noutput: {output}"
+    );
+    for function in called_functions(parsed) {
+        assert!(
+            !function.rsplit('.').next().is_some_and(functions::is_forbidden),
+            "calls {function}\n input: {input}\noutput: {output}"
+        );
+    }
+    for table in parsed.tables() {
+        assert!(
+            table.rsplit('.').next() != Some("pg_settings"),
+            "names {table}\n input: {input}\noutput: {output}"
+        );
+    }
 }
 
 /// Run every check on one input.
@@ -135,12 +235,7 @@ pub fn check(sql: &str) {
                 safe.sql
             )
         });
-        assert_eq!(
-            parsed.protobuf.stmts.len(),
-            1,
-            "more than one statement\n input: {sql}\noutput: {}",
-            safe.sql
-        );
+        assert_cannot_change_role(&parsed, sql, &safe.sql);
 
         let cte_names: BTreeSet<&String> = parsed.cte_names.iter().collect();
         for table in parsed.tables() {
@@ -156,7 +251,7 @@ pub fn check(sql: &str) {
                 safe.sql
             );
         }
-        for function in parsed.functions() {
+        for function in called_functions(&parsed) {
             // builtins are written by name; the grammar qualifies the ones it produces itself
             let name = function.strip_prefix("pg_catalog.").unwrap_or(&function);
             let allowed = functions::is_default(name) || name == "btrim" || name == "like_escape";
@@ -245,6 +340,48 @@ pub const FRAGMENTS: &[&str] = &[
     " version() ",
     " current_user ",
     " set_config('a','b',false) ",
+    // ways to change or reset the role, or the settings that decide what it reaches: see `tests/cases/role.sql`
+    " set_config('role','none',false) ",
+    " pg_catalog.set_config(",
+    " query_to_xml('select 1',true,true,'') ",
+    " ts_stat('select 1') ",
+    " dblink_exec('','reset role') ",
+    " \"set_config\"(",
+    " pg_settings ",
+    " pg_catalog.pg_settings ",
+    "; reset role",
+    "; set role none",
+    "; set session authorization default",
+    "; reset all",
+    "; discard all",
+    "; commit",
+    "; rollback",
+    "; rollback to a",
+    " set role ",
+    " set local role ",
+    " reset ",
+    " role ",
+    " session authorization ",
+    " search_path ",
+    " row_security ",
+    " set search_path = evil ",
+    " discard all ",
+    " begin ",
+    " commit ",
+    " rollback ",
+    " savepoint a ",
+    " grant ",
+    " revoke ",
+    " to public ",
+    " alter role current_user ",
+    " superuser ",
+    " security definer ",
+    " do $$ begin end $$ ",
+    " call ",
+    " execute ",
+    " prepare ",
+    " copy ",
+    " program ",
     " ctid ",
     " xmin ",
     " tableoid ",
