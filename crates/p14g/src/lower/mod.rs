@@ -15,6 +15,8 @@ mod dml;
 mod expr;
 mod query;
 
+use std::collections::BTreeSet;
+
 use sqlparser::{
     ast as sp,
     parser::{Parser, ParserError},
@@ -73,7 +75,18 @@ pub(crate) fn parse(sql: &str, dialect: Dialect, limits: &Limits) -> Result<Lowe
 ///
 /// The values go in as nodes of the expression, so nothing in one can be read as SQL. Filters are written
 /// for Postgres whatever dialect the untrusted input is in.
-pub(crate) fn parse_filter(sql: &str, limits: &Limits, values: &[(String, FilterValue)]) -> Result<Expr> {
+/// Lower a rule's filter, with its values put in and every column qualified with `qualifier`.
+///
+/// `table` is the name the rule gave the table and `qualifier` is the name its columns go by in the
+/// statement. A column may be written bare or qualified with either. Returns the expression and the columns
+/// it reads.
+pub(crate) fn parse_filter(
+    sql: &str,
+    limits: &Limits,
+    values: &[(String, FilterValue)],
+    table: &Ident,
+    qualifier: &Ident,
+) -> Result<(Expr, BTreeSet<Ident>)> {
     with_parser(sql, Dialect::Postgres, limits, |mut parser| {
         let expr = parser.parse_expr().map_err(parser_error)?;
         if parser.peek_token().token != Token::EOF {
@@ -82,7 +95,18 @@ pub(crate) fn parse_filter(sql: &str, limits: &Limits, values: &[(String, Filter
                 format!("expected one expression, found {} after it", parser.peek_token().token),
             ));
         }
-        Lower::new(limits, Some(values)).expr(expr)
+        let mut lower = Lower::new(
+            limits,
+            Some(FilterScope {
+                bindings: values,
+                table,
+                qualifier,
+                columns: BTreeSet::new(),
+            }),
+        );
+        let expr = lower.expr(expr)?;
+        let columns = lower.filter.map(|filter| filter.columns).unwrap_or_default();
+        Ok((expr, columns))
     })
 }
 
@@ -143,8 +167,20 @@ struct Lower<'a> {
     subqueries: usize,
     set_operations: usize,
     max_placeholder: u32,
-    /// Set when lowering a rule's filter: the values for its `:name` placeholders.
-    bindings: Option<&'a [(String, FilterValue)]>,
+    /// Set when lowering a rule's filter.
+    filter: Option<FilterScope<'a>>,
+}
+
+/// What lowering a rule's filter needs: the values for its `:name` placeholders, and the table instance its
+/// columns belong to.
+struct FilterScope<'a> {
+    bindings: &'a [(String, FilterValue)],
+    /// The name the rule gave the table; a column may be qualified with it.
+    table: &'a Ident,
+    /// The name the table's columns go by in the statement: its alias if it has one.
+    qualifier: &'a Ident,
+    /// The columns the filter reads.
+    columns: BTreeSet<Ident>,
 }
 
 fn location(span: Span) -> Option<Location> {
@@ -186,7 +222,7 @@ impl Absent for bool {
 }
 
 impl<'a> Lower<'a> {
-    fn new(limits: &'a Limits, bindings: Option<&'a [(String, FilterValue)]>) -> Self {
+    fn new(limits: &'a Limits, filter: Option<FilterScope<'a>>) -> Self {
         Self {
             limits,
             nodes: 0,
@@ -195,7 +231,7 @@ impl<'a> Lower<'a> {
             subqueries: 0,
             set_operations: 0,
             max_placeholder: 0,
-            bindings,
+            filter,
         }
     }
 
@@ -237,7 +273,7 @@ impl<'a> Lower<'a> {
     }
 
     fn count_subquery(&mut self) -> Result<()> {
-        if self.bindings.is_some() {
+        if self.filter.is_some() {
             // the columns of a filter are all bound to the rule's table, which a subquery would break
             return Err(Error::unsupported("a subquery in a filter"));
         }

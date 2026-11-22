@@ -1,7 +1,6 @@
 //! Python bindings for p14g.
-#![expect(clippy::absolute_paths, reason = "in the code `#[pyclass(hash)]` expands to")]
 
-use p14g::{ErrorKind, Literals, Mapper, Op, PolicyBuilder, Star, StatementKind, ast, functions};
+use p14g::{ErrorKind, Literals, Op, PolicyBuilder, Star, StatementKind, ast, functions};
 use pyo3::{
     create_exception,
     exceptions::{PyTypeError, PyValueError},
@@ -10,7 +9,7 @@ use pyo3::{
     types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType},
 };
 
-/// The context handed to `rewrite()`, passed on untouched to `extra` callables and mappers.
+/// The context handed to `rewrite()`, passed on untouched to `filter` and `extra` callables.
 type Context = Py<PyAny>;
 type Policy = p14g::Policy<Context>;
 
@@ -44,14 +43,6 @@ fn to_py_err(py: Python<'_>, mut error: p14g::Error) -> PyErr {
 /// An error raised inside a callback, to be carried through p14g and raised again as the cause.
 fn callback_error(error: PyErr) -> p14g::Error {
     p14g::Error::callback_source(error)
-}
-
-fn ident(py: Python<'_>, value: &str) -> PyResult<ast::Ident> {
-    ast::Ident::new(value).map_err(|e| to_py_err(py, e))
-}
-
-fn optional_ident(py: Python<'_>, value: Option<&str>) -> PyResult<Option<ast::Ident>> {
-    value.map(|v| ident(py, v)).transpose()
 }
 
 fn repr_list(items: Option<&Vec<String>>) -> String {
@@ -425,254 +416,7 @@ impl PyLimits {
     }
 }
 
-// ------------------------------------------------------------------ nodes seen by mappers
-
-/// A table or view in `FROM`, or the target of a write.
-#[pyclass(frozen, eq, hash, module = "p14g", name = "Table")]
-#[derive(PartialEq, Eq, Hash)]
-struct PyTable(ast::Table);
-
-#[pymethods]
-impl PyTable {
-    #[new]
-    #[pyo3(signature = (name, *, schema=None, alias=None, only=false))]
-    fn new(py: Python<'_>, name: &str, schema: Option<&str>, alias: Option<&str>, only: bool) -> PyResult<Self> {
-        Ok(Self(ast::Table {
-            schema: optional_ident(py, schema)?,
-            name: ident(py, name)?,
-            alias: optional_ident(py, alias)?,
-            only,
-        }))
-    }
-
-    /// Whether the table is written `ONLY name`, which leaves out rows of its inheritance children.
-    #[getter]
-    fn only(&self) -> bool {
-        self.0.only
-    }
-
-    #[getter]
-    fn name(&self) -> &str {
-        self.0.name.as_str()
-    }
-
-    #[getter]
-    fn schema(&self) -> Option<&str> {
-        self.0.schema.as_ref().map(ast::Ident::as_str)
-    }
-
-    #[getter]
-    fn alias(&self) -> Option<&str> {
-        self.0.alias.as_ref().map(ast::Ident::as_str)
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Table({:?}, schema={}, alias={}, only={})",
-            self.name(),
-            repr_option(self.schema()),
-            repr_option(self.alias()),
-            repr_bool(self.0.only)
-        )
-    }
-}
-
-fn repr_option(value: Option<&str>) -> String {
-    value.map_or_else(|| "None".to_owned(), |v| format!("{v:?}"))
-}
-
-/// A reference to a column. `table` is the name or alias of the table it belongs to.
-#[pyclass(frozen, eq, hash, module = "p14g", name = "Column")]
-#[derive(PartialEq, Eq, Hash)]
-struct PyColumn(ast::Column);
-
-#[pymethods]
-impl PyColumn {
-    #[new]
-    #[pyo3(signature = (name, *, table=None))]
-    fn new(py: Python<'_>, name: &str, table: Option<&str>) -> PyResult<Self> {
-        Ok(Self(ast::Column {
-            table: optional_ident(py, table)?,
-            name: ident(py, name)?,
-        }))
-    }
-
-    #[getter]
-    fn name(&self) -> &str {
-        self.0.name.as_str()
-    }
-
-    #[getter]
-    fn table(&self) -> Option<&str> {
-        self.0.table.as_ref().map(ast::Ident::as_str)
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Column({:?}, table={})", self.name(), repr_option(self.table()))
-    }
-}
-
-/// A call to a function in the catalog. `args` holds `Column`, `Function`, `Literal` and opaque `Expr` objects.
-///
-/// `COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are grammar
-/// in Postgres, not functions, so they are not passed to a `Function` mapper and arrive as an opaque `Expr`
-/// when they are an argument.
-#[pyclass(frozen, eq, hash, module = "p14g", name = "Function")]
-#[derive(PartialEq, Eq, Hash)]
-struct PyFunction(ast::Function);
-
-#[pymethods]
-impl PyFunction {
-    #[new]
-    #[pyo3(signature = (name, args=None, *, schema=None))]
-    fn new(py: Python<'_>, name: &str, args: Option<Vec<Bound<'_, PyAny>>>, schema: Option<&str>) -> PyResult<Self> {
-        let args = args
-            .unwrap_or_default()
-            .iter()
-            .map(py_to_expr)
-            .collect::<PyResult<_>>()?;
-        let mut function = ast::Function::call(ident(py, name)?, args);
-        function.schema = optional_ident(py, schema)?;
-        Ok(Self(function))
-    }
-
-    #[getter]
-    fn name(&self) -> &str {
-        self.0.name.as_str()
-    }
-
-    #[getter]
-    fn schema(&self) -> Option<&str> {
-        self.0.schema.as_ref().map(ast::Ident::as_str)
-    }
-
-    /// The arguments. Empty for `f(*)`.
-    #[getter]
-    fn args(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        match &self.0.args {
-            ast::FunctionArgs::List {
-                args,
-                distinct: _,
-                order_by: _,
-            } => args.iter().map(|arg| expr_to_py(py, arg.clone())).collect(),
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    /// A copy with a different name, schema or arguments, keeping `DISTINCT`, `FILTER`, `OVER` and so on.
-    ///
-    /// `schema=None` removes the schema; leave `schema` out to keep it.
-    #[pyo3(signature = (**kwargs))]
-    fn replace(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut function = self.0.clone();
-        for (key, value) in kwargs.into_iter().flatten() {
-            let key: String = key.extract()?;
-            match key.as_str() {
-                "name" => function.name = ident(py, &value.extract::<String>()?)?,
-                "schema" => function.schema = optional_ident(py, value.extract::<Option<String>>()?.as_deref())?,
-                "args" => {
-                    let args: Vec<Bound<'_, PyAny>> = value.extract()?;
-                    let new_args = args.iter().map(py_to_expr).collect::<PyResult<_>>()?;
-                    function.args = match function.args {
-                        // keep DISTINCT and ORDER BY, which sit beside the arguments
-                        ast::FunctionArgs::List {
-                            args: _,
-                            distinct,
-                            order_by,
-                        } => ast::FunctionArgs::List {
-                            args: new_args,
-                            distinct,
-                            order_by,
-                        },
-                        _ => ast::FunctionArgs::List {
-                            args: new_args,
-                            distinct: false,
-                            order_by: Vec::new(),
-                        },
-                    };
-                }
-                other => {
-                    return Err(PyTypeError::new_err(format!(
-                        "replace() got an unexpected keyword argument '{other}'"
-                    )));
-                }
-            }
-        }
-        Ok(Self(function))
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Function({:?}, schema={})", self.name(), repr_option(self.schema()))
-    }
-}
-
-/// A literal value: `None`, a `bool`, a number or a `str`.
-#[pyclass(frozen, eq, hash, module = "p14g", name = "Literal")]
-#[derive(PartialEq, Eq, Hash)]
-struct PyLiteral(ast::Literal);
-
-#[pymethods]
-impl PyLiteral {
-    #[new]
-    fn new(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        match scalar_to_expr(value)? {
-            Some(ast::Expr::Literal(literal)) => Ok(Self(literal)),
-            Some(_) => Err(PyValueError::new_err(
-                "a negative or non-finite number is not a single literal, return the number itself instead",
-            )),
-            None => Err(PyTypeError::new_err(
-                "a literal must be None, a bool, an int, a float or a str",
-            )),
-        }
-    }
-
-    /// The value. A number that fits neither `int` nor `float` exactly is returned as the `str` of its digits.
-    #[getter]
-    fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(match &self.0 {
-            ast::Literal::Boolean(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
-            ast::Literal::Number(number) => {
-                if let Ok(int) = number.parse::<u64>() {
-                    int.into_pyobject(py)?.into_any().unbind()
-                } else if let Ok(float) = number.parse::<f64>()
-                    && number.len() <= 15
-                {
-                    float.into_pyobject(py)?.into_any().unbind()
-                } else {
-                    number.into_pyobject(py)?.into_any().unbind()
-                }
-            }
-            ast::Literal::String(s) => s.into_pyobject(py)?.into_any().unbind(),
-            _ => py.None(),
-        })
-    }
-
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!("Literal({})", self.value(py)?.bind(py).repr()?))
-    }
-}
-
-/// Any other expression. It can be passed along, for example as a function argument, but not inspected.
-#[pyclass(frozen, eq, hash, module = "p14g", name = "Expr")]
-#[derive(PartialEq, Eq, Hash)]
-struct PyExpr(ast::Expr);
-
-#[pymethods]
-impl PyExpr {
-    #[expect(clippy::unused_self, reason = "a method as far as Python is concerned")]
-    fn __repr__(&self) -> &'static str {
-        "Expr(...)"
-    }
-}
-
-fn expr_to_py(py: Python<'_>, expr: ast::Expr) -> PyResult<Py<PyAny>> {
-    Ok(match expr {
-        ast::Expr::Column(column) => Py::new(py, PyColumn(column))?.into_any(),
-        ast::Expr::Function(function) => Py::new(py, PyFunction(function))?.into_any(),
-        ast::Expr::Literal(literal) => Py::new(py, PyLiteral(literal))?.into_any(),
-        other => Py::new(py, PyExpr(other))?.into_any(),
-    })
-}
+// ------------------------------------------------------------------ values
 
 /// `None`, `bool`, `int`, `float` and `str` as an expression; `None` for anything else.
 fn scalar_to_expr(value: &Bound<'_, PyAny>) -> PyResult<Option<ast::Expr>> {
@@ -700,181 +444,14 @@ fn scalar_to_expr(value: &Bound<'_, PyAny>) -> PyResult<Option<ast::Expr>> {
     })
 }
 
-/// Anything a mapper or an `extra` may hand back as an expression.
+/// A value given to a filter or an `extra`, as an expression.
 fn py_to_expr(value: &Bound<'_, PyAny>) -> PyResult<ast::Expr> {
-    if let Some(expr) = scalar_to_expr(value)? {
-        Ok(expr)
-    } else if let Ok(column) = value.cast::<PyColumn>() {
-        Ok(ast::Expr::Column(column.get().0.clone()))
-    } else if let Ok(function) = value.cast::<PyFunction>() {
-        Ok(ast::Expr::Function(function.get().0.clone()))
-    } else if let Ok(literal) = value.cast::<PyLiteral>() {
-        Ok(ast::Expr::Literal(literal.get().0.clone()))
-    } else if let Ok(expr) = value.cast::<PyExpr>() {
-        Ok(expr.get().0.clone())
-    } else {
-        Err(PyTypeError::new_err(format!(
-            "expected a Column, Function, Literal, Expr, None, bool, int, float or str, not {}",
+    match scalar_to_expr(value)? {
+        Some(expr) => Ok(expr),
+        None => Err(PyTypeError::new_err(format!(
+            "expected None, bool, int, float or str, not {}",
             value.get_type().name()?
-        )))
-    }
-}
-
-// ------------------------------------------------------------------ mappers
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NodeKind {
-    Table,
-    Column,
-    Function,
-    Literal,
-}
-
-impl NodeKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Table => "Table",
-            Self::Column => "Column",
-            Self::Function => "Function",
-            Self::Literal => "Literal",
-        }
-    }
-}
-
-/// A function registered with `@mapper(...)`, to be passed to `Policy(mappers=[...])`.
-///
-/// It can still be called like the function it wraps.
-#[pyclass(frozen, module = "p14g", name = "Mapper")]
-struct PyMapper {
-    kind: NodeKind,
-    function: Py<PyAny>,
-}
-
-#[pymethods]
-impl PyMapper {
-    /// `Mapper[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
-    #[classmethod]
-    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        generic_alias(cls, item)
-    }
-
-    #[pyo3(signature = (*args, **kwargs))]
-    fn __call__(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        self.function.call(py, args, kwargs)
-    }
-
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!(
-            "<Mapper of {} {}>",
-            self.kind.name(),
-            self.function.bind(py).repr()?
-        ))
-    }
-}
-
-/// What `mapper(kind)` returns: the decorator that wraps a function for that kind of node.
-#[pyclass(frozen, module = "p14g", name = "_MapperDecorator")]
-struct PyMapperDecorator {
-    kind: NodeKind,
-}
-
-#[pymethods]
-impl PyMapperDecorator {
-    fn __call__(&self, function: Py<PyAny>) -> PyMapper {
-        PyMapper {
-            kind: self.kind,
-            function,
-        }
-    }
-}
-
-/// Register a function as a mapper for one kind of node: `@mapper(Table)`, `@mapper(Column)`,
-/// `@mapper(Function)` or `@mapper(Literal)`.
-///
-/// The function is called with the node and the context passed to `rewrite()`, and returns the node to use
-/// in its place. A table mapper returns a `Table`; the others may return any expression, or a plain value.
-/// Mappers run after the statement has passed the policy, and what they return is not checked against it.
-#[pyfunction]
-fn mapper(kind: &Bound<'_, PyType>) -> PyResult<PyMapperDecorator> {
-    let py = kind.py();
-    let kind = if kind.is(py.get_type::<PyTable>()) {
-        NodeKind::Table
-    } else if kind.is(py.get_type::<PyColumn>()) {
-        NodeKind::Column
-    } else if kind.is(py.get_type::<PyFunction>()) {
-        NodeKind::Function
-    } else if kind.is(py.get_type::<PyLiteral>()) {
-        NodeKind::Literal
-    } else {
-        return Err(PyTypeError::new_err(
-            "mapper() takes Table, Column, Function or Literal",
-        ));
-    };
-    Ok(PyMapperDecorator { kind })
-}
-
-struct PythonMapper {
-    kind: NodeKind,
-    function: Py<PyAny>,
-}
-
-impl PythonMapper {
-    fn call<'py>(&self, py: Python<'py>, node: Py<PyAny>, context: &Context) -> PyResult<Bound<'py, PyAny>> {
-        self.function.bind(py).call1((node, context.bind(py)))
-    }
-
-    fn map_expr(&self, node: ast::Expr, context: &Context) -> p14g::Result<ast::Expr> {
-        Python::attach(|py| {
-            let node = expr_to_py(py, node)?;
-            py_to_expr(&self.call(py, node, context)?)
-        })
-        .map_err(callback_error)
-    }
-}
-
-impl Mapper<Context> for PythonMapper {
-    fn map_table(&self, table: ast::Table, context: &Context) -> p14g::Result<ast::Table> {
-        if self.kind != NodeKind::Table {
-            return Ok(table);
-        }
-        Python::attach(|py| {
-            let node = Py::new(py, PyTable(table))?.into_any();
-            let result = self.call(py, node, context)?;
-            let table = result
-                .cast::<PyTable>()
-                .map_err(|_| PyTypeError::new_err("a Table mapper must return a Table"))?;
-            Ok(table.get().0.clone())
-        })
-        .map_err(callback_error)
-    }
-
-    fn map_column(&self, column: ast::Column, context: &Context) -> p14g::Result<ast::Expr> {
-        if self.kind == NodeKind::Column {
-            self.map_expr(ast::Expr::Column(column), context)
-        } else {
-            Ok(ast::Expr::Column(column))
-        }
-    }
-
-    fn map_function(&self, function: ast::Function, context: &Context) -> p14g::Result<ast::Expr> {
-        if self.kind == NodeKind::Function {
-            self.map_expr(ast::Expr::Function(function), context)
-        } else {
-            Ok(ast::Expr::Function(function))
-        }
-    }
-
-    fn map_literal(&self, literal: ast::Literal, context: &Context) -> p14g::Result<ast::Expr> {
-        if self.kind == NodeKind::Literal {
-            self.map_expr(ast::Expr::Literal(literal), context)
-        } else {
-            Ok(ast::Expr::Literal(literal))
-        }
+        ))),
     }
 }
 
@@ -937,7 +514,6 @@ impl PyPolicy {
         default_schema=None,
         dialect="postgres",
         limits=None,
-        mappers=None,
     ))]
     #[expect(clippy::too_many_arguments, reason = "one keyword argument per option")]
     fn new(
@@ -956,7 +532,6 @@ impl PyPolicy {
         default_schema: Option<String>,
         dialect: &str,
         limits: Option<&Bound<'_, PyLimits>>,
-        mappers: Option<Vec<Bound<'_, PyMapper>>>,
     ) -> PyResult<Self> {
         let config = |e| to_py_err(py, e);
         let mut builder: PolicyBuilder<Context> = Policy::builder()
@@ -982,13 +557,6 @@ impl PyPolicy {
         for rule in rules {
             builder = add_rule(py, builder, &rule)?;
         }
-        for mapper in mappers.into_iter().flatten() {
-            let mapper = mapper.get();
-            builder = builder.mapper(PythonMapper {
-                kind: mapper.kind,
-                function: mapper.function.clone_ref(py),
-            });
-        }
         builder.build().map(Self).map_err(config)
     }
 
@@ -1005,7 +573,7 @@ impl PyPolicy {
     ///
     /// Raises `P14gError` if the statement is not allowed.
     ///
-    /// `context` is passed on to `extra` callables and mappers. `allow` restricts the kinds of statement
+    /// `context` is passed on to `filter` and `extra` callables. `allow` restricts the kinds of statement
     /// accepted by this call, for example `['select']`.
     #[pyo3(signature = (sql, *, context=None, allow=None))]
     fn rewrite(
@@ -1115,10 +683,7 @@ mod p14g_python {
 
     use super::{ErrorKind, functions};
     #[pymodule_export]
-    use super::{
-        P14gError, PyColumn, PyDelete, PyExpr, PyFunction, PyInsert, PyLimits, PyLiteral, PyMapper, PyPolicy,
-        PySafeSql, PySelect, PyTable, PyUpdate, mapper,
-    };
+    use super::{P14gError, PyDelete, PyInsert, PyLimits, PyPolicy, PySafeSql, PySelect, PyUpdate};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1137,20 +702,16 @@ mod p14g_python {
         ]
         .map(ErrorKind::as_str);
         m.add("ERROR_KINDS", PyTuple::new(m.py(), kinds)?)?;
-        // the type of what a mapper may return, for annotations
+        // the type of a value given to a filter or an `extra`, for annotations
         let py = m.py();
         let members = (
-            py.get_type::<PyColumn>(),
-            py.get_type::<PyFunction>(),
-            py.get_type::<PyLiteral>(),
-            py.get_type::<PyExpr>(),
             py.None(),
             py.get_type::<PyBool>(),
             py.get_type::<PyInt>(),
             py.get_type::<PyFloat>(),
             py.get_type::<PyString>(),
         );
-        m.add("ExprLike", py.import("typing")?.getattr("Union")?.get_item(members)?)?;
+        m.add("Value", py.import("typing")?.getattr("Union")?.get_item(members)?)?;
         Ok(())
     }
 }

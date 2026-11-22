@@ -16,7 +16,7 @@ pub enum ErrorKind {
     Limit,
     /// The policy itself is invalid.
     Config,
-    /// A user supplied callback (a mapper or an insert `extra`) failed or returned something invalid.
+    /// A user supplied callback (an insert `extra` or a `filter`) failed or returned something invalid.
     Callback,
 }
 
@@ -77,7 +77,7 @@ impl Error {
         Self::new(ErrorKind::Limit, message)
     }
 
-    /// Build an error to return from a mapper or `extra` callback.
+    /// Build an error to return from an `extra` or `filter` callback.
     pub fn callback(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Callback, message)
     }

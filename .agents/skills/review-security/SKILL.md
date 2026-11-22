@@ -18,7 +18,7 @@ confirm each is properly addressed.
 Cover the changes **and any code they touch**: a caller made unsafe by a changed callee is in scope even if it isn't in
 the diff.
 
-The policy author, mappers and `Insert.extra` callbacks are trusted. The SQL passed to `rewrite()` is not.
+The policy author, filters and `Insert.extra` callbacks are trusted. The SQL passed to `rewrite()` is not.
 A finding is something the SQL author can do; note misuse a policy author could plausibly fall into separately.
 
 ## The writer (`backend/`)
@@ -122,7 +122,7 @@ Ask what the SQL author can now read, write or call that no rule names:
 - **Can Python construct IR that skips validation?**
     Names must go through `Ident::new`; numbers must reach the writer as text that `valid_number` checks.
 - **Do callbacks fail closed?**
-    An exception or a wrong return type in a mapper or `extra` must reject the statement, with the original exception
+    An exception or a wrong return type in a filter or `extra` must reject the statement, with the original exception
     as `__cause__`.
 - **Is `context` only ever passed through?**
     It must not be read, stored on the policy, or shared between calls.

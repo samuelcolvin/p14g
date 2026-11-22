@@ -1,3 +1,5 @@
+use std::slice;
+
 use sqlparser::ast as sp;
 
 use super::{Lower, ident, location, name_location, object_name, qualified_name, reject};
@@ -30,17 +32,11 @@ impl<'a> Lower<'a> {
 
     fn expr_inner(&mut self, expr: sp::Expr) -> Result<Expr> {
         match expr {
-            sp::Expr::Identifier(name) => Ok(Expr::Column(Column {
-                table: None,
-                name: ident(name)?,
-            })),
+            sp::Expr::Identifier(name) => self.column(None, ident(name)?),
             sp::Expr::CompoundIdentifier(parts) => {
                 let mut parts: Vec<Ident> = parts.into_iter().map(ident).collect::<Result<_>>()?;
                 match (parts.pop(), parts.pop(), parts.is_empty()) {
-                    (Some(name), Some(table), true) => Ok(Expr::Column(Column {
-                        table: Some(table),
-                        name,
-                    })),
+                    (Some(name), Some(table), true) => self.column(Some(table), name),
                     _ => Err(Error::unsupported(
                         "a column reference with more than two parts (use table.column)",
                     )),
@@ -126,7 +122,7 @@ impl<'a> Lower<'a> {
                         // `IN (:name)` with a list bound to the name is that list
                         if let [sp::Expr::Value(value)] = list.as_slice()
                             && let sp::Value::Placeholder(placeholder) = &value.value
-                            && self.bindings.is_some()
+                            && self.filter.is_some()
                             && let FilterValue::Many(values) = self.binding(placeholder)?
                         {
                             if values.is_empty() {
@@ -355,7 +351,7 @@ impl<'a> Lower<'a> {
             }
             sp::Value::Boolean(b) => Ok(Expr::Literal(Literal::Boolean(b))),
             sp::Value::Null => Ok(Expr::Literal(Literal::Null)),
-            sp::Value::Placeholder(placeholder) if self.bindings.is_some() => match self.binding(&placeholder)? {
+            sp::Value::Placeholder(placeholder) if self.filter.is_some() => match self.binding(&placeholder)? {
                 FilterValue::One(value) => Ok(value.clone()),
                 FilterValue::Many(_) => Err(Error::callback(format!(
                     "{placeholder} is a list, which can only be used as IN ({placeholder})"
@@ -378,6 +374,25 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// A column reference. In a filter every column belongs to the rule's table, so it is qualified with the
+    /// name that table goes by in the statement, and recorded.
+    fn column(&mut self, table: Option<Ident>, name: Ident) -> Result<Expr> {
+        let Some(filter) = &mut self.filter else {
+            return Ok(Expr::Column(Column { table, name }));
+        };
+        if let Some(named) = &table
+            && named != filter.table
+            && named != filter.qualifier
+        {
+            return Err(Error::callback(format!("{named}.{name} is a column of another table")));
+        }
+        filter.columns.insert(name.clone());
+        Ok(Expr::Column(Column {
+            table: Some(filter.qualifier.clone()),
+            name,
+        }))
+    }
+
     /// The value bound to a `:name` placeholder of a filter.
     fn binding(&self, placeholder: &str) -> Result<&'a FilterValue> {
         let name = placeholder
@@ -392,12 +407,25 @@ impl<'a> Lower<'a> {
                     "the placeholder {placeholder:?} is not supported in a filter (use :name)"
                 ))
             })?;
-        self.bindings
-            .into_iter()
-            .flatten()
+        let value = self
+            .filter
+            .as_ref()
+            .map_or(&[][..], |filter| filter.bindings)
+            .iter()
             .find(|(bound, _)| bound == name)
             .map(|(_, value)| value)
-            .ok_or_else(|| Error::callback(format!("the filter uses :{name} but no value was given for it")))
+            .ok_or_else(|| Error::callback(format!("the filter uses :{name} but no value was given for it")))?;
+        let values = match value {
+            FilterValue::One(value) => slice::from_ref(value),
+            FilterValue::Many(values) => values.as_slice(),
+        };
+        if values.iter().all(is_value) {
+            Ok(value)
+        } else {
+            Err(Error::callback(format!(
+                "the value for :{name} must be a literal, a negative number or a cast from a string"
+            )))
+        }
     }
 
     fn function(&mut self, function: sp::Function) -> Result<Expr> {
@@ -743,5 +771,22 @@ fn lower_data_type(data_type: sp::DataType) -> Result<DataType> {
             }
         }
         _ => Err(Error::unsupported("this type")),
+    }
+}
+
+/// Whether a value bound to a filter's placeholder is a value: one of the shapes `Expr`'s `From` impls build.
+///
+/// It goes into the statement as it is. A column in it would be neither qualified with the filter's table nor
+/// recorded among the columns the filter reads, which an `UPDATE` must not set, and a `$n` would not be counted
+/// when p14g numbers the parameters it adds.
+fn is_value(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::Unary {
+            op: UnaryOperator::Minus,
+            expr,
+        } => matches!(**expr, Expr::Literal(Literal::Number(_))),
+        Expr::Cast { expr, data_type: _ } => matches!(**expr, Expr::Literal(Literal::String(_))),
+        _ => false,
     }
 }

@@ -167,7 +167,7 @@ It does not replace database privileges, and it cannot limit how much work a per
 
 - Connect as a role that has been granted only what the policy allows.
   `policy.grants('app_role')` returns the `GRANT` statements for a policy's tables and columns.
-  It does not cover sequences that inserted rows take defaults from, or tables a mapper renames statements to.
+  It does not cover sequences that inserted rows take defaults from.
 - If a rule's `filter` keeps one user's rows from another, put row-level security on the same table as well.
   A filter decides which rows a statement returns and changes.
   It does not stop the statement finding out that other rows exist, with a condition that fails on them.
@@ -196,8 +196,7 @@ It does not replace database privileges, and it cannot limit how much work a per
    Only `SELECT`, `INSERT`, `UPDATE` and `DELETE`, and a subset of their syntax, can be represented.
    Everything else is rejected with an `unsupported` error.
 3. Bind every column reference to a table in the statement and check it against the rules.
-4. Run your mappers, if any.
-5. Write the statement out from p14g's representation.
+4. Write the statement out from p14g's representation.
 
 p14g does not print sqlparser's AST back out.
 sqlparser 0.64 prints the single literal in `SELECT 'x\'' UNION SELECT password FROM secrets --'` as
@@ -458,35 +457,6 @@ Postgres reads `(select id from orders limit 5) order by id` as one query with t
 same, so it writes `SELECT orders.id FROM orders ORDER BY orders.id LIMIT 5`.
 A clause both inside and outside the parentheses, such as `(select id from orders limit 5) limit 3`, is rejected,
 since Postgres refuses it.
-
-### Mappers
-
-A mapper replaces a node of a statement that has passed the policy.
-It is called with the node and the `context`.
-
-```python
-from p14g import Policy, Select, Table, mapper
-
-
-@mapper(Table)
-def per_tenant(table: Table, context):
-    return Table(f'{table.name}_{context}', schema='tenants', alias=table.alias)
-
-
-policy = Policy(Select('events'), mappers=[per_tenant])
-print(policy.rewrite('select id from events', context=42).sql)
-"""
-SELECT events.id
-FROM tenants.events_42 AS events
-"""
-```
-
-There are mappers for `Table`, `Column`, `Function` and `Literal`.
-`COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are grammar in
-Postgres, not functions, so a `Function` mapper is not called for them.
-They are still allowed and denied by name with `functions` and `deny_functions`.
-What a mapper returns is not checked against the policy, so a mapper is trusted code.
-It is written by the same writer as the rest of the statement, so it cannot produce unescaped SQL.
 
 ## Why you should use `filter` and RLS together
 

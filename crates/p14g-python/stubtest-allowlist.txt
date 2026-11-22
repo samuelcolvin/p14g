@@ -1,4 +1,4 @@
 # the compiled module, which the package re-exports everything from
 p14g\.p14g
 # defined in Rust so the classes can be subscripted at run time; the stub gets it from `Generic`
-p14g\.(Policy|Select|Insert|Update|Delete|Mapper)\.__class_getitem__
+p14g\.(Policy|Select|Insert|Update|Delete)\.__class_getitem__

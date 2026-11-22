@@ -6,23 +6,16 @@ from typing_extensions import TypeVar
 __all__ = [
     'DEFAULT_FUNCTIONS',
     'ERROR_KINDS',
-    'Column',
     'Delete',
-    'Expr',
-    'ExprLike',
-    'Function',
     'Insert',
     'Limits',
-    'Literal',
-    'Mapper',
     'P14gError',
     'Policy',
     'SafeSql',
     'Select',
-    'Table',
     'Update',
+    'Value',
     '__version__',
-    'mapper',
 ]
 
 __version__: str
@@ -35,18 +28,15 @@ ERROR_KINDS: tuple[str, ...]
 
 # contravariant, since it is only ever an argument; named for what it is rather than its variance
 _C = TypeVar('_C', contravariant=True, default=Any)  # noqa: PLC0105
-"""The type of the `context` passed to `rewrite()` and `grants()`, and on to filters, `extra` callables and mappers.
+"""The type of the `context` passed to `rewrite()` and `grants()`, and on to filters and `extra` callables.
 
-`Policy[C]` is inferred from the rules and mappers it is built from. Rules and mappers with no callback take any
-context. Where every callback accepts `None`, `context` may be left out.
+`Policy[C]` is inferred from the rules it is built from. Rules with no callback take any context. Where every callback accepts `None`, `context` may be left out.
 """
-_T = TypeVar('_T')
 
-_Scalar: TypeAlias = None | bool | int | float | str
-ExprLike: TypeAlias = Column | Function | Literal | Expr | _Scalar
-"""What a mapper or an `extra` may give as a value."""
+Value: TypeAlias = None | bool | int | float | str
+"""A value given to a filter or an `extra`."""
 
-_FilterSql: TypeAlias = LiteralString | tuple[LiteralString, Mapping[str, ExprLike | list[ExprLike]]]
+_FilterSql: TypeAlias = LiteralString | tuple[LiteralString, Mapping[str, Value | list[Value]]]
 """A filter's SQL, alone or with values for its `:name` placeholders. A list is for `IN (:name)`."""
 _Filter: TypeAlias = _FilterSql | Callable[[_C], _FilterSql]
 
@@ -123,7 +113,7 @@ class Insert(Generic[_C]):
         table: str,
         *,
         columns: Sequence[str] | None = None,
-        extra: Mapping[str, ExprLike] | Callable[[_C], Mapping[str, ExprLike]] | None = None,
+        extra: Mapping[str, Value] | Callable[[_C], Mapping[str, Value]] | None = None,
     ) -> Insert[_C]: ...
     @property
     def table(self) -> str: ...
@@ -219,106 +209,6 @@ class Limits:
     def max_values_rows(self) -> int: ...
 
 @final
-class Table:
-    """A table or view in `FROM`, or the target of a write."""
-
-    def __new__(
-        cls, name: str, *, schema: str | None = None, alias: str | None = None, only: bool = False
-    ) -> Table: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def schema(self) -> str | None: ...
-    @property
-    def alias(self) -> str | None: ...
-    @property
-    def only(self) -> bool:
-        """Whether the table is written `ONLY name`, which leaves out rows of its inheritance children."""
-    def __eq__(self, other: object, /) -> bool: ...
-    def __hash__(self) -> int: ...
-
-@final
-class Column:
-    """A reference to a column. `table` is the name or alias of the table it belongs to."""
-
-    def __new__(cls, name: str, *, table: str | None = None) -> Column: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def table(self) -> str | None: ...
-    def __eq__(self, other: object, /) -> bool: ...
-    def __hash__(self) -> int: ...
-
-@final
-class Function:
-    """A call to a function in the catalog.
-
-    `COALESCE`, `NULLIF`, `GREATEST`, `LEAST`, `TRIM`, `EXTRACT`, `CURRENT_DATE` and `CURRENT_TIMESTAMP` are grammar
-    in Postgres, not functions, so they are not passed to a `Function` mapper and arrive as an opaque `Expr` when
-    they are an argument.
-    """
-
-    def __new__(cls, name: str, args: Sequence[ExprLike] | None = None, *, schema: str | None = None) -> Function: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def schema(self) -> str | None: ...
-    @property
-    def args(self) -> list[Column | Function | Literal | Expr]:
-        """The arguments. Empty for `f(*)`."""
-    def replace(self, *, name: str = ..., schema: str | None = ..., args: Sequence[ExprLike] = ...) -> Function:
-        """A copy with a different name, schema or arguments, keeping `DISTINCT`, `FILTER`, `OVER` and so on.
-
-        `schema=None` removes the schema; leave `schema` out to keep it.
-        """
-    def __eq__(self, other: object, /) -> bool: ...
-    def __hash__(self) -> int: ...
-
-@final
-class Literal:
-    """A literal value: `None`, a `bool`, a number or a `str`."""
-
-    def __new__(cls, value: _Scalar) -> Literal: ...
-    @property
-    def value(self) -> _Scalar:
-        """The value. A number that fits neither `int` nor `float` exactly is the `str` of its digits."""
-    def __eq__(self, other: object, /) -> bool: ...
-    def __hash__(self) -> int: ...
-
-@final
-class Expr:
-    """Any other expression. It can be passed along, for example as a function argument, but not inspected."""
-
-    def __eq__(self, other: object, /) -> bool: ...
-    def __hash__(self) -> int: ...
-
-@final
-class Mapper(Generic[_C]):
-    """A function registered with `@mapper(...)`, to be passed to `Policy(mappers=[...])`.
-
-    It can still be called like the function it wraps.
-    """
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
-
-@overload
-def mapper(kind: type[Table]) -> Callable[[Callable[[Table, _T], Table]], Mapper[_T]]:
-    """Register a function as a mapper for one kind of node.
-
-    The function is called with the node and the context passed to `rewrite()`, and returns the node to use
-    in its place. A table mapper returns a `Table`; the others may return any expression, or a plain value.
-
-    Mappers run after the statement has passed the policy, and what they return is not checked against it.
-    """
-
-@overload
-def mapper(kind: type[Column]) -> Callable[[Callable[[Column, _T], ExprLike]], Mapper[_T]]: ...
-@overload
-def mapper(kind: type[Function]) -> Callable[[Callable[[Function, _T], ExprLike]], Mapper[_T]]: ...
-@overload
-def mapper(kind: type[Literal]) -> Callable[[Callable[[Literal, _T], ExprLike]], Mapper[_T]]: ...
-
-@final
 class SafeSql:
     """SQL that is safe to run, and what it is."""
 
@@ -365,7 +255,6 @@ class Policy(Generic[_C]):
             they are written unqualified and Postgres resolves them through the `search_path`.
         dialect: The dialect of the input: `postgres`, `generic`, `ansi`, `mysql` or `sqlite`.
         limits: Bounds on the size of a statement.
-        mappers: Functions decorated with `@mapper(...)`, run in order on statements that pass.
     """
 
     def __new__(
@@ -384,7 +273,6 @@ class Policy(Generic[_C]):
         default_schema: str | None = None,
         dialect: _Literal['postgres', 'generic', 'ansi', 'mysql', 'sqlite'] = 'postgres',
         limits: Limits | None = None,
-        mappers: Sequence[Mapper[_C]] | None = None,
     ) -> Policy[_C]: ...
     @overload
     def grants(self: Policy[None], role: str, *, context: None = None) -> list[str]:
@@ -405,7 +293,7 @@ class Policy(Generic[_C]):
 
         Raises `P14gError` if the statement is not allowed.
 
-        `context` is passed on to `extra` callables and mappers. `allow` restricts the kinds of statement
+        `context` is passed on to `filter` and `extra` callables. `allow` restricts the kinds of statement
         accepted by this call, for example `['select']`.
         """
     @overload

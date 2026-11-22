@@ -31,7 +31,6 @@ mod error;
 mod filter;
 pub mod functions;
 mod lower;
-mod map;
 mod policy;
 
 pub use crate::{
@@ -39,7 +38,6 @@ pub use crate::{
     backend::{Backend, Layout, QuoteIdentifiers},
     dialect::Dialect,
     error::{Error, ErrorKind, Location, Result},
-    map::Mapper,
     policy::{
         Delete, Filter, FilterValue, Insert, Limits, Literals, Op, Policy, PolicyBuilder, SafeSql, Select, Star, Update,
     },
