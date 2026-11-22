@@ -53,3 +53,4 @@ include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 reportMissingModuleSource = false
+stubPath = "crates/p14g-python"

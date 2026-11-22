@@ -152,8 +152,8 @@ fn python_filter(filter: &Py<PyAny>, context: &Context) -> p14g::Result<p14g::Fi
             let name: String = name
                 .extract()
                 .map_err(|_| PyTypeError::new_err("the keys of a filter's values must be placeholder names"))?;
-            // a list or a tuple is the items of `IN (:name)`, anything else is one value
-            let value = if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+            // a list is the items of `IN (:name)`, anything else is one value
+            let value = if value.is_instance_of::<PyList>() {
                 let items: Vec<Bound<'_, PyAny>> = value.extract()?;
                 p14g::FilterValue::Many(items.iter().map(py_to_expr).collect::<PyResult<_>>()?)
             } else {

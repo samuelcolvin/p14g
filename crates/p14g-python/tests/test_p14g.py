@@ -1201,8 +1201,8 @@ def test_filter_values():
     assert where(
         'a = :i and b = :f and c = :t and d is not distinct from :n', {'i': -3, 'f': 1.5, 't': True, 'n': None}
     ) == ('t.a = (- 3) AND t.b = 1.5 AND t.c = TRUE AND (t.d IS NOT DISTINCT FROM NULL)')
-    # a list or tuple is the items of IN
-    assert where('a in (:xs) and b not in (:ys)', {'xs': [1, 2], 'ys': ('x', 'y')}) == (
+    # a list is the items of IN
+    assert where('a in (:xs) and b not in (:ys)', {'xs': [1, 2], 'ys': ['x', 'y']}) == (
         "t.a IN (1, 2) AND t.b NOT IN ('x', 'y')"
     )
     # a cast applies to the bound value
@@ -1250,6 +1250,12 @@ FILTER_ERRORS: list[tuple[Any, str, type[Exception] | None]] = [
     (
         ('a = :x', {'x': object()}),
         'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not object',
+        TypeError,
+    ),
+    # a tuple is not a list, and not one value either
+    (
+        ('a in (:x)', {'x': (1, 2)}),
+        'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not tuple',
         TypeError,
     ),
     (

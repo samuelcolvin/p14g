@@ -314,7 +314,7 @@ print(policy.rewrite('delete from orders where id = 7 or true', context={'org_id
 - p14g parses the expression itself, so it goes through the same writer as the rest of the statement.
   Each value is written as an escaped literal, or as a parameter with `literals='params'`.
   A value is never read as SQL, whatever it contains.
-- A list or tuple is allowed where the placeholder is the only item of an `IN (...)`.
+- A list is allowed where the placeholder is the only item of an `IN (...)`.
   A cast applies to the bound value: `created > :since::timestamptz`.
 - The filter is yours, so it is not checked against the policy.
   It can use columns the statement may not, such as `org` above, and any function or operator.

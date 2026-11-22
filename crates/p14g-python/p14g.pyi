@@ -43,11 +43,12 @@ context. Where every callback accepts `None`, `context` may be left out.
 _T = TypeVar('_T')
 
 _Scalar: TypeAlias = None | bool | int | float | str
-ExprLike: TypeAlias = Column | Function | Literal | Expr | None | bool | int | float | str
-
-_FilterValue: TypeAlias = ExprLike | list[ExprLike] | tuple[ExprLike, ...]
-_Filter: TypeAlias = Callable[[_C], tuple[LiteralString, Mapping[str, _FilterValue]] | LiteralString] | LiteralString
+ExprLike: TypeAlias = Column | Function | Literal | Expr | _Scalar
 """What a mapper or an `extra` may give as a value."""
+
+_FilterSql: TypeAlias = LiteralString | tuple[LiteralString, Mapping[str, ExprLike | list[ExprLike]]]
+"""A filter's SQL, alone or with values for its `:name` placeholders. A list is for `IN (:name)`."""
+_Filter: TypeAlias = _FilterSql | Callable[[_C], _FilterSql]
 
 _Operator: TypeAlias = _Literal[
     '=', '!=', '<>', '<', '<=', '>', '>=', 'and', 'or', 'not', '+', '-', '*', '/', '%', '||',
@@ -80,7 +81,7 @@ class Select(Generic[_C]):
             return 'org = :org_id and status in (:statuses)', {'org_id': context.org_id, 'statuses': ['a', 'b']}
 
     p14g parses the expression and writes each value as an escaped literal; nothing is pasted into the output.
-    A list or tuple is allowed where the placeholder is the only item of an `IN (...)`. The expression may use
+    A list is allowed where the placeholder is the only item of an `IN (...)`. The expression may use
     columns and functions the rule does not otherwise allow, but not a subquery. A filter with no values can be
     returned, or given, as a plain string.
 
