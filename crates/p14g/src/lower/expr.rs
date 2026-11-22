@@ -678,6 +678,12 @@ fn narrow<T: TryFrom<u64>>(value: u64, what: &str) -> Result<T> {
     T::try_from(value).map_err(|_| Error::unsupported(format!("a {what} of {value}")))
 }
 
+/// A type modifier, which Postgres reads as an int4: a larger one is a syntax error in `varchar(n)` and out of range
+/// in `numeric(p)`. It came from a u64, so it is not negative.
+fn modifier(value: u64, what: &str) -> Result<u32> {
+    narrow::<i32>(value, what).map(i32::unsigned_abs)
+}
+
 fn lower_data_type(data_type: sp::DataType) -> Result<DataType> {
     let no_width = |width: Option<u64>, data_type: DataType| match width {
         None => Ok(data_type),
@@ -690,9 +696,9 @@ fn lower_data_type(data_type: sp::DataType) -> Result<DataType> {
         sp::DataType::Numeric(info) | sp::DataType::Decimal(info) | sp::DataType::Dec(info) => {
             Ok(DataType::Numeric(match info {
                 sp::ExactNumberInfo::None => None,
-                sp::ExactNumberInfo::Precision(p) => Some((narrow(p, "precision")?, None)),
+                sp::ExactNumberInfo::Precision(p) => Some((modifier(p, "precision")?, None)),
                 sp::ExactNumberInfo::PrecisionAndScale(p, s) => Some((
-                    narrow(p, "precision")?,
+                    modifier(p, "precision")?,
                     Some(i32::try_from(s).map_err(|_| Error::unsupported(format!("a scale of {s}")))?),
                 )),
             }))
@@ -704,12 +710,7 @@ fn lower_data_type(data_type: sp::DataType) -> Result<DataType> {
         sp::DataType::Varchar(length) | sp::DataType::CharacterVarying(length) | sp::DataType::CharVarying(length) => {
             Ok(DataType::Varchar(match length {
                 None => None,
-                Some(sp::CharacterLength::IntegerLength { length, unit: None }) => {
-                    // Postgres's grammar reads the length as an int4 constant, and a larger one is a syntax error;
-                    // it came from a u64, so it is not negative
-                    let length: i32 = narrow(length, "length")?;
-                    Some(length.unsigned_abs())
-                }
+                Some(sp::CharacterLength::IntegerLength { length, unit: None }) => Some(modifier(length, "length")?),
                 Some(_) => return Err(Error::unsupported("this varchar length")),
             }))
         }
