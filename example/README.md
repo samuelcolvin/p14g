@@ -87,8 +87,9 @@ The filter adds `org_id = <org>` and the `Insert` rules' `extra` sets it.
   `BYPASSRLS` and owns nothing.
 - `example_authenticator` is what the server's pool for untrusted SQL logs in as. It has no privileges of its own,
   and is a member of `example_untrusted` `WITH INHERIT FALSE, SET TRUE`: it can switch to that role but does not
-  otherwise get its grants. It has `statement_timeout = 2s` and the other timeouts, since `SET ROLE` does not apply
-  the settings of the role it switches to.
+  otherwise get its grants. It has `statement_timeout = 2s` and the other timeouts, `work_mem = 4MB`,
+  `temp_file_limit = 100MB` and `max_parallel_workers_per_gather = 0`, since `SET ROLE` does not apply the settings
+  of the role it switches to.
 
 `PUBLIC` has no privileges on the database or on schema `public`.
 

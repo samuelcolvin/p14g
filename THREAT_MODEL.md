@@ -38,6 +38,8 @@ The README's [Security considerations](README.md#security-considerations) has th
 - Set a time limit on every query: `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout` on
   that role.
   p14g bounds the size of a statement, not how long it runs.
+- Limit the memory and temporary disk a query can use: `work_mem` and `temp_file_limit` on that role, and
+  `max_parallel_workers_per_gather = 0`.
 - Where rows belong to different users, put row-level security on the table and give the rule a `filter` with the same
   condition.
   Set the setting the row-level security policy reads with `SET LOCAL` or `set_config(..., true)` in the transaction

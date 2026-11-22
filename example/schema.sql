@@ -37,6 +37,12 @@ grant example_untrusted to example_authenticator with inherit false, set true;
 alter role example_authenticator set statement_timeout = '2s';
 alter role example_authenticator set lock_timeout = '1s';
 alter role example_authenticator set idle_in_transaction_session_timeout = '5s';
+-- memory for each sort or hash in a query; past it, the query writes temporary files
+alter role example_authenticator set work_mem = '4MB';
+-- temporary files per process; unlimited by default, so a large sort could fill the disk
+alter role example_authenticator set temp_file_limit = '100MB';
+-- one query uses one process
+alter role example_authenticator set max_parallel_workers_per_gather = 0;
 alter role example_authenticator set search_path = app;
 alter role example_authenticator set client_encoding = 'UTF8';
 

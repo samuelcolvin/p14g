@@ -175,6 +175,12 @@ It does not replace database privileges, and it cannot limit how much work a per
 - Set a time limit on every query: `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout` on
   that role.
   A cross join of two large tables you allowed is a valid query, and p14g does not estimate how long a query will run.
+- Limit memory and temporary disk too: `work_mem`, and `temp_file_limit`, which is unlimited by default.
+  `work_mem` applies to each sort or hash in a query, not to the query, and a query that exceeds it writes temporary
+  files instead, so without `temp_file_limit` a large sort can fill the disk before the time limit stops it.
+  Consider `max_parallel_workers_per_gather = 0` as well, so that one query cannot use several processes.
+- Put these settings on the role that logs in.
+  If you connect as one role and switch with `SET ROLE`, the settings of the role you switch to do not apply.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.

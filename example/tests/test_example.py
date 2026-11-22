@@ -231,6 +231,21 @@ def test_db_with_check():
         untrusted(f"insert into app.projects (org_id, name) values ('{GLOBEX}', 'x')", ORG_ID)
 
 
+def test_db_limits():
+    """The limits are on the authenticator, and still apply after switching role."""
+    rows = untrusted(
+        "select current_setting('work_mem') as w, current_setting('temp_file_limit') as t, "
+        "current_setting('max_parallel_workers_per_gather') as p",
+        ORG_ID,
+    )
+    assert [dict(r) for r in rows] == [{'w': '4MB', 't': '100MB', 'p': '0'}]
+
+
+def test_db_temp_file_limit():
+    with pytest.raises(asyncpg.ConfigurationLimitExceededError):
+        untrusted('select g from generate_series(1, 10000000) g order by g desc', ORG_ID)
+
+
 def test_db_statement_timeout():
     with pytest.raises(asyncpg.QueryCanceledError):
         untrusted('select pg_sleep(5)', ORG_ID)
