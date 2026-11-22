@@ -12,8 +12,10 @@ from typing import Any
 
 import logfire
 from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModelSettings
+from pydantic_ai.tools import ToolDefinition
 
 from .judge import Judge
 from .oracle import Finding, Oracle
@@ -102,9 +104,9 @@ yours to change.
   Do not report things the README documents as limits, such as an error raised before a row filter is applied.
 - The database is rebuilt for each run and nothing you do to it is kept.
 
-When you are out of ideas for the area you were given, or nearly out of turns, stop and reply with a short
-summary: what you tried, what p14g did, and what you would try next. The next round starts from that summary and
-nothing else you saw.
+When you are out of ideas for the area you were given, stop and reply with a short summary: what you tried, what
+p14g did, and what you would try next. On your last turn the tools are taken away, and the reply you write then
+is that summary. The next round starts from it and nothing else you saw.
 
 ## Reference
 
@@ -120,9 +122,15 @@ class Session:
     oracle: Oracle
     judge: Judge | None
     directory: Path
+    turns: int = 40
+    """Model requests in a round. The last has no tools, so that it is the round's summary."""
+    round_start: int = 0
+    """`attempts` when the current round began."""
     attempts: int = 0
     accepted: int = 0
     findings: list[Finding] = field(default_factory=list[Finding])
+    tried: list[str] = field(default_factory=list[str])
+    """One line per statement: what happened to it, then the statement. The next round is shown this."""
     judge_failures: int = 0
     _files: frozenset[str] | None = None
 
@@ -180,11 +188,42 @@ def instructions() -> str:
     return '\n\n'.join(parts)
 
 
+TESTING_BY = 3
+"""Requests after which a round that has tried no statement is told to."""
+
+
+def _last_turn(ctx: RunContext[Session]) -> bool:
+    # `requests` counts the requests already made, so this is the last one the round's limit allows
+    return ctx.usage.requests >= ctx.deps.turns - 1
+
+
+def last_turn_without_tools(ctx: RunContext[Session], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+    return [] if _last_turn(ctx) else tool_defs
+
+
+def turn_instructions(ctx: RunContext[Session]) -> str:
+    """Instructions for this request only: the summary on the last turn, and a push to start testing."""
+    if _last_turn(ctx):
+        return (
+            'This is the last turn of the round and the tools are gone. Do not call or write out any tool call. '
+            'Reply now, in plain text, with the summary of the round: what you tried, what p14g did, and what you '
+            'would try next.'
+        )
+    left = ctx.deps.turns - ctx.usage.requests
+    if ctx.usage.requests >= TESTING_BY and ctx.deps.attempts == ctx.deps.round_start:
+        return (
+            f'You have not tried a statement this round and have {left} turns left. Stop reading and call '
+            '`rewrite` now, with several statements at once.'
+        )
+    return f'You have {left} turns left in this round, counting this one.'
+
+
 def build(model: Model | str) -> Agent[Session, str]:
     agent = Agent(
         model,
         deps_type=Session,
-        instructions=instructions(),
+        instructions=[instructions(), turn_instructions],
+        capabilities=[Hooks[Session](prepare_tools=last_turn_without_tools)],
         model_settings=AnthropicModelSettings(
             thinking='high',
             # the briefing is long and the same on every request; other providers ignore these
@@ -216,7 +255,12 @@ def build(model: Model | str) -> Agent[Session, str]:
                 model, flags = judgment
                 session.found(Finding('judge', f'{model}: {", ".join(flags)}', sql, attempt.output))
         status = 'rejected' if attempt.output is None else 'accepted'
-        print(f'{number:4} {status}: {" ".join(sql.split())[:120]}')
+        flat = ' '.join(sql.split())
+        print(f'{number:4} {status}: {flat[:120]}')
+        outcome = 'accepted' if attempt.output is not None else f'rejected ({(attempt.rejection or "")[:100]})'
+        if attempt.findings:
+            outcome += ', FINDING ' + ', '.join(finding.kind for finding in attempt.findings)
+        session.tried.append(f'{outcome}: {flat[:160]}')
         for finding in attempt.findings:
             session.found(finding)
         return attempt.render()

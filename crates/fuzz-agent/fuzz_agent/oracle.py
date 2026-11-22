@@ -20,13 +20,14 @@ from typing import Any
 import logfire
 import pglast
 import psycopg
-from p14g import DEFAULT_FUNCTIONS, P14gError, Policy, SafeSql
+from p14g import DEFAULT_FUNCTIONS
 from pglast import visitors
 from psycopg import conninfo, sql as pgsql
 from psycopg.rows import dict_row, tuple_row
 
 from . import target
 from .target import Row
+from .worker import Crashed, Hung, Mode, Rejected, Rewritten, Worker
 
 DATABASE = 'p14g_agent'
 OWNER = 'p14g_agent_owner'
@@ -34,6 +35,9 @@ ROLE = 'p14g_agent_role'
 
 SLOW_REWRITE = 1.0
 """Seconds. The limits on a statement are meant to keep `rewrite()` far below this."""
+
+HUNG_REWRITE = 10.0
+"""Seconds after which `rewrite()` is given up on and its process killed."""
 
 # functions the grammar turns syntax into: TRIM, LIKE ... ESCAPE
 GRAMMAR_FUNCTIONS = frozenset({'btrim', 'like_escape'})
@@ -85,9 +89,9 @@ class Attempt:
 
 
 class Oracle:
-    def __init__(self, database_url: str | None):
-        self.inline = target.policy()
-        self.params = target.policy(literals='params')
+    def __init__(self, database_url: str | None, worker: Worker | None = None):
+        # p14g runs in `worker`, so that a statement that hangs it can be given up on
+        self.worker = worker or Worker(timeout=HUNG_REWRITE)
         self.canaries = target.Canaries()
         self._lock = threading.Lock()
         self._owner: psycopg.Connection[Row] | None = None
@@ -99,6 +103,12 @@ class Oracle:
     @property
     def has_database(self) -> bool:
         return self._owner is not None
+
+    def close(self) -> None:
+        self.worker.close()
+        for connection in (self._owner, self._role):
+            if connection is not None:
+                connection.close()
 
     def attempt(self, sql: str) -> Attempt:
         with logfire.span('attempt', sql=sql) as span:
@@ -117,16 +127,16 @@ class Oracle:
     def _attempt(self, sql: str) -> Attempt:
         attempt = Attempt(sql)
         with self._lock:
-            accepted: dict[str, SafeSql] = {}
-            for policy in (self.inline, self.params):
-                safe = self._rewrite(policy, attempt)
+            accepted: dict[Mode, Rewritten] = {}
+            modes: tuple[Mode, ...] = ('inline', 'params')
+            for mode in modes:
+                safe = self._rewrite(mode, attempt)
                 if safe is None:
                     continue
-                mode = 'inline' if policy is self.inline else 'params'
                 accepted[mode] = safe
                 attempt.tables = safe.tables
-                self._check_structure(policy, safe, attempt)
-                if policy is self.inline:
+                self._check_structure(mode, safe, attempt)
+                if mode == 'inline':
                     attempt.output = safe.sql
                     self._explain(attempt)
                     self._run(safe, attempt)
@@ -144,33 +154,34 @@ class Oracle:
         attempt.findings = list({(finding.kind, finding.detail): finding for finding in attempt.findings}.values())
         return attempt
 
-    def _rewrite(self, policy: Policy, attempt: Attempt) -> SafeSql | None:
-        mode = 'inline' if policy is self.inline else 'params'
+    def _rewrite(self, mode: Mode, attempt: Attempt) -> Rewritten | None:
         with logfire.span('rewrite {mode}', mode=mode) as span:
             start = time.perf_counter()
-            try:
-                safe = policy.rewrite(attempt.sql, context=target.CONTEXT)
-            except P14gError as e:
-                # a rejection is the usual outcome, so it is an attribute and not an error on the span
-                attempt.rejection = f'{e.kind}: {e}'
-                span.set_attribute('rejection', attempt.rejection)
-                safe = None
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException as e:  # noqa: BLE001
-                # a Rust panic arrives as `pyo3_runtime.PanicException`, which is not an `Exception`
-                attempt.findings.append(Finding('panic', f'{type(e).__name__}: {e}', attempt.sql))
-                span.record_exception(e)
-                return None
-            else:
-                span.set_attributes({'output': safe.sql, 'params': safe.params, 'tables': safe.tables})
+            outcome = self.worker.ask((mode, attempt.sql))
             took = time.perf_counter() - start
-        if took > SLOW_REWRITE:
+            match outcome:
+                case Rewritten():
+                    span.set_attributes({'output': outcome.sql, 'params': outcome.params, 'tables': outcome.tables})
+                case Rejected():
+                    # a rejection is the usual outcome, so it is an attribute and not an error on the span
+                    attempt.rejection = f'{outcome.kind}: {outcome.message}'
+                    span.set_attribute('rejection', attempt.rejection)
+                case Crashed():
+                    attempt.findings.append(Finding('panic', outcome.error, attempt.sql))
+                    span.set_attribute('panic', outcome.error)
+                case Hung():
+                    detail = f'rewrite() had not returned after {outcome.seconds:.0f}s, so its process was killed'
+                    attempt.findings.append(Finding('hang', detail, attempt.sql))
+                    attempt.rejection = f'p14g did not answer within {outcome.seconds:.0f}s'
+                    span.set_attribute('hang', detail)
+                case _:
+                    raise TypeError(f'unexpected answer from the worker: {outcome!r}')
+        if took > SLOW_REWRITE and not isinstance(outcome, Hung):
             attempt.findings.append(Finding('slow', f'rewrite() took {took:.1f}s', attempt.sql))
-        return safe
+        return outcome if isinstance(outcome, Rewritten) else None
 
     @logfire.instrument('check structure', extract_args=False)
-    def _check_structure(self, policy: Policy, safe: SafeSql, attempt: Attempt) -> None:
+    def _check_structure(self, mode: Mode, safe: Rewritten, attempt: Attempt) -> None:
         def found(kind: str, detail: str) -> None:
             attempt.findings.append(Finding(kind, detail, attempt.sql, safe.sql))
 
@@ -197,19 +208,20 @@ class Oracle:
         # the filter a second time. The output of an insert has the `extra` columns, which a statement may not set
         if reported & target.FILTERED_TABLES or (safe.kind == 'insert' and reported & _TABLES_WITH_EXTRA):
             return None
-        try:
-            again = policy.rewrite(safe.sql, context=target.CONTEXT)
-        except P14gError as e:
-            # expanding `*` can push the output over a limit the input was under
-            if e.kind != 'limit':
-                found('not-idempotent', f'p14g rejects its own output: {e}')
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException as e:  # noqa: BLE001
-            found('panic', f'reading the output back: {type(e).__name__}: {e}')
-        else:
-            if again.sql != safe.sql:
-                found('not-idempotent', f'the output reads back as different SQL:\n{again.sql}')
+        match self.worker.ask((mode, safe.sql)):
+            case Rewritten(sql=again):
+                if again != safe.sql:
+                    found('not-idempotent', f'the output reads back as different SQL:\n{again}')
+            case Rejected(kind=kind, message=message):
+                # expanding `*` can push the output over a limit the input was under
+                if kind != 'limit':
+                    found('not-idempotent', f'p14g rejects its own output: {kind}: {message}')
+            case Crashed(error=error):
+                found('panic', f'reading the output back: {error}')
+            case Hung(seconds=seconds):
+                found('hang', f'reading the output back, rewrite() had not returned after {seconds:.0f}s')
+            case other:
+                raise TypeError(f'unexpected answer from the worker: {other!r}')
 
     @logfire.instrument('explain as the restricted role', extract_args=False)
     def _explain(self, attempt: Attempt) -> None:
@@ -224,7 +236,7 @@ class Oracle:
                 attempt.findings.append(Finding(kind, f'{what}: {_message(e)}', attempt.sql, attempt.output))
 
     @logfire.instrument('run as the owner', extract_args=False)
-    def _run(self, safe: SafeSql, attempt: Attempt) -> None:
+    def _run(self, safe: Rewritten, attempt: Attempt) -> None:
         if self._owner is None:
             return
 
@@ -293,7 +305,7 @@ class Oracle:
                     ),
                     list(row.values()),
                 )
-        for grant in self.inline.grants(ROLE, context=target.CONTEXT):
+        for grant in target.policy().grants(ROLE, context=target.CONTEXT):
             owner.execute(grant.encode())
         self._owner = owner
         self._role = connect(ROLE)

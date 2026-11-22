@@ -28,6 +28,19 @@ from .oracle import Oracle
 # findings a person has to weigh up, as opposed to a check that failed
 OPINIONS = {'judge', 'claimed'}
 
+TRIED_IN_NOTES = 60
+"""How many of a round's statements the rounds after it are shown."""
+
+
+def usable_summary(text: str) -> str:
+    """The model's summary, or a note that there is none when it wrote out a tool call instead.
+
+    Some models, GLM among them, answer a turn without tools with the text of a tool call.
+    """
+    if not text.strip() or '<tool_call>' in text or '<arg_value>' in text:
+        return 'The model wrote no summary.'
+    return text
+
 
 def parse_args() -> argparse.Namespace:
     default_judge = 'typesafe:jev-latest' if 'TYPESAFE_API_KEY' in os.environ else None
@@ -77,66 +90,81 @@ async def run(args: argparse.Namespace) -> int:
     directory = PACKAGE.parent / 'runs' / datetime.now().strftime('%Y-%m-%dT%H-%M-%S-%f')
     directory.mkdir(parents=True)
     oracle = Oracle(args.database_url)
-    judge = Judge(args.judge_model, args.judge_threshold) if args.judge_model else None
-    session = Session(oracle, judge, directory)
-    agent = attacker.build(model(args.model))
+    try:
+        judge = Judge(args.judge_model, args.judge_threshold) if args.judge_model else None
+        session = Session(oracle, judge, directory, turns=args.turns)
+        agent = attacker.build(model(args.model))
 
-    print(f'model: {args.model}')
-    print(f'judge: {args.judge_model or "none (set TYPESAFE_API_KEY or pass --judge-model)"}')
-    print(f'database: {"statements are run" if oracle.has_database else "none, the output is checked but never run"}')
-    sending = bool(logfire.DEFAULT_LOGFIRE_INSTANCE.config.token)
-    print(f'traces: {"sent to Logfire" if sending else "not sent, set LOGFIRE_API_KEY"}')
-    print(f'writing to {directory}\n')
+        print(f'model: {args.model}')
+        print(f'judge: {args.judge_model or "none (set TYPESAFE_API_KEY or pass --judge-model)"}')
+        print(
+            f'database: {"statements are run" if oracle.has_database else "none, the output is checked but never run"}'
+        )
+        sending = bool(logfire.DEFAULT_LOGFIRE_INSTANCE.config.token)
+        print(f'traces: {"sent to Logfire" if sending else "not sent, set LOGFIRE_API_KEY"}')
+        print(f'writing to {directory}\n')
 
-    usage = RunUsage()
-    notes: list[str] = []
-    with logfire.span(
-        'fuzz run {model}', model=args.model, judge=args.judge_model, rounds=args.rounds, directory=str(directory)
-    ) as run_span:
-        for number in range(1, args.rounds + 1):
-            focus = args.focus or FOCUS[(number - 1) % len(FOCUS)]
-            print(f'round {number} of {args.rounds}: {focus.split(":")[0]}')
-            prompt = f'This round, attack this area:\n\n{focus}\n\nYou have {args.turns} turns.'
-            if notes:
-                prompt += '\n\nSummaries of the rounds before this one:\n\n' + '\n\n'.join(notes)
-            before = (session.attempts, len(session.findings))
-            # the limit is on the usage it is given, so each round has its own
-            round_usage = RunUsage()
-            with logfire.span('round {number}', number=number, focus=focus) as round_span:
-                try:
-                    result = await agent.run(
-                        prompt, deps=session, usage_limits=UsageLimits(request_limit=args.turns), usage=round_usage
+        usage = RunUsage()
+        notes: list[str] = []
+        with logfire.span(
+            'fuzz run {model}', model=args.model, judge=args.judge_model, rounds=args.rounds, directory=str(directory)
+        ) as run_span:
+            for number in range(1, args.rounds + 1):
+                focus = args.focus or FOCUS[(number - 1) % len(FOCUS)]
+                print(f'round {number} of {args.rounds}: {focus.split(":")[0]}')
+                prompt = f'This round, attack this area:\n\n{focus}\n\nYou have {args.turns} turns.'
+                if notes:
+                    prompt += '\n\nSummaries of the rounds before this one:\n\n' + '\n\n'.join(notes)
+                before = (session.attempts, len(session.findings))
+                tried_before = len(session.tried)
+                session.round_start = session.attempts
+                # the limit is on the usage it is given, so each round has its own
+                round_usage = RunUsage()
+                with logfire.span('round {number}', number=number, focus=focus) as round_span:
+                    try:
+                        result = await agent.run(
+                            prompt, deps=session, usage_limits=UsageLimits(request_limit=args.turns), usage=round_usage
+                        )
+                        summary = usable_summary(result.output)
+                    except UsageLimitExceeded:
+                        summary = 'The round ran out of turns before a summary was written.'
+                    except (ModelAPIError, UnexpectedModelBehavior) as e:
+                        # a provider refusing a request, or an answer that cannot be used, ends the round, not the run
+                        summary = f'The round stopped on a model error: {type(e).__name__}: {str(e)[:500]}'
+                    round_span.set_attributes(
+                        {
+                            'summary': summary,
+                            'attempts': session.attempts - before[0],
+                            'findings': len(session.findings) - before[1],
+                        }
                     )
-                    summary = result.output
-                except UsageLimitExceeded:
-                    summary = 'The round ran out of turns before a summary was written.'
-                except (ModelAPIError, UnexpectedModelBehavior) as e:
-                    # a provider refusing a request, or an answer that cannot be used, ends the round, not the run
-                    summary = f'The round stopped on a model error: {type(e).__name__}: {str(e)[:500]}'
-                round_span.set_attributes(
-                    {
-                        'summary': summary,
-                        'attempts': session.attempts - before[0],
-                        'findings': len(session.findings) - before[1],
-                    }
-                )
-            usage.incr(round_usage)
-            found = sorted({f'{finding.kind}: {finding.detail.splitlines()[0]}' for finding in session.findings})
-            note = f'## Round {number}: {focus}\n\n{summary}\n\n{session.attempts - before[0]} statements tried.'
-            if found:
-                note += ' Findings recorded so far:\n' + '\n'.join(f'- {line}' for line in found)
-            notes.append(note)
-            (directory / 'notes.md').write_text('\n\n'.join(notes) + '\n')
-            print(f'\n{summary}\n')
+                usage.incr(round_usage)
+                found = sorted({f'{finding.kind}: {finding.detail.splitlines()[0]}' for finding in session.findings})
+                note = f'## Round {number}: {focus}\n\n{summary}\n\n{session.attempts - before[0]} statements tried.'
+                if found:
+                    note += ' Findings recorded so far:\n' + '\n'.join(f'- {line}' for line in found)
+                # kept by the fuzzer, so the next round knows what was tried whether or not the model summarised it
+                tried = session.tried[tried_before:]
+                if tried:
+                    shown = tried[-TRIED_IN_NOTES:]
+                    skipped = f' (the last {len(shown)} of {len(tried)})' if len(shown) < len(tried) else ''
+                    note += f'\n\nStatements tried{skipped}:\n' + '\n'.join(f'- {line}' for line in shown)
+                notes.append(note)
+                (directory / 'notes.md').write_text('\n\n'.join(notes) + '\n')
+                print(f'\n{summary}\n')
 
-        kinds = Counter(finding.kind for finding in session.findings)
-        run_span.set_attributes({'attempts': session.attempts, 'accepted': session.accepted, 'findings': dict(kinds)})
-    print(f'{session.attempts} statements tried, {session.accepted} accepted')
-    print(f'{usage.requests} requests, {usage.input_tokens} input and {usage.output_tokens} output tokens')
-    for kind, count in sorted(kinds.items()):
-        print(f'{count:4} {kind}')
-    print(f'details in {directory}' if kinds else 'no findings')
-    return 1 if kinds.keys() - OPINIONS else 0
+            kinds = Counter(finding.kind for finding in session.findings)
+            run_span.set_attributes(
+                {'attempts': session.attempts, 'accepted': session.accepted, 'findings': dict(kinds)}
+            )
+        print(f'{session.attempts} statements tried, {session.accepted} accepted')
+        print(f'{usage.requests} requests, {usage.input_tokens} input and {usage.output_tokens} output tokens')
+        for kind, count in sorted(kinds.items()):
+            print(f'{count:4} {kind}')
+        print(f'details in {directory}' if kinds else 'no findings')
+        return 1 if kinds.keys() - OPINIONS else 0
+    finally:
+        oracle.close()
 
 
 def model(name: str) -> Model:
@@ -162,6 +190,9 @@ def model(name: str) -> Model:
 
 def main() -> int:
     args = parse_args()
+    # progress is printed as it happens, also when the output goes to a file or a pipe
+    if reconfigure := getattr(sys.stdout, 'reconfigure', None):
+        reconfigure(line_buffering=True)
     # sent to Logfire when LOGFIRE_API_KEY is set; the console output is our own
     # no scrubbing: the database is thrown away and its secrets are random canaries, and a trace with
     # `secrets.password` or `auth` scrubbed out hides what the agent tried
