@@ -210,6 +210,20 @@ def test_functions():
     with pytest.raises(P14gError, match='function "count" is not allowed'):
         bare.rewrite('select count(*) from orders')
 
+
+def test_role_cannot_change():
+    for functions in ['set_config'], ['pg_catalog.set_config']:
+        with pytest.raises(P14gError, match='cannot allow function "set_config"') as exc_info:
+            DensePolicy(functions=functions)
+        assert exc_info.value.kind == 'config'
+    with pytest.raises(P14gError, match='cannot allow updates to "pg_settings"'):
+        DensePolicy(Update('pg_settings', columns=['setting']))
+
+    policy = DensePolicy(Select('orders'))
+    for sql in 'set role postgres', 'reset role', 'commit', "select set_config('role', 'none', false)":
+        with pytest.raises(P14gError):
+            policy.rewrite(sql)
+
     assert 'count' in p14g.DEFAULT_FUNCTIONS
     assert 'pg_sleep' not in p14g.DEFAULT_FUNCTIONS
     assert isinstance(p14g.DEFAULT_FUNCTIONS, frozenset)

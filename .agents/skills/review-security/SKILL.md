@@ -72,6 +72,10 @@ Syntax that is accepted without being represented is syntax that is silently dro
 
 Ask what the SQL author can now read, write or call that no rule names:
 
+- **Can the statement change the role it runs as?**
+    This is the restriction that matters most (see AGENTS.md). A new statement kind, transaction control, a `SET`,
+    or a function that sets a setting, runs SQL or is `SECURITY DEFINER` is a finding whatever else it does.
+    Check `tests/cases/role.sql` still covers the change.
 - **Is every column reference resolved, recorded and qualified?**
     A new `Expr` variant or clause that is not walked by `expr()` is a column the policy never sees. This includes
     `ORDER BY`, `GROUP BY`, `HAVING`, join conditions, `RETURNING`, the right side of `SET`, window and aggregate

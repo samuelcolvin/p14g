@@ -22,8 +22,8 @@ const TABLES: &[&str] = &[
 ];
 
 fn assert_within_policy(sql: &str, line: usize) {
+    common::assert_cannot_change_role(sql, &format!("line {line}"));
     let parsed = pg_query::parse(sql).unwrap_or_else(|e| panic!("line {line}: Postgres cannot parse {sql}\n  {e}"));
-    assert_eq!(parsed.protobuf.stmts.len(), 1, "line {line}: {sql}");
 
     let cte_names: BTreeSet<String> = parsed.cte_names.iter().cloned().collect();
     for table in parsed.tables() {

@@ -17,6 +17,39 @@ The workspace has three crates:
 - `crates/p14g-python`: PyO3 bindings, abi3, published to PyPI as `p14g`. `p14g.pyi` is the hand-written stub.
 - `crates/fuzz`: cargo-fuzz targets. It is outside the workspace and has its own `Cargo.lock`.
 
+## The most important restriction: the role cannot change
+
+Nothing p14g accepts may change, reset or get around the role its output runs as, whatever the policy says and in
+every dialect.
+The caller's grants and row-level security belong to that role, so a statement that leaves it bypasses everything else.
+Treat any way round this as the most serious bug p14g can have, and never add syntax, a default function or a policy
+option that weakens it.
+
+What enforces it:
+
+- Only `SELECT`, `INSERT`, `UPDATE` and `DELETE` are lowered (`Lower::statement` in `lower/mod.rs`), and only one
+  statement. That leaves out `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET` (such as
+  `search_path` and `row_security`), `GRANT`, `ALTER ROLE`, `DO`, `CALL`, `EXECUTE`, and transaction control:
+  `COMMIT`, `ROLLBACK` and `ROLLBACK TO SAVEPOINT` undo a `SET LOCAL ROLE` the caller ran.
+- `set_config` sets `role` and `session_authorization`. It is not a default function, and `PolicyBuilder::build`
+  refuses it in `functions` and refuses an `Update` rule for `pg_settings`, whose `UPDATE` rule calls it.
+  Postgres does not list `role` in `pg_settings`, but `search_path` and `row_security` are there.
+- A default function must not run SQL, change a setting, or be `SECURITY DEFINER`.
+
+What tests it:
+
+- `tests/cases/role.sql` lists the ways in, each with the error kind the test policy gives. `tests/role.rs` checks
+  each is rejected, and in every dialect is either rejected or accepted only as a statement that cannot change the role.
+- `common::assert_cannot_change_role` checks with libpg_query that output is one of the four statements with no
+  `set_config` and no `pg_settings`. `tests/pg_query.rs` calls it on every accepted case.
+- `run` in `tests/postgres.rs` compares `current_user`, `session_user`, `role`, `search_path`, `row_security`,
+  `session_replication_role` and `transaction_read_only` before and after every statement.
+  `role_changes_are_caught` checks that comparison does fail.
+- The fuzzers make the libpg_query check on every output, and with a database check the session's role and settings
+  after each `EXPLAIN`. `FRAGMENTS` in `crates/fuzz/src/lib.rs` has role-changing statements and calls.
+
+A new way to change the role goes in `role.sql` and in `FRAGMENTS`.
+
 ## Commands
 
 ```bash
