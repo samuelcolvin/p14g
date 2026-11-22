@@ -106,22 +106,8 @@ class Oracle:
         self._role.close()
 
     def attempt(self, sql: str) -> Attempt:
-        with logfire.span('attempt', sql=sql) as span:
-            attempt = self._attempt(sql)
-            span.set_attributes(
-                {
-                    'accepted': attempt.output is not None,
-                    'output': attempt.output,
-                    'rejection': attempt.rejection,
-                    'ran': attempt.ran,
-                    'findings': [finding.kind for finding in attempt.findings],
-                }
-            )
-        return attempt
-
-    def _attempt(self, sql: str) -> Attempt:
         attempt = Attempt(sql)
-        with self._lock:
+        with logfire.span('attempt', sql=sql) as span, self._lock:
             accepted: dict[Mode, Rewritten] = {}
             modes: tuple[Mode, ...] = ('inline', 'params')
             for mode in modes:
@@ -145,8 +131,17 @@ class Oracle:
                         safe.sql,
                     )
                 )
-        # both policies, and every row a statement touches, report the same thing
-        attempt.findings = list({(finding.kind, finding.detail): finding for finding in attempt.findings}.values())
+            # both policies, and every row a statement touches, report the same thing
+            attempt.findings = list({(finding.kind, finding.detail): finding for finding in attempt.findings}.values())
+            span.set_attributes(
+                {
+                    'accepted': attempt.output is not None,
+                    'output': attempt.output,
+                    'rejection': attempt.rejection,
+                    'ran': attempt.ran,
+                    'findings': [finding.kind for finding in attempt.findings],
+                }
+            )
         return attempt
 
     def _rewrite(self, mode: Mode, attempt: Attempt) -> Rewritten | None:
@@ -190,14 +185,16 @@ class Oracle:
         if len(statements) != 1:
             return found('multiple-statements', f'the output is {len(statements)} statements')
 
-        reported = {_unqualified(table) for table in safe.tables}
+        reported = {table.removeprefix('public.') for table in safe.tables}
         for table in sorted(visitors.referenced_relations(statements[0])):
-            name = _unqualified(table)
+            name = table.removeprefix('public.')
             if name not in target.POLICY_TABLES:
                 found('unknown-table', f'Postgres sees table {table!r}, which no rule names')
             elif name not in reported:
                 found('unreported-table', f'table {table!r} is not in SafeSql.tables {safe.tables}')
-        for function in sorted(_functions(statements[0])):
+        functions = _Functions()
+        functions(statements[0])
+        for function in sorted(functions.names):
             name = function.removeprefix('pg_catalog.')
             if name not in DEFAULT_FUNCTIONS and name not in GRAMMAR_FUNCTIONS:
                 found('function', f'Postgres sees function {function!r}, which is not allowed')
@@ -255,7 +252,7 @@ class Oracle:
                 found('error-leak', f'the error message holds a value from {", ".join(leaked)}: {message}')
             return
 
-        shown = '\n'.join(_clip(str(list(row)), 300) for row in rows[:10])
+        shown = '\n'.join(str(list(row))[:300] for row in rows[:10])
         attempt.ran = f'ran: {affected} rows' + (f', the first {min(len(rows), 10)}:\n{shown}' if rows else '')
         if leaked := self.canaries.found_in(str(rows)):
             found('canary', f'the result holds a value from {", ".join(leaked)}')
@@ -356,23 +353,9 @@ class _Functions(visitors.Visitor):
         self.names.add('.'.join(part.sval for part in node.funcname))
 
 
-def _functions(statement: Any) -> set[str]:
-    visitor = _Functions()
-    visitor(statement)
-    return visitor.names
-
-
-def _unqualified(table: str) -> str:
-    return table.removeprefix('public.')
-
-
 def _table(name: str) -> pgsql.Identifier:
     return pgsql.Identifier(*name.split('.'))
 
 
 def _message(error: psycopg.Error) -> str:
     return ' '.join(part for part in (error.diag.message_primary, error.diag.message_detail) if part)
-
-
-def _clip(text: str, length: int) -> str:
-    return text if len(text) <= length else f'{text[:length]}...'

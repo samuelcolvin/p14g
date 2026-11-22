@@ -44,7 +44,6 @@ class Hung:
     seconds: float
 
 
-Outcome = Rewritten | Rejected | Crashed | Hung
 Handler = Callable[[Any], Any]
 
 _POLICIES: dict[Mode, Any] = {}

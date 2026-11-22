@@ -1,24 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from typing import cast
 
 from fuzz_agent import attacker
 from fuzz_agent.__main__ import usable_summary
-from fuzz_agent.attacker import (
-    Session,
-    copy_repository,
-    last_turn_without_tools,
-    turn_instructions,
-)
+from fuzz_agent.attacker import Session, copy_repository, repository_files
 from fuzz_agent.oracle import Oracle
 from fuzz_agent.worker import Worker
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 
-def test_oracle(oracle: Oracle, tmp_path: Path) -> None:
+def test_oracle(oracle: Oracle) -> None:
     allowed = oracle.attempt('select id, name from customers')
     assert allowed.output == 'SELECT customers.id, customers.name\nFROM public.customers\nLIMIT 50'
     assert allowed.ran is not None and allowed.ran.startswith('ran: ')
@@ -35,9 +29,9 @@ def test_oracle(oracle: Oracle, tmp_path: Path) -> None:
     assert "docs.status IN ('draft', 'published')" in filtered.output
     assert filtered.findings == []
 
-    session = Session(oracle, tmp_path)
-    assert 'crates/p14g/src/check.rs' in session.files
-    assert '.claude/skills' not in session.files
+    files = repository_files()
+    assert 'crates/p14g/src/check.rs' in files
+    assert '.env' not in files
 
 
 def test_hang_is_a_finding_and_the_worker_restarts(database_url: str) -> None:
@@ -62,22 +56,19 @@ def test_hang_is_a_finding_and_the_worker_restarts(database_url: str) -> None:
         oracle.close()
 
 
-def test_turns() -> None:
-    tools: list[Any] = ['rewrite', 'read_file']
+def test_turns(tmp_path: Path) -> None:
+    session = Session(cast(Oracle, None), tmp_path, turns=5)
 
-    def context(requests: int, attempts: int = 0) -> Any:
-        deps = SimpleNamespace(turns=5, attempts=attempts, round_start=0)
-        return SimpleNamespace(usage=SimpleNamespace(requests=requests), deps=deps)
-
-    assert last_turn_without_tools(context(0), tools) == tools
-    assert last_turn_without_tools(context(3), tools) == tools
+    assert not session.last_turn(0)
+    assert not session.last_turn(3)
     # the fifth request, after four, is the last the round allows
-    assert last_turn_without_tools(context(4), tools) == []
+    assert session.last_turn(4)
 
-    assert turn_instructions(context(0)) == 'You have 5 turns left in this round, counting this one.'
-    assert turn_instructions(context(3)).startswith('You have not tried a statement this round')
-    assert turn_instructions(context(3, attempts=2)) == 'You have 2 turns left in this round, counting this one.'
-    assert turn_instructions(context(4)).startswith('This is the last turn of the round')
+    assert session.turn_instructions(0) == 'You have 5 turns left in this round, counting this one.'
+    assert session.turn_instructions(3).startswith('You have not tried a statement this round')
+    session.attempts = 2
+    assert session.turn_instructions(3) == 'You have 2 turns left in this round, counting this one.'
+    assert session.turn_instructions(4).startswith('This is the last turn of the round')
 
 
 def test_usable_summary() -> None:
@@ -102,18 +93,21 @@ print(await rewrite(sql='select id from customers'))
 
 def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     tools_offered: list[list[str]] = []
+    tool_choices: list[object] = []
     returned: list[str] = []
 
     def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         tools_offered.append([tool.name for tool in info.function_tools])
+        tool_choice = dict(info.model_settings or {}).get('tool_choice')
+        tool_choices.append(tool_choice)
         returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
-        if returns or not info.function_tools:
+        if returns or tool_choice == 'none':
             returned.extend(str(part.content) for part in returns)
             return ModelResponse(parts=[TextPart('summary')])
         return ModelResponse(parts=[ToolCallPart('run_code', {'code': CODE})])
 
     session = Session(oracle, tmp_path, turns=5)
-    copy_repository(session.files)
+    copy_repository()
 
     def run() -> str:
         return attacker.agent.run_sync('attack', model=FunctionModel(model), deps=session).output
@@ -121,6 +115,7 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     assert run() == 'summary'
     # the file tools are gone: the agent reads the mounted copy and calls `rewrite` from Python
     assert tools_offered == [['run_code'], ['run_code']]
+    assert tool_choices == ['auto', 'auto']
     [output] = returned
     assert 'read-only' in output
     assert 'False' in output
@@ -128,8 +123,8 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     assert session.tried == ['accepted: select id from customers']
     assert not (attacker.REPOSITORY / 'written').exists()
 
-    # on the last turn of a round there is no `run_code` either, so the reply is the summary
-    tools_offered.clear()
+    # on the last turn of a round the model may not call `run_code`, so the reply is the summary
+    tool_choices.clear()
     session.turns = 1
     assert run() == 'summary'
-    assert tools_offered == [[]]
+    assert tool_choices == ['none']

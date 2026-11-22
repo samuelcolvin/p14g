@@ -99,10 +99,6 @@ class Writes:
     """Whether an update or delete may touch this row, given the row as it was before."""
 
 
-def _doc_reachable(row: Row) -> bool:
-    return row['org'] == CONTEXT['org'] and row['status'] in STATUSES
-
-
 # Every table that holds rows. A table with the default `Writes()` must never change.
 WRITES: dict[str, Writes] = {
     'customers': Writes(),
@@ -129,12 +125,11 @@ WRITES: dict[str, Writes] = {
         extra={'org': CONTEXT['org'], 'status': 'draft'},
         update=frozenset({'title', 'body'}),
         delete=True,
-        reachable=_doc_reachable,
+        reachable=lambda row: row['org'] == CONTEXT['org'] and row['status'] in STATUSES,
     ),
 }
 
-READABLE_TABLES = frozenset({'customers', 'orders', 'v', 'app.events', 'limited', 'family', 'docs'})
-POLICY_TABLES = READABLE_TABLES | {'audit'}
+POLICY_TABLES = frozenset({'customers', 'orders', 'v', 'app.events', 'limited', 'family', 'docs', 'audit'})
 FILTERED_TABLES = frozenset({'docs'})
 
 

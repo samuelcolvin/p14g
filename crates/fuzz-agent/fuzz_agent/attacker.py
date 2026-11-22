@@ -12,10 +12,7 @@ from typing import Any
 
 import logfire
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
-from pydantic_ai.models.anthropic import AnthropicModelSettings
-from pydantic_ai.tools import ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness import CodeMode
 from pydantic_monty import MountDir
 
@@ -116,7 +113,7 @@ yours to change.
 - The database is rebuilt for each run and nothing you do to it is kept.
 
 When you are out of ideas for the area you were given, stop and reply with a short summary: what you tried, what
-p14g did, and what you would try next. On your last turn `run_code` is taken away, and the reply you write then
+p14g did, and what you would try next. On your last turn you may not call `run_code`, and the reply you write then
 is that summary. The next round starts from it and nothing else you saw.
 
 ## Start here
@@ -131,6 +128,10 @@ Read these in your first `run_code` call:
 """
 
 
+READING_TURNS = 3
+"""Turns a round may spend reading before the agent is told to try a statement."""
+
+
 @dataclass
 class Session:
     """What one run of the fuzzer holds: the checks and the files it writes."""
@@ -138,7 +139,7 @@ class Session:
     oracle: Oracle
     directory: Path
     turns: int = 40
-    """Model requests in a round. The last has no tools, so that it is the round's summary."""
+    """Model requests in a round. The last may not call a tool, so that it is the round's summary."""
     round_start: int = 0
     """`attempts` when the current round began."""
     attempts: int = 0
@@ -146,7 +147,6 @@ class Session:
     findings: list[Finding] = field(default_factory=list[Finding])
     tried: list[str] = field(default_factory=list[str])
     """One line per statement: what happened to it, then the statement. The next round is shown this."""
-    _files: frozenset[str] | None = None
 
     def record(self, name: str, entry: dict[str, Any]) -> None:
         with (self.directory / f'{name}.jsonl').open('a') as f:
@@ -164,33 +164,47 @@ class Session:
         )
         print(f'  FINDING ({finding.kind}): {finding.detail.splitlines()[0][:150]}')
 
-    @property
-    def files(self) -> frozenset[str]:
-        """Files the agent may read: those git tracks or would track, so nothing ignored and nothing outside."""
-        if self._files is None:
-            listed = subprocess.run(
-                ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
+    def last_turn(self, requests: int) -> bool:
+        """Whether the request after `requests` made this round is the last the round's limit allows."""
+        return requests >= self.turns - 1
+
+    def turn_instructions(self, requests: int) -> str:
+        """Instructions for the next request only: the summary on the last turn, and a push to start testing."""
+        if self.last_turn(requests):
+            return (
+                'This is the last turn of the round and you may not call `run_code`. Do not call or write out any '
+                'tool call. Reply now, in plain text, with the summary of the round: what you tried, what p14g did, '
+                'and what you would try next.'
             )
-            root = ROOT.resolve()
-            files: set[str] = set()
-            for name in listed.stdout.splitlines():
-                path = ROOT / name
-                try:
-                    path.resolve().relative_to(root)
-                except ValueError:
-                    continue
-                if path.is_file():
-                    files.add(name)
-            self._files = frozenset(files)
-        return self._files
+        left = self.turns - requests
+        if requests >= READING_TURNS and self.attempts == self.round_start:
+            return (
+                f'You have not tried a statement this round and have {left} turns left. Stop reading and call '
+                '`rewrite` from `run_code` now, with several statements at once.'
+            )
+        return f'You have {left} turns left in this round, counting this one.'
 
 
-def copy_repository(files: frozenset[str]) -> None:
-    """Replace the contents of `REPOSITORY` with `files` from the checkout.
+def repository_files() -> list[str]:
+    """Files the agent may read: those git tracks or would track, so nothing ignored and nothing outside."""
+    listed = subprocess.run(
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    root = ROOT.resolve()
+    # `resolve` follows a symlink, which must not lead out of the checkout
+    return [
+        name
+        for name in listed.stdout.splitlines()
+        if (ROOT / name).is_file() and (ROOT / name).resolve().is_relative_to(root)
+    ]
+
+
+def copy_repository() -> None:
+    """Replace the contents of `REPOSITORY` with the files of the checkout the agent may read.
 
     The checkout itself is not mounted: it has `.env`, the virtual environment and the runs of this fuzzer in it.
     `REPOSITORY` is emptied rather than removed, since the mount holds the directory itself open.
@@ -200,74 +214,25 @@ def copy_repository(files: frozenset[str]) -> None:
             shutil.rmtree(child)
         else:
             child.unlink()
-    for name in files:
+    for name in repository_files():
         target = REPOSITORY / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
-
-
-TESTING_BY = 3
-"""Requests after which a round that has tried no statement is told to."""
-
-
-def _last_turn(ctx: RunContext[Session]) -> bool:
-    # `requests` counts the requests already made, so this is the last one the round's limit allows
-    return ctx.usage.requests >= ctx.deps.turns - 1
-
-
-def last_turn_without_tools(ctx: RunContext[Session], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
-    return [] if _last_turn(ctx) else tool_defs
-
-
-@dataclass
-class LastTurnWithoutTools(AbstractCapability[Session]):
-    """Offer no tools on the round's last request, so that its reply is the summary.
-
-    It wraps `CodeMode`, so it sees `run_code` itself: a `prepare_tools` hook is applied inside `CodeMode` and only
-    sees the tools `run_code` calls, so `run_code` would still be offered.
-    """
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position='outermost', wraps=[CodeMode])
-
-    def get_wrapper_toolset(self, toolset: AbstractToolset[Session]) -> AbstractToolset[Session]:
-        return PreparedToolset(toolset, last_turn_without_tools)
-
-
-def turn_instructions(ctx: RunContext[Session]) -> str:
-    """Instructions for this request only: the summary on the last turn, and a push to start testing."""
-    if _last_turn(ctx):
-        return (
-            'This is the last turn of the round and the tools are gone. Do not call or write out any tool call. '
-            'Reply now, in plain text, with the summary of the round: what you tried, what p14g did, and what you '
-            'would try next.'
-        )
-    left = ctx.deps.turns - ctx.usage.requests
-    if ctx.usage.requests >= TESTING_BY and ctx.deps.attempts == ctx.deps.round_start:
-        return (
-            f'You have not tried a statement this round and have {left} turns left. Stop reading and call '
-            '`rewrite` from `run_code` now, with several statements at once.'
-        )
-    return f'You have {left} turns left in this round, counting this one.'
 
 
 REPOSITORY.mkdir(exist_ok=True)
 
 agent = Agent(
     deps_type=Session,
-    instructions=[INSTRUCTIONS, turn_instructions],
+    instructions=[INSTRUCTIONS, lambda ctx: ctx.deps.turn_instructions(ctx.usage.requests)],
     capabilities=[
-        LastTurnWithoutTools(),
         # `rewrite` and `report_finding` are called from Python in the sandbox, so one request can read files and
         # try a batch of statements
         CodeMode(mount=MountDir(host_path=REPOSITORY, virtual_path='/repo', mode='read-only')),
     ],
-    model_settings=AnthropicModelSettings(
-        thinking='high',
-        # the instructions are the same on every request; other providers ignore these
-        anthropic_cache_instructions=True,
-        anthropic_cache_tool_definitions=True,
-        anthropic_cache_messages=True,
+    # on the last turn no tool may be called, so the reply is the round's summary
+    model_settings=lambda ctx: ModelSettings(
+        thinking='high', tool_choice='none' if ctx.deps.last_turn(ctx.usage.requests) else 'auto'
     ),
     retries=3,
 )
@@ -287,12 +252,14 @@ async def rewrite(ctx: RunContext[Session], sql: str) -> str:
     # written before anything is run, so a statement that crashes the process is the last line of the file
     session.record('attempts', {'n': number, 'sql': sql})
     attempt = await asyncio.to_thread(session.oracle.attempt, sql)
-    if attempt.output is not None:
-        session.accepted += 1
-    status = 'rejected' if attempt.output is None else 'accepted'
     flat = ' '.join(sql.split())
-    print(f'{number:4} {status}: {flat[:120]}')
-    outcome = 'accepted' if attempt.output is not None else f'rejected ({(attempt.rejection or "")[:100]})'
+    if attempt.output is None:
+        outcome = f'rejected ({(attempt.rejection or "")[:100]})'
+        print(f'{number:4} rejected: {flat[:120]}')
+    else:
+        session.accepted += 1
+        outcome = 'accepted'
+        print(f'{number:4} accepted: {flat[:120]}')
     if attempt.findings:
         outcome += ', FINDING ' + ', '.join(finding.kind for finding in attempt.findings)
     session.tried.append(f'{outcome}: {flat[:160]}')

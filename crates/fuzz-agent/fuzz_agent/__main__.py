@@ -24,9 +24,6 @@ from . import attacker
 from .attacker import FOCUS, PACKAGE, Session, copy_repository
 from .oracle import Oracle
 
-# findings a person has to weigh up, as opposed to a check that failed
-OPINIONS = {'claimed'}
-
 TRIED_IN_NOTES = 60
 """How many of a round's statements the rounds after it are shown."""
 
@@ -34,7 +31,7 @@ TRIED_IN_NOTES = 60
 def usable_summary(text: str) -> str:
     """The model's summary, or a note that there is none when it wrote out a tool call instead.
 
-    Some models, GLM among them, answer a turn without tools with the text of a tool call.
+    Some models, GLM among them, answer a turn that may not call a tool with the text of a tool call.
     """
     if not text.strip() or '<tool_call>' in text or '<arg_value>' in text:
         return 'The model wrote no summary.'
@@ -81,7 +78,7 @@ async def run(args: argparse.Namespace) -> int:
     oracle = Oracle(args.database_url)
     try:
         session = Session(oracle, directory, turns=args.turns)
-        copy_repository(session.files)
+        copy_repository()
         attacking_model = model(args.model)
 
         print(f'model: {args.model}')
@@ -100,9 +97,9 @@ async def run(args: argparse.Namespace) -> int:
                 prompt = f'This round, attack this area:\n\n{focus}\n\nYou have {args.turns} turns.'
                 if notes:
                     prompt += '\n\nSummaries of the rounds before this one:\n\n' + '\n\n'.join(notes)
-                before = (session.attempts, len(session.findings))
-                tried_before = len(session.tried)
                 session.round_start = session.attempts
+                findings_before = len(session.findings)
+                tried_before = len(session.tried)
                 # the limit is on the usage it is given, so each round has its own
                 round_usage = RunUsage()
                 with logfire.span('round {number}', number=number, focus=focus) as round_span:
@@ -123,13 +120,13 @@ async def run(args: argparse.Namespace) -> int:
                     round_span.set_attributes(
                         {
                             'summary': summary,
-                            'attempts': session.attempts - before[0],
-                            'findings': len(session.findings) - before[1],
+                            'attempts': session.attempts - session.round_start,
+                            'findings': len(session.findings) - findings_before,
                         }
                     )
                 usage.incr(round_usage)
                 found = sorted({f'{finding.kind}: {finding.detail.splitlines()[0]}' for finding in session.findings})
-                note = f'## Round {number}: {focus}\n\n{summary}\n\n{session.attempts - before[0]} statements tried.'
+                note = f'## Round {number}: {focus}\n\n{summary}\n\n{session.attempts - session.round_start} statements tried.'
                 if found:
                     note += ' Findings recorded so far:\n' + '\n'.join(f'- {line}' for line in found)
                 # kept by the fuzzer, so the next round knows what was tried whether or not the model summarised it
@@ -151,7 +148,8 @@ async def run(args: argparse.Namespace) -> int:
         for kind, count in sorted(kinds.items()):
             print(f'{count:4} {kind}')
         print(f'details in {directory}' if kinds else 'no findings')
-        return 1 if kinds.keys() - OPINIONS else 0
+        # a finding the agent reported is for a person to weigh up; any other is a check that failed
+        return 1 if kinds.keys() - {'claimed'} else 0
     finally:
         oracle.close()
 

@@ -15,7 +15,7 @@ linting = [
 ]
 # for the LLM fuzzer in crates/fuzz-agent
 fuzz-agent = [
-    "pydantic-ai-slim[anthropic,openai]",
+    "pydantic-ai-slim[openai]",
     "psycopg[binary]",
     # Postgres's own parser, to check what p14g emits
     "pglast",
@@ -63,6 +63,8 @@ quote-style = "single"
 
 [tool.basedpyright]
 include = ["crates/p14g-python/p14g.pyi", "crates/p14g-python/tests", "crates/fuzz-agent"]
+# the copy of the repository the fuzz agent reads, and its runs
+exclude = ["crates/fuzz-agent/repository", "crates/fuzz-agent/runs", "**/__pycache__", "**/.*"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingModuleSource = false
