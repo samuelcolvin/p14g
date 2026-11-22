@@ -11,3 +11,8 @@ __pycache__
 .coverage
 htmlcov/
 *.profraw
+/crates/fuzz-agent/runs/
+/crates/fuzz-agent/.library/
+.logfire/
+.env
+/scratch.py

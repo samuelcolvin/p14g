@@ -1,0 +1,162 @@
+"""Run the LLM fuzzer: `make fuzz-agent`, or `python -m fuzz_agent --help` from `crates/fuzz-agent`."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from collections import Counter
+from datetime import datetime
+
+import logfire
+from pydantic_ai import UsageLimitExceeded
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
+from pydantic_ai.models import Model, infer_model
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers import Provider, infer_provider
+
+# overloads for providers whose clients are not installed (groq, google) have unknown types; ours takes a `str`
+from pydantic_ai.providers.gateway import gateway_provider  # pyright: ignore[reportUnknownVariableType]
+from pydantic_ai.usage import RunUsage, UsageLimits
+
+from . import attacker, library
+from .attacker import PACKAGE, Session
+from .oracle import Oracle
+
+
+def usable_summary(text: str) -> str:
+    """The model's summary, or a note that there is none when it wrote out a tool call instead.
+
+    Some models, GLM among them, answer a turn that may not call a tool with the text of a tool call.
+    """
+    if not text.strip() or '<tool_call>' in text or '<arg_value>' in text:
+        return 'The model wrote no summary.'
+    return text
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog='fuzz_agent', description=__doc__)
+    parser.add_argument(
+        '--model',
+        default=os.environ.get('P14G_FUZZ_MODEL', 'gateway/doubleword:zai-org/GLM-5.3'),
+        help='the model that writes the SQL, as a Pydantic AI model name; a `gateway/` model is reached through '
+        'the Pydantic AI Gateway with LOGFIRE_API_KEY (default: %(default)s)',
+    )
+    parser.add_argument('--turns', type=int, default=40, help='model requests the agent gets')
+    parser.add_argument('--focus', help='what to attack, in your own words; by default the agent chooses')
+    parser.add_argument(
+        '--database-url',
+        default=os.environ.get('P14G_TEST_DATABASE_URL'),
+        help='a superuser connection to a throwaway Postgres (`make postgres`); the database p14g_agent is dropped '
+        'and made again (default: P14G_TEST_DATABASE_URL)',
+    )
+    args = parser.parse_args()
+    if args.model.startswith('gateway/') and 'LOGFIRE_API_KEY' not in os.environ:
+        parser.error(
+            f'{args.model} goes through the Pydantic AI Gateway: set LOGFIRE_API_KEY to a key made with '
+            '`logfire-cli api-key write gateway`'
+        )
+    if not args.database_url:
+        parser.error('set P14G_TEST_DATABASE_URL or pass --database-url: every statement is run on Postgres')
+    if args.turns < 1:
+        parser.error('--turns must be at least 1')
+    return args
+
+
+async def run(args: argparse.Namespace) -> int:
+    directory = PACKAGE.parent / 'runs' / datetime.now().strftime('%Y-%m-%dT%H-%M-%S-%f')
+    directory.mkdir(parents=True)
+    oracle = Oracle(args.database_url)
+    try:
+        session = Session(oracle, directory, turns=args.turns)
+        library.refresh()
+        attacking_model = model(args.model)
+
+        print(f'model: {args.model}')
+        sending = bool(logfire.DEFAULT_LOGFIRE_INSTANCE.config.token)
+        print(f'traces: {"sent to Logfire" if sending else "not sent, set LOGFIRE_API_KEY"}')
+        print(f'writing to {directory}\n')
+
+        prompt = f'You have {args.turns} turns.'
+        if args.focus:
+            prompt += f'\n\nAttack this area:\n\n{args.focus}'
+        usage = RunUsage()
+        with logfire.span('fuzz run {model}', model=args.model, focus=args.focus, directory=str(directory)) as span:
+            try:
+                result = await attacker.agent.run(
+                    prompt,
+                    model=attacking_model,
+                    deps=session,
+                    usage_limits=UsageLimits(request_limit=args.turns),
+                    usage=usage,
+                )
+                summary = usable_summary(result.output)
+            except UsageLimitExceeded:
+                summary = 'The run ran out of turns before a summary was written.'
+            except (ModelAPIError, UnexpectedModelBehavior) as e:
+                # a provider refusing a request, or an answer that cannot be used; the findings so far still count
+                summary = f'The run stopped on a model error: {type(e).__name__}: {str(e)[:500]}'
+            kinds = Counter(finding.kind for finding in session.findings)
+            span.set_attributes(
+                {
+                    'summary': summary,
+                    'attempts': session.attempts,
+                    'accepted': session.accepted,
+                    'findings': dict(kinds),
+                }
+            )
+        (directory / 'summary.md').write_text(summary + '\n')
+        print(f'\n{summary}\n')
+        print(f'{session.attempts} statements tried, {session.accepted} accepted')
+        print(f'{usage.requests} requests, {usage.input_tokens} input and {usage.output_tokens} output tokens')
+        for kind, count in sorted(kinds.items()):
+            print(f'{count:4} {kind}')
+        print(f'details in {directory}' if kinds else 'no findings')
+        # a finding the agent reported is for a person to weigh up; any other is a check that failed
+        return 1 if kinds.keys() - {'claimed'} else 0
+    finally:
+        oracle.close()
+
+
+def model(name: str) -> Model:
+    """The model called `name`, with `gateway/` models given LOGFIRE_API_KEY.
+
+    One Logfire API key with the `write` and `gateway` permissions (`logfire-cli api-key write gateway`) sends the
+    traces and pays for the model requests.
+    """
+
+    api_key = os.environ.get('LOGFIRE_API_KEY')
+    # Pydantic AI has no Doubleword provider, but Doubleword speaks OpenAI's chat API and the Gateway routes to it
+    if name.startswith('gateway/doubleword:'):
+        provider = gateway_provider('openai-chat', route='doubleword', api_key=api_key)
+        return OpenAIChatModel(name.removeprefix('gateway/doubleword:'), provider=provider)
+
+    def provider_for(provider_name: str) -> Provider[object]:
+        if provider_name.startswith('gateway/'):
+            return gateway_provider(provider_name.removeprefix('gateway/'), api_key=api_key)
+        return infer_provider(provider_name)
+
+    return infer_model(name, provider_for)
+
+
+def main() -> int:
+    args = parse_args()
+    # progress is printed as it happens, also when the output goes to a file or a pipe
+    if reconfigure := getattr(sys.stdout, 'reconfigure', None):
+        reconfigure(line_buffering=True)
+    # sent to Logfire when LOGFIRE_API_KEY is set; the console output is our own
+    # no scrubbing: the database is thrown away and its secrets are random canaries, and a trace with
+    # `secrets.password` or `auth` scrubbed out hides what the agent tried
+    logfire.configure(
+        service_name='p14g-fuzz-agent', send_to_logfire='if-token-present', console=False, scrubbing=False
+    )
+    logfire.instrument_pydantic_ai()
+    try:
+        return asyncio.run(run(args))
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == '__main__':
+    sys.exit(main())

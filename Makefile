@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-python_sources = crates/p14g-python/p14g.pyi crates/p14g-python/tests
+python_sources = crates/p14g-python/p14g.pyi crates/p14g-python/tests crates/fuzz-agent
 # where `make postgres` puts the database used by the integration tests
 P14G_TEST_DATABASE_URL ?= postgres://postgres:postgres@127.0.0.1:54329/postgres
 
@@ -37,7 +37,7 @@ lint-rs: ## Lint Rust code with rustfmt and clippy
 lint-py: python-dev ## Lint Python code with ruff, basedpyright and stubtest
 	uv run --group linting ruff format --check $(python_sources)
 	uv run --group linting ruff check $(python_sources)
-	uv run --group linting basedpyright
+	uv run --group linting --group fuzz-agent basedpyright
 	# stubtest compares the stubs with the built module, hence python-dev
 	uv run --group linting python -m mypy.stubtest p14g --allowlist crates/p14g-python/stubtest-allowlist.txt
 
@@ -79,6 +79,14 @@ fuzz: ## Fuzz `rewrite` with arbitrary input
 .PHONY: fuzz-mutate
 fuzz-mutate: ## Fuzz `rewrite` with mutations of the test cases
 	cargo +nightly fuzz run --fuzz-dir crates/fuzz mutate --release
+
+.PHONY: fuzz-agent
+fuzz-agent: python-dev ## Have an LLM attack p14g (see crates/fuzz-agent). ARGS='--rounds 1' passes options on
+	cd crates/fuzz-agent && P14G_TEST_DATABASE_URL=$(P14G_TEST_DATABASE_URL) uv run --group fuzz-agent python -m fuzz_agent $(ARGS)
+
+.PHONY: test-fuzz-agent
+test-fuzz-agent: python-dev ## Run the LLM fuzzer's API-free tests; those that need Postgres are skipped without it
+	cd crates/fuzz-agent && P14G_TEST_DATABASE_URL=$(P14G_TEST_DATABASE_URL) uv run --group fuzz-agent python -m pytest tests
 
 .PHONY: all
 all: format lint test python-test ## Format, lint and test

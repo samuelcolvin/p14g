@@ -21,6 +21,23 @@ jobs:
   lint:
     runs-on: ubuntu-latest
 
+    # `make test-fuzz-agent` runs the fuzzer's checks on a real database
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      P14G_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,6 +77,8 @@ jobs:
       - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
         env:
           SKIP: no-commit-to-branch
+
+      - run: make test-fuzz-agent
 
   test-rust:
     name: test rust ${{ matrix.rust-version }}
