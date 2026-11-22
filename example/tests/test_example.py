@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 import pytest
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from p14g_example.db import setup
 from p14g_example.main import app
+from p14g_example.policy import ORG_ID
 from p14g_example.settings import settings
 
 
@@ -42,7 +44,7 @@ def query(client: TestClient, sql: str) -> dict[str, Any]:
     return body
 
 
-def untrusted(sql: str, org_id: int | None) -> Any:
+def untrusted(sql: str, org_id: str | None) -> Any:
     """Run `sql` as the untrusted role directly, without p14g, to check what Postgres enforces by itself."""
 
     async def run() -> Any:
@@ -50,12 +52,17 @@ def untrusted(sql: str, org_id: int | None) -> Any:
         try:
             async with conn.transaction():
                 if org_id is not None:
-                    await conn.execute("select set_config('app.org_id', $1, true)", str(org_id))
+                    await conn.execute("select set_config('app.org_id', $1, true)", org_id)
                 return await conn.fetch(sql)
         finally:
             await conn.close()
 
     return asyncio.run(run())
+
+
+GLOBEX = '10000000-0000-4000-8000-000000000002'
+GIANT_MAGNET = '30000000-0000-4000-8000-000000000002'  # an Acme project
+HAMMOCK_FACTORY = '30000000-0000-4000-8000-000000000003'  # a Globex project
 
 
 def test_tasks_only_own_org(client: TestClient):
@@ -64,7 +71,7 @@ def test_tasks_only_own_org(client: TestClient):
         'SELECT tasks.id, tasks.project_id, tasks.assignee_id, tasks.title, tasks.status, tasks.due_date, '
         'tasks.created_at\n'
         'FROM (SELECT tasks.id, tasks.project_id, tasks.assignee_id, tasks.title, tasks.status, tasks.due_date, '
-        'tasks.created_at FROM app.tasks WHERE tasks.org_id = 1) AS tasks\n'
+        f"tasks.created_at FROM app.tasks WHERE tasks.org_id = '{ORG_ID}') AS tasks\n"
         'ORDER BY tasks.id\n'
         'LIMIT 1000'
     )
@@ -88,7 +95,7 @@ def test_join(client: TestClient):
 
 
 def test_own_organisation(client: TestClient):
-    assert query(client, 'select * from organisations')['rows'] == [[1, 'Acme']]
+    assert query(client, 'select * from organisations')['rows'] == [[ORG_ID, 'Acme']]
     r = query(client, 'select stripe_customer_id from organisations')
     assert r['error'] == 'denied'
 
@@ -109,15 +116,16 @@ def test_password_hash(client: TestClient):
 def test_org_id_hidden(client: TestClient):
     """The filter uses `org_id`, but statements may not read or set it."""
     assert query(client, 'select org_id from tasks')['error'] == 'denied'
-    assert query(client, "insert into tasks (org_id, project_id, title) values (2, 3, 'x')")['error'] == 'denied'
-    assert query(client, 'update tasks set org_id = 2 where id = 1')['error'] == 'denied'
+    sql = f"insert into tasks (org_id, project_id, title) values ('{GLOBEX}', '{HAMMOCK_FACTORY}', 'x')"
+    assert query(client, sql)['error'] == 'denied'
+    assert query(client, f"update tasks set org_id = '{GLOBEX}' where true")['error'] == 'denied'
 
 
 @pytest.mark.parametrize(
     'sql',
     [
         'drop table tasks',
-        "select set_config('app.org_id', '2', false)",
+        f"select set_config('app.org_id', '{GLOBEX}', false)",
         'select * from tasks; select * from api_keys',
         'select * from pg_catalog.pg_shadow',
         "select pg_read_file('/etc/passwd')",
@@ -129,32 +137,34 @@ def test_rejected(client: TestClient, sql: str):
 
 
 def test_insert_sets_org(client: TestClient):
-    r = query(client, "insert into tasks (project_id, title) values (2, 'Polish magnet') returning id, title")
+    r = query(
+        client, f"insert into tasks (project_id, title) values ('{GIANT_MAGNET}', 'Polish magnet') returning id, title"
+    )
     assert r['kind'] == 'insert'
     assert r['status'] == 'INSERT 0 1'
     assert 'org_id' in r['sql']
     (task_id, title) = r['rows'][0]
     assert title == 'Polish magnet'
 
-    assert query(client, f'delete from tasks where id = {task_id}')['status'] == 'DELETE 1'
+    assert query(client, f"delete from tasks where id = '{task_id}'")['status'] == 'DELETE 1'
 
 
 def test_insert_into_other_orgs_project(client: TestClient):
-    """Project 3 belongs to Globex. The composite foreign key on (org_id, project_id) refuses it."""
-    r = query(client, "insert into tasks (project_id, title) values (3, 'sneaky')")
+    """The composite foreign key on (org_id, project_id) refuses a Globex project."""
+    r = query(client, f"insert into tasks (project_id, title) values ('{HAMMOCK_FACTORY}', 'sneaky')")
     assert r == {
         'error': 'database',
         'message': 'SQLSTATE 23503',
         'line': None,
         'column': None,
-        'sql': "INSERT INTO app.tasks (project_id, title, org_id)\nVALUES (3, 'sneaky', 1)",
+        'sql': f"INSERT INTO app.tasks (project_id, title, org_id)\nVALUES ('{HAMMOCK_FACTORY}', 'sneaky', '{ORG_ID}')",
     }
 
 
 def test_update_where_true(client: TestClient):
     r = query(client, "update tasks set status = 'done' where true")
     assert r['status'] == 'UPDATE 3'
-    globex = untrusted('select status from app.tasks order by id', 2)
+    globex = untrusted('select status from app.tasks order by id', GLOBEX)
     assert [r['status'] for r in globex] == ['done', 'doing', 'todo']
 
 
@@ -163,9 +173,9 @@ def test_unfiltered_update_rejected(client: TestClient):
 
 
 def test_division_probe(client: TestClient):
-    """The probe from p14g's README: with RLS it never sees Globex's task 4, so there is no division by zero."""
-    r = query(client, 'select id from tasks where 1 / (id - 4) > -100')
-    assert r['rows'] == [[1], [2], [3]]
+    """Like the probe in p14g's README: with RLS it never sees Globex's "Classified" task, so no division by zero."""
+    r = query(client, "select title from tasks where 1 / (strpos(title, 'Classified') - 1) < 0 order by id")
+    assert r['rows'] == [['Order wheels'], ['Fit rocket'], ['Source magnet']]
 
 
 def test_audit_log(client: TestClient):
@@ -178,7 +188,7 @@ def test_audit_log(client: TestClient):
         finally:
             await conn.close()
 
-    assert dict(asyncio.run(last()) or {}) == {'org_id': 1, 'sql_in': 'select 1 as one'}
+    assert dict(asyncio.run(last()) or {}) == {'org_id': UUID(ORG_ID), 'sql_in': 'select 1 as one'}
 
 
 # Without p14g in front: what Postgres enforces on its own
@@ -190,7 +200,7 @@ def test_db_rls_without_setting():
 
 
 def test_db_rls_hides_other_org():
-    rows = untrusted('select title from app.tasks order by id', 2)
+    rows = untrusted('select title from app.tasks order by id', GLOBEX)
     assert [r['title'] for r in rows] == ['Find a site', 'Hire weavers', 'Classified']
 
 
@@ -207,15 +217,15 @@ def test_db_rls_hides_other_org():
 )
 def test_db_permission_denied(sql: str):
     with pytest.raises(asyncpg.InsufficientPrivilegeError):
-        untrusted(sql, 1)
+        untrusted(sql, ORG_ID)
 
 
 def test_db_with_check():
     """RLS's `WITH CHECK` refuses a row for another org even if the statement sets `org_id` itself."""
     with pytest.raises(asyncpg.InsufficientPrivilegeError, match='row-level security'):
-        untrusted("insert into app.projects (org_id, name) values (2, 'x')", 1)
+        untrusted(f"insert into app.projects (org_id, name) values ('{GLOBEX}', 'x')", ORG_ID)
 
 
 def test_db_statement_timeout():
     with pytest.raises(asyncpg.QueryCanceledError):
-        untrusted('select pg_sleep(5)', 1)
+        untrusted('select pg_sleep(5)', ORG_ID)

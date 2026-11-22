@@ -40,7 +40,7 @@ The response holds the rewritten SQL, which is what ran:
 ```json
 {
   "kind": "select",
-  "sql": "SELECT p.name, pg_catalog.count(t.id)\nFROM (SELECT projects.id, projects.name, projects.country_code, projects.created_at FROM app.projects WHERE projects.org_id = 1) AS p\nLEFT JOIN (SELECT tasks.id, ... FROM app.tasks WHERE tasks.org_id = 1) AS t ON t.project_id = p.id\nGROUP BY p.name\nLIMIT 1000",
+  "sql": "SELECT p.name, pg_catalog.count(t.id)\nFROM (SELECT projects.id, projects.name, projects.country_code, projects.created_at FROM app.projects WHERE projects.org_id = '10000000-0000-4000-8000-000000000001') AS p\nLEFT JOIN (SELECT tasks.id, ... FROM app.tasks WHERE tasks.org_id = '10000000-0000-4000-8000-000000000001') AS t ON t.project_id = p.id\nGROUP BY p.name\nLIMIT 1000",
   "status": "SELECT 2",
   "columns": ["name", "count"],
   "rows": [["Giant magnet", 1], ["Rocket skates", 2]]
@@ -54,14 +54,15 @@ A refused statement gets a 400 with p14g's error:
 ```
 
 There is no authentication: anyone can call `/query`, and every statement runs as Anne.
-The seed data has two orgs: Acme (1), with Anne and Bob, and Globex (2), with Charlie.
+The seed data has two orgs: Acme, with Anne and Bob, and Globex, with Charlie.
+Primary keys are UUIDs; the seed rows that `policy.py` and the tests refer to have fixed ones.
 Anne sees Acme's data and nothing of Globex's.
 The org id is the context `rewrite()` gets, and the filters are functions of it; a real app would take it from the
 logged-in user.
 
 ## The schema
 
-All tables are in schema `app`, owned by `example_owner`. See `sql/schema.sql`.
+All tables are in schema `app`, owned by `example_owner`. See `schema.sql`.
 
 | table | untrusted SQL may |
 |---|---|

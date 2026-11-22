@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -92,7 +93,7 @@ async def run_query(
         async with untrusted.acquire() as conn, conn.transaction(readonly=safe.kind == 'select'):
             # `true`: the setting lasts until the end of this transaction, so it never leaks to the next request on
             # this pooled connection. p14g does not allow `set_config` in the statement, so it cannot change it.
-            await conn.execute("select set_config('app.org_id', $1, true)", str(ORG_ID))
+            await conn.execute("select set_config('app.org_id', $1, true)", ORG_ID)
             stmt = await conn.prepare(safe.sql)
             records = await stmt.fetch()
             columns = [a.name for a in stmt.get_attributes()]
@@ -129,7 +130,7 @@ async def audit(pool: asyncpg.Pool, sql_in: str, sql_out: str | None, error: str
 def to_json(value: Any) -> Any:
     if isinstance(value, datetime | date):
         return value.isoformat()
-    if isinstance(value, Decimal):
+    if isinstance(value, Decimal | UUID):
         return str(value)
     if isinstance(value, bytes):
         return value.hex()

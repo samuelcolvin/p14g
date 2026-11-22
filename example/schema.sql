@@ -46,15 +46,15 @@ create table countries (
 );
 
 create table organisations (
-    id bigint generated always as identity primary key,
+    id uuid primary key default uuidv7(),
     name text not null,
     plan text not null default 'free' check (plan in ('free', 'team', 'enterprise')),
     stripe_customer_id text
 );
 
 create table users (
-    id bigint generated always as identity primary key,
-    org_id bigint not null references organisations,
+    id uuid primary key default uuidv7(),
+    org_id uuid not null references organisations,
     email text not null unique,
     name text not null,
     password_hash text not null,
@@ -64,8 +64,8 @@ create table users (
 );
 
 create table projects (
-    id bigint generated always as identity primary key,
-    org_id bigint not null references organisations,
+    id uuid primary key default uuidv7(),
+    org_id uuid not null references organisations,
     name text not null,
     country_code text references countries,
     created_at timestamptz not null default now(),
@@ -73,10 +73,10 @@ create table projects (
 );
 
 create table tasks (
-    id bigint generated always as identity primary key,
-    org_id bigint not null references organisations,
-    project_id bigint not null,
-    assignee_id bigint,
+    id uuid primary key default uuidv7(),
+    org_id uuid not null references organisations,
+    project_id uuid not null,
+    assignee_id uuid,
     title text not null,
     status text not null default 'todo' check (status in ('todo', 'doing', 'done')),
     due_date date,
@@ -90,22 +90,22 @@ create table tasks (
 
 -- Tables untrusted SQL never reaches. They are not in the policy and the role has no grant on them.
 create table api_keys (
-    id bigint generated always as identity primary key,
-    user_id bigint not null references users on delete cascade,
+    id uuid primary key default uuidv7(),
+    user_id uuid not null references users on delete cascade,
     key_hash text not null unique,
     created_at timestamptz not null default now()
 );
 
 create table invoices (
-    id bigint generated always as identity primary key,
-    org_id bigint not null references organisations,
+    id uuid primary key default uuidv7(),
+    org_id uuid not null references organisations,
     amount_cents bigint not null,
     issued_at date not null
 );
 
 create table audit_log (
-    id bigint generated always as identity primary key,
-    org_id bigint not null,
+    id uuid primary key default uuidv7(),
+    org_id uuid not null,
     sql_in text not null,
     sql_out text,
     error text,
@@ -118,65 +118,63 @@ create table audit_log (
 -- so a connection that has not set it sees no rows.
 alter table organisations enable row level security;
 create policy by_org on organisations
-    using (id = current_setting('app.org_id', true)::bigint);
+    using (id = current_setting('app.org_id', true)::uuid);
 
 alter table users enable row level security;
 create policy by_org on users
-    using (org_id = current_setting('app.org_id', true)::bigint);
+    using (org_id = current_setting('app.org_id', true)::uuid);
 
 alter table projects enable row level security;
 create policy by_org on projects
-    using (org_id = current_setting('app.org_id', true)::bigint)
-    with check (org_id = current_setting('app.org_id', true)::bigint);
+    using (org_id = current_setting('app.org_id', true)::uuid)
+    with check (org_id = current_setting('app.org_id', true)::uuid);
 
 alter table tasks enable row level security;
 create policy by_org on tasks
-    using (org_id = current_setting('app.org_id', true)::bigint)
-    with check (org_id = current_setting('app.org_id', true)::bigint);
+    using (org_id = current_setting('app.org_id', true)::uuid)
+    with check (org_id = current_setting('app.org_id', true)::uuid);
 
 -- RLS with no policy denies every row, should a grant on one of these ever be added by mistake.
 alter table api_keys enable row level security;
 alter table invoices enable row level security;
 alter table audit_log enable row level security;
 
--- Seed data. Ids are assigned in insert order: Acme is org 1, Globex org 2.
+-- Seed data. Organisations, users and projects have fixed ids so policy.py and the tests can refer to them:
+-- organisations are 1000..., users 2000... and projects 3000.... Anne and Bob are in Acme, Charlie in Globex.
 insert into countries (code, name) values
     ('GB', 'United Kingdom'), ('US', 'United States'), ('FR', 'France'), ('DE', 'Germany'), ('JP', 'Japan');
 
-insert into organisations (name, plan, stripe_customer_id) values
-    ('Acme', 'team', 'cus_acme123'),
-    ('Globex', 'enterprise', 'cus_globex456');
+insert into organisations (id, name, plan, stripe_customer_id) values
+    ('10000000-0000-4000-8000-000000000001', 'Acme', 'team', 'cus_acme123'),
+    ('10000000-0000-4000-8000-000000000002', 'Globex', 'enterprise', 'cus_globex456');
 
-insert into users (org_id, email, name, password_hash) values
-    (1, 'anne@acme.example', 'Anne', '$argon2id$v=19$m=65536,t=3,p=4$YW5uZQ$not-a-real-hash-1'),
-    (1, 'bob@acme.example', 'Bob', '$argon2id$v=19$m=65536,t=3,p=4$Ym9i$not-a-real-hash-2'),
-    (2, 'charlie@globex.example', 'Charlie', '$argon2id$v=19$m=65536,t=3,p=4$Y2hhcmxpZQ$not-a-real-hash-3');
+insert into users (id, org_id, email, name, password_hash) values
+    ('20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'anne@acme.example', 'Anne', '$argon2id$v=19$m=65536,t=3,p=4$YW5uZQ$not-a-real-hash-1'),
+    ('20000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', 'bob@acme.example', 'Bob', '$argon2id$v=19$m=65536,t=3,p=4$Ym9i$not-a-real-hash-2'),
+    ('20000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000002', 'charlie@globex.example', 'Charlie', '$argon2id$v=19$m=65536,t=3,p=4$Y2hhcmxpZQ$not-a-real-hash-3');
 
 -- Secrets that untrusted SQL must never reach; the server does not use them.
-insert into api_keys (user_id, key_hash)
-select u.id, encode(sha256(convert_to(k.key, 'UTF8')), 'hex')
-from (values
-    ('anne@acme.example', 'acme-anne-key'),
-    ('bob@acme.example', 'acme-bob-key'),
-    ('charlie@globex.example', 'globex-charlie-key')
-) as k (email, key)
-join users u on u.email = k.email;
+insert into api_keys (user_id, key_hash) values
+    ('20000000-0000-4000-8000-000000000001', encode(sha256('acme-anne-key'), 'hex')),
+    ('20000000-0000-4000-8000-000000000002', encode(sha256('acme-bob-key'), 'hex')),
+    ('20000000-0000-4000-8000-000000000003', encode(sha256('globex-charlie-key'), 'hex'));
 
-insert into projects (org_id, name, country_code) values
-    (1, 'Rocket skates', 'US'),
-    (1, 'Giant magnet', 'GB'),
-    (2, 'Hammock factory', 'DE'),
-    (2, 'Project Arcturus', 'JP');
+insert into projects (id, org_id, name, country_code) values
+    ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'Rocket skates', 'US'),
+    ('30000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', 'Giant magnet', 'GB'),
+    ('30000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000002', 'Hammock factory', 'DE'),
+    ('30000000-0000-4000-8000-000000000004', '10000000-0000-4000-8000-000000000002', 'Project Arcturus', 'JP');
 
+-- in one statement, so their uuidv7 ids are in this order
 insert into tasks (org_id, project_id, assignee_id, title, status, due_date) values
-    (1, 1, 1, 'Order wheels', 'done', '2026-10-01'),
-    (1, 1, 2, 'Fit rocket', 'doing', '2026-12-01'),
-    (1, 2, 1, 'Source magnet', 'todo', '2027-01-15'),
-    (2, 3, 3, 'Find a site', 'done', '2026-09-30'),
-    (2, 3, 3, 'Hire weavers', 'doing', null),
-    (2, 4, 3, 'Classified', 'todo', '2027-03-01');
+    ('10000000-0000-4000-8000-000000000001', '30000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'Order wheels', 'done', '2026-10-01'),
+    ('10000000-0000-4000-8000-000000000001', '30000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', 'Fit rocket', 'doing', '2026-12-01'),
+    ('10000000-0000-4000-8000-000000000001', '30000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', 'Source magnet', 'todo', '2027-01-15'),
+    ('10000000-0000-4000-8000-000000000002', '30000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000003', 'Find a site', 'done', '2026-09-30'),
+    ('10000000-0000-4000-8000-000000000002', '30000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000003', 'Hire weavers', 'doing', null),
+    ('10000000-0000-4000-8000-000000000002', '30000000-0000-4000-8000-000000000004', '20000000-0000-4000-8000-000000000003', 'Classified', 'todo', '2027-03-01');
 
 insert into invoices (org_id, amount_cents, issued_at) values
-    (1, 49900, '2026-10-01'), (1, 49900, '2026-11-01'), (2, 1250000, '2026-11-01');
+    ('10000000-0000-4000-8000-000000000001', 49900, '2026-10-01'), ('10000000-0000-4000-8000-000000000001', 49900, '2026-11-01'), ('10000000-0000-4000-8000-000000000002', 1250000, '2026-11-01');
 
 reset role;

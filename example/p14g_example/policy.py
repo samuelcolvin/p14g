@@ -1,7 +1,7 @@
 """What untrusted SQL may do, as a p14g policy.
 
 The same rules are enforced by Postgres: `setup` runs `policy.grants()` for the role that executes the output, and
-`sql/schema.sql` puts row-level security with the same condition as `by_org` on every multi-tenant table.
+`schema.sql` puts row-level security with the same condition as `by_org` on every multi-tenant table.
 
 `api_keys`, `invoices` and `audit_log` are not mentioned, so a statement that names them is rejected.
 """
@@ -14,24 +14,24 @@ from .settings import settings
 
 __all__ = 'ORG_ID', 'UNTRUSTED_ROLE', 'policy'
 
-# created by sql/schema.sql, so not a setting
+# created by schema.sql, so not a setting
 UNTRUSTED_ROLE = 'example_untrusted'
 
 # The untrusted user is always Anne, who is in Acme. `main.py` passes this to `rewrite()` as the context; a real app
 # would take the org from the logged-in user.
-ORG_ID = 1
+ORG_ID = '10000000-0000-4000-8000-000000000001'
 
 
-def by_org(org_id: int) -> tuple[str, dict[str, int]]:
-    """The same condition as the row-level security in sql/schema.sql."""
+def by_org(org_id: str) -> tuple[str, dict[str, str]]:
+    """The same condition as the row-level security in schema.sql."""
     return 'org_id = :org_id', {'org_id': org_id}
 
 
-def own_org(org_id: int) -> tuple[str, dict[str, int]]:
+def own_org(org_id: str) -> tuple[str, dict[str, str]]:
     return 'id = :org_id', {'org_id': org_id}
 
 
-def set_org(org_id: int) -> dict[str, int]:
+def set_org(org_id: str) -> dict[str, str]:
     return {'org_id': org_id}
 
 

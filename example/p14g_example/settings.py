@@ -1,6 +1,6 @@
 """Settings, from environment variables prefixed `EXAMPLE_` or a `.env` file, e.g. `EXAMPLE_OWNER_DSN=postgres://...`.
 
-The defaults match the database `make db` starts and the roles `sql/schema.sql` creates.
+The defaults match the database `make db` starts and the roles `schema.sql` creates.
 """
 
 from __future__ import annotations

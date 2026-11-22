@@ -15,7 +15,7 @@ from .settings import settings
 
 __all__ = ('setup',)
 
-SCHEMA_SQL = Path(__file__).parent.parent / 'sql' / 'schema.sql'
+SCHEMA_SQL = Path(__file__).parent.parent / 'schema.sql'
 
 
 async def setup() -> list[str]:
