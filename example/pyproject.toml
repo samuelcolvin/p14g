@@ -1,0 +1,46 @@
+[project]
+name = "p14g-example"
+version = "0"
+description = "A FastAPI server that runs untrusted SQL on Postgres, using p14g, grants and row-level security."
+requires-python = ">=3.11"
+dependencies = [
+    "asyncpg>=0.30",
+    "fastapi>=0.115",
+    "p14g",
+    "uvicorn>=0.32",
+]
+
+[dependency-groups]
+dev = [
+    "httpx",
+    "pytest",
+    "pytest-pretty",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days"
+
+[tool.uv.sources]
+# the p14g in this repository, built with maturin; swap for the PyPI release outside the repo
+p14g = { path = "../crates/p14g-python", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["error", "ignore:Using `httpx` with `starlette.testclient`"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["Q", "RUF100", "I", "FA", "UP"]
+flake8-quotes = { inline-quotes = "single", multiline-quotes = "double" }
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "single"
