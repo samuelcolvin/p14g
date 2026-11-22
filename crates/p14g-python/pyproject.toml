@@ -40,3 +40,16 @@ Source = "https://github.com/samuelcolvin/p14g"
 module-name = "p14g"
 bindings = "pyo3"
 features = ["pyo3/extension-module"]
+
+[tool.uv]
+# rebuild on `uv sync` when the Rust code or the stub changes, not only when this file does
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "p14g.pyi" },
+    { file = "src/**/*.rs" },
+    { file = "../p14g/Cargo.toml" },
+    { file = "../p14g/src/**/*.rs" },
+    { file = "../../Cargo.toml" },
+    { file = "../../Cargo.lock" },
+]

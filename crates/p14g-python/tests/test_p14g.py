@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, get_args, get_origin
 
 import p14g
 import pytest
@@ -20,7 +21,7 @@ from p14g import (
     Update,
     mapper,
 )
-from typing_extensions import LiteralString
+from typing_extensions import LiteralString, assert_type
 
 # every statement on one line, which is easier to compare against
 DensePolicy = partial(Policy, layout='dense')
@@ -1200,8 +1201,8 @@ def test_filter_values():
     assert where(
         'a = :i and b = :f and c = :t and d is not distinct from :n', {'i': -3, 'f': 1.5, 't': True, 'n': None}
     ) == ('t.a = (- 3) AND t.b = 1.5 AND t.c = TRUE AND (t.d IS NOT DISTINCT FROM NULL)')
-    # a list or tuple is the items of IN
-    assert where('a in (:xs) and b not in (:ys)', {'xs': [1, 2], 'ys': ('x', 'y')}) == (
+    # a list is the items of IN
+    assert where('a in (:xs) and b not in (:ys)', {'xs': [1, 2], 'ys': ['x', 'y']}) == (
         "t.a IN (1, 2) AND t.b NOT IN ('x', 'y')"
     )
     # a cast applies to the bound value
@@ -1251,6 +1252,12 @@ FILTER_ERRORS: list[tuple[Any, str, type[Exception] | None]] = [
         'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not object',
         TypeError,
     ),
+    # a tuple is not a list, and not one value either
+    (
+        ('a in (:x)', {'x': (1, 2)}),
+        'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not tuple',
+        TypeError,
+    ),
     (
         ('a = 1', {1: 2}),
         "callback failed: TypeError: the keys of a filter's values must be placeholder names",
@@ -1289,3 +1296,65 @@ def test_filter_raises_and_arguments():
     with pytest.raises(P14gError, match='there is more than one delete rule for table "t"') as exc_info:
         DensePolicy(Delete('t'), Delete('t', allow_unfiltered=True))
     assert exc_info.value.kind == 'config'
+
+
+@dataclass
+class Request:
+    tenant_id: int
+
+
+def by_tenant(request: Request) -> tuple[LiteralString, dict[str, int]]:
+    return 'tenant_id = :tenant_id', {'tenant_id': request.tenant_id}
+
+
+def test_context_type():
+    @mapper(Table)
+    def per_tenant(table: Table, request: Request) -> Table:
+        return Table(f'{table.name}_{request.tenant_id}', alias=table.name)
+
+    # not DensePolicy: functools.partial loses the type parameter
+    policy = Policy(
+        Select('orders', columns=['id'], filter=by_tenant),
+        # rules with no callback take any context
+        Insert('orders', columns=['qty']),
+        Delete('orders'),
+        mappers=[per_tenant],
+        layout='dense',
+    )
+    assert_type(policy, Policy[Request])
+    assert policy.rewrite('select id from orders', context=Request(42)).sql == (
+        'SELECT orders.id FROM (SELECT orders.id FROM orders_42 AS orders WHERE orders.tenant_id = 42) AS orders'
+    )
+    assert policy.grants('app', context=Request(42)) == [
+        'GRANT SELECT ("id", "tenant_id") ON "orders" TO "app"',
+        'GRANT INSERT ("qty") ON "orders" TO "app"',
+        'GRANT DELETE ON "orders" TO "app"',
+    ]
+    # the context is required, and must be a Request
+    with pytest.raises(P14gError, match="callback failed: AttributeError: 'NoneType' object has no attribute"):
+        policy.rewrite('select id from orders')  # pyright: ignore[reportCallIssue]
+    with pytest.raises(P14gError, match="callback failed: AttributeError: 'int' object has no attribute"):
+        policy.rewrite('select id from orders', context=42)  # pyright: ignore[reportArgumentType, reportCallIssue]
+
+    # a policy whose callbacks take nothing in particular needs no context
+    assert_type(Policy(Select('orders')), Policy[Any])
+    Policy(Select('orders')).rewrite('select id from orders')
+
+
+def test_context_type_subscript():
+    """The generic classes can be subscripted at run time, for annotations evaluated then."""
+    aliases: list[tuple[object, type]] = [
+        (Policy[Request], Policy),
+        (Select[Request], Select),
+        (Insert[Request], Insert),
+        (Update[Request], Update),
+        (Delete[Request], Delete),
+        (p14g.Mapper[Request], p14g.Mapper),
+    ]
+    for alias, cls in aliases:
+        assert get_origin(alias) is cls
+        assert get_args(alias) == (Request,)
+    policy: Policy[Request] = Policy[Request](Select('orders', filter=by_tenant))
+    assert policy.rewrite('select 1 from orders', context=Request(1)).sql.endswith(
+        'WHERE orders.tenant_id = 1) AS orders'
+    )

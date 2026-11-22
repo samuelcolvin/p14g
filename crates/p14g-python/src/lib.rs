@@ -6,6 +6,7 @@ use pyo3::{
     create_exception,
     exceptions::{PyTypeError, PyValueError},
     prelude::*,
+    sync::PyOnceLock,
     types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType},
 };
 
@@ -57,6 +58,14 @@ fn repr_list(items: Option<&Vec<String>>) -> String {
     items.map_or_else(|| "None".to_owned(), |items| format!("{items:?}"))
 }
 
+/// A `types.GenericAlias` for `cls[item]`, so the generic classes in `p14g.pyi` can be subscripted.
+fn generic_alias<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    static GENERIC_ALIAS: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    GENERIC_ALIAS
+        .import(cls.py(), "types", "GenericAlias")?
+        .call1((cls, item))
+}
+
 // ------------------------------------------------------------------ rules
 
 /// Allows reading from a table or view.
@@ -76,6 +85,12 @@ struct PySelect {
 
 #[pymethods]
 impl PySelect {
+    /// `Select[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
+    #[classmethod]
+    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        generic_alias(cls, item)
+    }
+
     #[new]
     #[pyo3(signature = (table, *, columns=None, only=false, filter=None))]
     fn new(
@@ -137,8 +152,8 @@ fn python_filter(filter: &Py<PyAny>, context: &Context) -> p14g::Result<p14g::Fi
             let name: String = name
                 .extract()
                 .map_err(|_| PyTypeError::new_err("the keys of a filter's values must be placeholder names"))?;
-            // a list or a tuple is the items of `IN (:name)`, anything else is one value
-            let value = if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+            // a list is the items of `IN (:name)`, anything else is one value
+            let value = if value.is_instance_of::<PyList>() {
                 let items: Vec<Bound<'_, PyAny>> = value.extract()?;
                 p14g::FilterValue::Many(items.iter().map(py_to_expr).collect::<PyResult<_>>()?)
             } else {
@@ -180,6 +195,12 @@ struct PyInsert {
 
 #[pymethods]
 impl PyInsert {
+    /// `Insert[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
+    #[classmethod]
+    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        generic_alias(cls, item)
+    }
+
     #[new]
     #[pyo3(signature = (table, *, columns=None, extra=None))]
     fn new(table: String, columns: Option<Vec<String>>, extra: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
@@ -230,6 +251,12 @@ struct PyUpdate {
 
 #[pymethods]
 impl PyUpdate {
+    /// `Update[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
+    #[classmethod]
+    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        generic_alias(cls, item)
+    }
+
     #[new]
     #[pyo3(signature = (table, *, columns=None, allow_unfiltered=false, only=false, filter=None))]
     fn new(
@@ -275,6 +302,12 @@ struct PyDelete {
 
 #[pymethods]
 impl PyDelete {
+    /// `Delete[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
+    #[classmethod]
+    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        generic_alias(cls, item)
+    }
+
     #[new]
     #[pyo3(signature = (table, *, allow_unfiltered=false, only=false, filter=None))]
     fn new(
@@ -719,6 +752,12 @@ struct PyMapper {
 
 #[pymethods]
 impl PyMapper {
+    /// `Mapper[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
+    #[classmethod]
+    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        generic_alias(cls, item)
+    }
+
     #[pyo3(signature = (*args, **kwargs))]
     fn __call__(
         &self,
@@ -876,6 +915,12 @@ struct PyPolicy(Policy);
 
 #[pymethods]
 impl PyPolicy {
+    /// `Policy[C]` in an annotation. The context type is for type checkers; nothing checks it at run time.
+    #[classmethod]
+    fn __class_getitem__<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        generic_alias(cls, item)
+    }
+
     #[new]
     #[pyo3(signature = (
         *rules,

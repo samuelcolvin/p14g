@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal as _Literal, TypeAlias, final, overload
+from typing import Any, Generic, Literal as _Literal, TypeAlias, final, overload
 
-from typing_extensions import LiteralString
+from typing_extensions import LiteralString, TypeVar
 
 __all__ = [
     'DEFAULT_FUNCTIONS',
@@ -33,12 +33,22 @@ DEFAULT_FUNCTIONS: frozenset[str]
 ERROR_KINDS: tuple[str, ...]
 """Every value `P14gError.kind` can take."""
 
-_Scalar: TypeAlias = None | bool | int | float | str
-ExprLike: TypeAlias = Column | Function | Literal | Expr | None | bool | int | float | str
+# contravariant, since it is only ever an argument; named for what it is rather than its variance
+_C = TypeVar('_C', contravariant=True, default=Any)  # noqa: PLC0105
+"""The type of the `context` passed to `rewrite()` and `grants()`, and on to filters, `extra` callables and mappers.
 
-_FilterValue: TypeAlias = ExprLike | list[ExprLike] | tuple[ExprLike, ...]
-_Filter: TypeAlias = Callable[[Any], tuple[LiteralString, Mapping[str, _FilterValue]] | LiteralString] | LiteralString
+`Policy[C]` is inferred from the rules and mappers it is built from. Rules and mappers with no callback take any
+context. Where every callback accepts `None`, `context` may be left out.
+"""
+_T = TypeVar('_T')
+
+_Scalar: TypeAlias = None | bool | int | float | str
+ExprLike: TypeAlias = Column | Function | Literal | Expr | _Scalar
 """What a mapper or an `extra` may give as a value."""
+
+_FilterSql: TypeAlias = LiteralString | tuple[LiteralString, Mapping[str, ExprLike | list[ExprLike]]]
+"""A filter's SQL, alone or with values for its `:name` placeholders. A list is for `IN (:name)`."""
+_Filter: TypeAlias = _FilterSql | Callable[[_C], _FilterSql]
 
 _Operator: TypeAlias = _Literal[
     '=', '!=', '<>', '<', '<=', '>', '>=', 'and', 'or', 'not', '+', '-', '*', '/', '%', '||',
@@ -56,7 +66,7 @@ class P14gError(ValueError):
     column: int | None
 
 @final
-class Select:
+class Select(Generic[_C]):
     """Allows reading from a table or view.
 
     Every mention of a column counts as a read, wherever it is: in the select list, in a `WHERE` or
@@ -71,7 +81,7 @@ class Select:
             return 'org = :org_id and status in (:statuses)', {'org_id': context.org_id, 'statuses': ['a', 'b']}
 
     p14g parses the expression and writes each value as an escaped literal; nothing is pasted into the output.
-    A list or tuple is allowed where the placeholder is the only item of an `IN (...)`. The expression may use
+    A list is allowed where the placeholder is the only item of an `IN (...)`. The expression may use
     columns and functions the rule does not otherwise allow, but not a subquery. A filter with no values can be
     returned, or given, as a plain string.
 
@@ -91,8 +101,8 @@ class Select:
         *,
         columns: Sequence[str] | None = None,
         only: bool = False,
-        filter: _Filter | None = None,
-    ) -> Select: ...
+        filter: _Filter[_C] | None = None,
+    ) -> Select[_C]: ...
     @property
     def table(self) -> str: ...
     @property
@@ -101,7 +111,7 @@ class Select:
     def only(self) -> bool: ...
 
 @final
-class Insert:
+class Insert(Generic[_C]):
     """Allows `INSERT INTO table (columns) VALUES ...`.
 
     `extra` gives columns p14g sets on every inserted row: a dict, or a callable that takes the context
@@ -113,15 +123,15 @@ class Insert:
         table: str,
         *,
         columns: Sequence[str] | None = None,
-        extra: Mapping[str, ExprLike] | Callable[[Any], Mapping[str, ExprLike]] | None = None,
-    ) -> Insert: ...
+        extra: Mapping[str, ExprLike] | Callable[[_C], Mapping[str, ExprLike]] | None = None,
+    ) -> Insert[_C]: ...
     @property
     def table(self) -> str: ...
     @property
     def columns(self) -> list[str] | None: ...
 
 @final
-class Update:
+class Update(Generic[_C]):
     """Allows `UPDATE table SET column = ...` for the listed columns, or any column without `columns`.
 
     An `UPDATE` with no `WHERE` is rejected unless `allow_unfiltered` is set. That catches mistakes, it is
@@ -141,8 +151,8 @@ class Update:
         columns: Sequence[str] | None = None,
         allow_unfiltered: bool = False,
         only: bool = False,
-        filter: _Filter | None = None,
-    ) -> Update: ...
+        filter: _Filter[_C] | None = None,
+    ) -> Update[_C]: ...
     @property
     def table(self) -> str: ...
     @property
@@ -153,7 +163,7 @@ class Update:
     def only(self) -> bool: ...
 
 @final
-class Delete:
+class Delete(Generic[_C]):
     """Allows `DELETE FROM table`. A `DELETE` with no `WHERE` is rejected unless `allow_unfiltered` is set.
 
     `only` writes the table as `ONLY table`, see `Select`.
@@ -163,8 +173,8 @@ class Delete:
     """
 
     def __new__(
-        cls, table: str, *, allow_unfiltered: bool = False, only: bool = False, filter: _Filter | None = None
-    ) -> Delete: ...
+        cls, table: str, *, allow_unfiltered: bool = False, only: bool = False, filter: _Filter[_C] | None = None
+    ) -> Delete[_C]: ...
     @property
     def table(self) -> str: ...
     @property
@@ -283,7 +293,7 @@ class Expr:
     def __hash__(self) -> int: ...
 
 @final
-class Mapper:
+class Mapper(Generic[_C]):
     """A function registered with `@mapper(...)`, to be passed to `Policy(mappers=[...])`.
 
     It can still be called like the function it wraps.
@@ -292,7 +302,7 @@ class Mapper:
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 @overload
-def mapper(kind: type[Table]) -> Callable[[Callable[[Table, Any], Table]], Mapper]:
+def mapper(kind: type[Table]) -> Callable[[Callable[[Table, _T], Table]], Mapper[_T]]:
     """Register a function as a mapper for one kind of node.
 
     The function is called with the node and the context passed to `rewrite()`, and returns the node to use
@@ -302,11 +312,11 @@ def mapper(kind: type[Table]) -> Callable[[Callable[[Table, Any], Table]], Mappe
     """
 
 @overload
-def mapper(kind: type[Column]) -> Callable[[Callable[[Column, Any], ExprLike]], Mapper]: ...
+def mapper(kind: type[Column]) -> Callable[[Callable[[Column, _T], ExprLike]], Mapper[_T]]: ...
 @overload
-def mapper(kind: type[Function]) -> Callable[[Callable[[Function, Any], ExprLike]], Mapper]: ...
+def mapper(kind: type[Function]) -> Callable[[Callable[[Function, _T], ExprLike]], Mapper[_T]]: ...
 @overload
-def mapper(kind: type[Literal]) -> Callable[[Callable[[Literal, Any], ExprLike]], Mapper]: ...
+def mapper(kind: type[Literal]) -> Callable[[Callable[[Literal, _T], ExprLike]], Mapper[_T]]: ...
 
 @final
 class SafeSql:
@@ -329,7 +339,7 @@ class SafeSql:
         """The tables and views the statement uses, as it named them, sorted."""
 
 @final
-class Policy:
+class Policy(Generic[_C]):
     """A set of rules that untrusted SQL is checked against. Build it once and reuse it.
 
     A statement that no rule allows is rejected.
@@ -360,7 +370,7 @@ class Policy:
 
     def __new__(
         cls,
-        *rules: Select | Insert | Update | Delete,
+        *rules: Select[_C] | Insert[_C] | Update[_C] | Delete[_C],
         functions: Sequence[str] | None = None,
         deny_functions: Sequence[str] | None = None,
         default_functions: bool = True,
@@ -374,9 +384,10 @@ class Policy:
         default_schema: str | None = None,
         dialect: _Literal['postgres', 'generic', 'ansi', 'mysql', 'sqlite'] = 'postgres',
         limits: Limits | None = None,
-        mappers: Sequence[Mapper] | None = None,
-    ) -> Policy: ...
-    def grants(self, role: str, *, context: Any = None) -> list[str]:
+        mappers: Sequence[Mapper[_C]] | None = None,
+    ) -> Policy[_C]: ...
+    @overload
+    def grants(self: Policy[None], role: str, *, context: None = None) -> list[str]:
         """The `GRANT` statements that give `role` the table access this policy allows.
 
         Run them once as the owner of the tables, for the role that will run p14g's output, so that the database
@@ -386,7 +397,10 @@ class Policy:
         one table are combined, functions and operators are not restricted, and `only` has no equivalent.
         `USAGE` on sequences that inserted rows take defaults from is not included.
         """
-    def rewrite(self, sql: str, *, context: Any = None, allow: Sequence[_Kind] | None = None) -> SafeSql:
+    @overload
+    def grants(self, role: str, *, context: _C) -> list[str]: ...
+    @overload
+    def rewrite(self: Policy[None], sql: str, *, context: None = None, allow: Sequence[_Kind] | None = None) -> SafeSql:
         """Check one SQL statement against the policy and return it rewritten so it is safe to run.
 
         Raises `P14gError` if the statement is not allowed.
@@ -394,3 +408,5 @@ class Policy:
         `context` is passed on to `extra` callables and mappers. `allow` restricts the kinds of statement
         accepted by this call, for example `['select']`.
         """
+    @overload
+    def rewrite(self, sql: str, *, context: _C, allow: Sequence[_Kind] | None = None) -> SafeSql: ...

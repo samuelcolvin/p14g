@@ -13,7 +13,20 @@ exclude-newer-span = "P7D"
 [manifest]
 members = [
     "p14g",
-    "p14g-workspace",
+]
+
+[manifest.dependency-groups]
+dev = [
+    { name = "dirty-equals" },
+    { name = "maturin", specifier = ">=1.9" },
+    { name = "pytest" },
+    { name = "pytest-pretty" },
+    { name = "typing-extensions" },
+]
+linting = [
+    { name = "basedpyright" },
+    { name = "mypy" },
+    { name = "ruff" },
 ]
 
 [[package]]
@@ -401,41 +414,6 @@ wheels = [
 [[package]]
 name = "p14g"
 source = { editable = "crates/p14g-python" }
-
-[[package]]
-name = "p14g-workspace"
-version = "0.1.0"
-source = { virtual = "." }
-
-[package.dev-dependencies]
-dev = [
-    { name = "dirty-equals" },
-    { name = "maturin" },
-    { name = "pytest" },
-    { name = "pytest-pretty" },
-    { name = "typing-extensions" },
-]
-linting = [
-    { name = "basedpyright" },
-    { name = "mypy" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "dirty-equals" },
-    { name = "maturin", specifier = ">=1.9" },
-    { name = "pytest" },
-    { name = "pytest-pretty" },
-    { name = "typing-extensions" },
-]
-linting = [
-    { name = "basedpyright" },
-    { name = "mypy" },
-    { name = "ruff" },
-]
 
 [[package]]
 name = "packaging"
