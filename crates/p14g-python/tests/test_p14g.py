@@ -6,21 +6,7 @@ from typing import Any, LiteralString, assert_type, get_args, get_origin
 
 import p14g
 import pytest
-from p14g import (
-    Column,
-    Delete,
-    Expr,
-    Function,
-    Insert,
-    Limits,
-    Literal,
-    P14gError,
-    Policy,
-    Select,
-    Table,
-    Update,
-    mapper,
-)
+from p14g import Delete, Insert, Limits, P14gError, Policy, Select, Update
 
 # every statement on one line, which is easier to compare against
 DensePolicy = partial(Policy, layout='dense')
@@ -321,371 +307,51 @@ def test_rules():
     assert exc_info.value.kind == 'config'
 
 
-def test_table_mapper():
-    seen: list[Any] = []
-
-    @mapper(Table)
-    def per_tenant(table: Table, context: Any) -> Table:
-        seen.append((table, context))
-        if table.name == 'events':
-            return Table(f'events_{context}', schema='tenants', alias=table.alias)
-        return table
-
-    policy = DensePolicy(Select('events'), Select('other'), Insert('events'), mappers=[per_tenant])
-    safe = policy.rewrite('select e.id, other.x from events e join other on other.id = e.id', context=42)
-    assert safe.sql == ('SELECT e.id, other.x FROM tenants.events_42 AS e INNER JOIN other ON other.id = e.id')
-    # the tables are reported as the statement named them
-    assert safe.tables == ['events', 'other']
-    assert seen == [(Table('events', alias='e'), 42), (Table('other'), 42)]
-
-    # without an alias, the original name is kept as one so that the columns still resolve
-    assert policy.rewrite('select id from events', context=7).sql == (
-        'SELECT events.id FROM tenants.events_7 AS events'
-    )
-    assert policy.rewrite('insert into events (a) values (1) returning a', context=7).sql == (
-        'INSERT INTO tenants.events_7 AS events (a) VALUES (1) RETURNING events.a'
-    )
-    # the decorated function can still be called directly
-    assert per_tenant(Table('events'), 1) == Table('events_1', schema='tenants')
-    assert repr(per_tenant).startswith('<Mapper of Table <function test_table_mapper.<locals>.per_tenant')
-
-
-def test_expression_mappers():
-    @mapper(Function)
-    def freeze_time(function: Function, context: Any) -> p14g.ExprLike:
-        if function.name == 'now':
-            return function.replace(name='frozen_now', schema='app')
-        if function.name == 'lower':
-            # arguments can be passed on without knowing what they are
-            return Function('upper', function.args)
-        return function
-
-    @mapper(Literal)
-    def redact(literal: Literal, context: Any) -> p14g.ExprLike:
-        return None if literal.value == 'secret' else literal
-
-    @mapper(Column)
-    def day(column: Column, context: Any) -> p14g.ExprLike:
-        if column.name == 'created':
-            return Function('date_trunc', ['day', column])
-        return column
-
-    policy = DensePolicy(Select('v'), mappers=[freeze_time, redact, day])
-    assert policy.rewrite("select created, lower(a || 'x') from v where b = 'secret' and c < now()").sql == (
-        "SELECT date_trunc('day', v.created), upper(v.a || 'x') FROM v WHERE v.b = NULL AND v.c < app.frozen_now()"
-    )
-
-    # modifiers survive `replace`
-    @mapper(Function)
-    def rename_count(function: Function, context: Any) -> p14g.ExprLike:
-        return function.replace(name='my_count', schema=None) if function.name == 'count' else function
-
-    policy = DensePolicy(Select('v'), mappers=[rename_count])
-    assert policy.rewrite('select count(distinct a) filter (where b > 1) over (partition by c) from v').sql == (
-        'SELECT my_count(DISTINCT v.a) FILTER (WHERE v.b > 1) OVER (PARTITION BY v.c) FROM v'
-    )
-
-
-def test_mapper_errors():
-    @mapper(Column)
-    def broken(column: Column, context: Any) -> p14g.ExprLike:
-        raise RuntimeError('no columns today')
-
-    @mapper(Table)
-    def not_a_table(table: Table, context: Any) -> Table:
-        return 'events'  # pyright: ignore[reportReturnType]
-
-    @mapper(Literal)
-    def not_an_expr(literal: Literal, context: Any) -> p14g.ExprLike:
-        return object()  # pyright: ignore[reportReturnType]
-
-    for mappers, sql, cause, message in [
-        ([broken], 'select a from v', RuntimeError, 'callback failed: RuntimeError: no columns today'),
-        ([not_a_table], 'select 1 from v', TypeError, 'callback failed: TypeError: a Table mapper must return a Table'),
-        (
-            [not_an_expr],
-            'select 1 from v',
-            TypeError,
-            'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str'
-            + ', not object',
-        ),
-    ]:
-        policy = DensePolicy(Select('v'), mappers=mappers)
-        with pytest.raises(P14gError) as exc_info:
-            policy.rewrite(sql)
-        assert str(exc_info.value) == message
-        assert exc_info.value.kind == 'callback'
-        assert isinstance(exc_info.value.__cause__, cause)
-
-    with pytest.raises(TypeError, match=r'mapper\(\) takes Table, Column, Function or Literal'):
-        mapper(Expr)  # pyright: ignore[reportArgumentType, reportCallIssue]
-    with pytest.raises(TypeError):
-        DensePolicy(mappers=[lambda t, c: t])  # pyright: ignore[reportArgumentType, reportUnknownLambdaType]
-
-
-def test_nodes():
-    table = Table('orders', schema='app', alias='o')
-    assert (table.name, table.schema, table.alias) == ('orders', 'app', 'o')
-    assert repr(table) == 'Table("orders", schema="app", alias="o", only=False)'
-    assert table == Table('orders', schema='app', alias='o')
-    assert table != Table('orders')
-
-    column = Column('id', table='o')
-    assert (column.name, column.table) == ('id', 'o')
-    assert repr(column) == 'Column("id", table="o")'
-    assert repr(Column('id')) == 'Column("id", table=None)'
-
-    function = Function('lower', [column, 'x', 1, None], schema='app')
-    assert (function.name, function.schema) == ('lower', 'app')
-    assert function.args == [column, Literal('x'), Literal(1), Literal(None)]
-    assert repr(function) == 'Function("lower", schema="app")'
-    assert function.replace(schema=None).schema is None
-    assert function.replace(name='upper').name == 'upper'
-    assert function.replace(args=[]).args == []
-    assert function.replace() == function
-    with pytest.raises(TypeError, match=r"replace\(\) got an unexpected keyword argument 'nope'"):
-        function.replace(nope=1)  # pyright: ignore[reportCallIssue]
-    # a negative number is a minus applied to a literal, which is not itself a literal
-    assert [type(arg) for arg in Function('abs', [-1]).args] == [Expr]
-    assert repr(Function('abs', [-1]).args[0]) == 'Expr(...)'
-
-    for value in None, True, False, 0, 42, 1.5, 1.0, 0.0, 1e300, 1e-7, 'text', '':
-        literal = Literal(value)
-        assert literal.value == value
-        assert type(literal.value) is type(value)
-        assert repr(literal) == f'Literal({value!r})'
-    assert Literal(10**30).value == '1000000000000000000000000000000'
-    with pytest.raises(ValueError, match='a negative or non-finite number is not a single literal'):
-        Literal(-1)
-    with pytest.raises(TypeError, match='a literal must be None, a bool, an int, a float or a str'):
-        Literal(b'bytes')  # pyright: ignore[reportArgumentType]
-
-    with pytest.raises(P14gError, match='is longer than 63 bytes'):
-        Table('x' * 64)
-    with pytest.raises(P14gError, match='identifiers may not contain NUL'):
-        Column('a\0b')
-    with pytest.raises(P14gError, match='empty identifiers are not allowed'):
-        Function('')
-
-
-def test_mapper_output_is_still_escaped():
-    @mapper(Table)
-    def hostile(table: Table, context: Any) -> Table:
-        return Table('x"; DROP TABLE orders; --', schema='a"b')
-
-    @mapper(Literal)
-    def hostile_literal(literal: Literal, context: Any) -> p14g.ExprLike:
-        return "'; DROP TABLE orders; --\\"
-
-    policy = DensePolicy(Select('v'), mappers=[hostile, hostile_literal])
-    assert policy.rewrite("select a from v where b = 'x'").sql == (
-        'SELECT v.a FROM "a""b"."x""; DROP TABLE orders; --" AS v WHERE v.b = E\'\'\'; DROP TABLE orders; --\\\\\''
-    )
-
-
 def test_version():
     assert isinstance(p14g.__version__, str)
     assert p14g.__version__.count('.') == 2
 
 
-def test_nodes_are_hashable():
-    assert hash(Table('a', schema='s')) == hash(Table('a', schema='s'))
-    assert len({Table('a'), Table('a'), Table('a', alias='x')}) == 2
-    assert len({Column('a'), Column('a', table='t'), Column('a')}) == 2
-    assert len({Literal(1), Literal(1), Literal('1'), Literal(True), Literal(None)}) == 4
-    assert len({Function('f', [1]), Function('f', [1]), Function('f', [2]), Function('f', [1], schema='s')}) == 3
-    by_table = {Table('orders'): 'o'}
-    assert by_table[Table('orders')] == 'o'
-
-
-def test_nodes_are_not_equal_to_other_things():
-    assert Table('a') != 'a'
-    assert Column('a') != Table('a')
-    assert Literal(1) != 1
-    assert Function('f') != Function('g')
-    assert Literal(1) != Literal(1.0)
-    assert Literal(True) != Literal(1)
-
-
-def test_nodes_cannot_be_pickled():
+def test_rules_cannot_be_pickled():
     import copy
     import pickle
 
-    for node in Table('a'), Column('a'), Function('f'), Literal(1), Select('a'), DensePolicy():
+    for value in Select('a'), DensePolicy():
         with pytest.raises(TypeError, match='cannot pickle'):
-            pickle.dumps(node)
+            pickle.dumps(value)
         with pytest.raises(TypeError, match='cannot pickle'):
-            copy.deepcopy(node)
+            copy.deepcopy(value)
 
 
-def test_nodes_are_immutable():
-    for node, attribute in (Table('a'), 'name'), (Column('a'), 'name'), (Select('a'), 'table'), (Limits(), 'max_depth'):
+def test_rules_are_immutable():
+    for value, attribute in (Select('a'), 'table'), (Limits(), 'max_depth'):
         with pytest.raises(AttributeError):
-            setattr(node, attribute, 'x')
+            setattr(value, attribute, 'x')
     safe = DensePolicy().rewrite('select 1')
     with pytest.raises(AttributeError):
         safe.sql = 'drop table x'  # pyright: ignore[reportAttributeAccessIssue]
-    with pytest.raises(TypeError):
-        Table()  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError, match='cannot create'):
         p14g.SafeSql()  # pyright: ignore[reportCallIssue]
-    with pytest.raises(TypeError, match='cannot create'):
-        Expr()  # pyright: ignore[reportCallIssue]
-    with pytest.raises(TypeError, match='cannot create'):
-        p14g.Mapper()  # pyright: ignore[reportCallIssue]
-
-
-def test_function_args_shapes():
-    seen: dict[str, list[Any]] = {}
-
-    @mapper(Function)
-    def record(function: Function, context: Any) -> p14g.ExprLike:
-        seen[function.name] = function.args
-        return function
-
-    policy = DensePolicy(Select('v'), mappers=[record])
-    sql = "select count(*), current_date, now(), lower(a), coalesce(b, -1, 'x', c + 1, (select max(d) from v)) from v"
-    out = policy.rewrite(sql).sql
-    # a mapper that returns what it was given changes nothing
-    assert out == DensePolicy(Select('v')).rewrite(sql).sql
-    assert seen['count'] == []
-    assert seen['now'] == []
-    assert seen['lower'] == [Column('a', table='v')]
-    # COALESCE and CURRENT_DATE are grammar, not functions: the mapper is not called for them, only for the
-    # function inside the COALESCE
-    assert set(seen) == {'count', 'now', 'lower', 'max'}
-    assert seen['max'] == [Column('d', table='v')]
-
-    # `f(*)` has no argument list to replace, so giving it one makes an ordinary call
-    @mapper(Function)
-    def count_one(function: Function, context: Any) -> p14g.ExprLike:
-        return function.replace(args=[1]) if function.name == 'count' else function
-
-    assert DensePolicy(Select('v'), mappers=[count_one]).rewrite('select count(*) from v').sql == (
-        'SELECT count(1) FROM v'
-    )
-
-
-def test_mappers_run_in_order_and_bottom_up():
-    calls: list[str] = []
-
-    @mapper(Function)
-    def first(function: Function, context: Any) -> p14g.ExprLike:
-        calls.append(f'first:{function.name}')
-        return function.replace(name='abs') if function.name == 'lower' else function
-
-    @mapper(Function)
-    def second(function: Function, context: Any) -> p14g.ExprLike:
-        calls.append(f'second:{function.name}')
-        return function
-
-    @mapper(Function)
-    def to_literal(function: Function, context: Any) -> p14g.ExprLike:
-        return 7 if function.name == 'upper' else function
-
-    @mapper(Literal)
-    def never_sees_mapped_output(literal: Literal, context: Any) -> p14g.ExprLike:
-        calls.append(f'literal:{literal.value}')
-        return literal
-
-    policy = DensePolicy(Select('v'), mappers=[first, second, to_literal, never_sees_mapped_output])
-    assert policy.rewrite('select lower(upper(a)), 1 from v').sql == 'SELECT abs(7), 1 FROM v'
-    # the inner call is mapped before the outer one, and each mapper is given what the one before returned,
-    # so the literal mapper sees the literal that replaced `upper(a)`
-    assert calls == ['first:upper', 'second:upper', 'literal:7', 'first:lower', 'second:abs', 'literal:1']
-
-
-def test_mapper_everywhere_in_a_statement():
-    @mapper(Literal)
-    def bump(literal: Literal, context: Any) -> p14g.ExprLike:
-        return literal.value + 1 if isinstance(literal.value, int) and not isinstance(literal.value, bool) else literal
-
-    policy = DensePolicy(Select('v'), Insert('v'), Update('v'), Delete('v'), mappers=[bump])
-    assert policy.rewrite(
-        'with c as (select 1 as n from v) select a, case when b = 1 then 2 else 3 end from v join c on c.n = 1 '
-        'where a in (1, 2) and b between 1 and 2 and exists (select 1 from v where a = 1) '
-        'group by a, b having count(*) > 1 order by a + 1 limit 1 offset 1'
-    ).sql == (
-        'WITH c AS (SELECT 2 AS n FROM v) SELECT v.a, CASE WHEN v.b = 2 THEN 3 ELSE 4 END FROM v INNER JOIN c ON c.n = 2 WHERE v.a IN (2, 3) AND (v.b BETWEEN 2 AND 3) AND EXISTS (SELECT 2 FROM v WHERE v.a = 2) GROUP BY v.a, v.b HAVING count(*) > 2 ORDER BY v.a + 2 LIMIT 2 OFFSET 2'
-    )
-    assert policy.rewrite('insert into v (a) values (1), (2) returning a + 1').sql == (
-        'INSERT INTO v (a) VALUES (2), (3) RETURNING v.a + 2'
-    )
-    assert policy.rewrite('update v set a = 1 where b = 1 returning 1').sql == (
-        'UPDATE v SET a = 2 WHERE v.b = 2 RETURNING 2'
-    )
-    assert policy.rewrite('delete from v where b = 1').sql == 'DELETE FROM v WHERE v.b = 2'
-    assert policy.rewrite('select a from v union select a from v where a = 1 order by 1').sql == (
-        '(SELECT v.a FROM v) UNION (SELECT v.a FROM v WHERE v.a = 2) ORDER BY 1'
-    )
-
-
-def test_mapper_returns_opaque_expr():
-    @mapper(Function)
-    def unwrap(function: Function, context: Any) -> p14g.ExprLike:
-        # replace `lower(x)` with `x`, whatever `x` is
-        return function.args[0] if function.name == 'lower' else function
-
-    policy = DensePolicy(Select('v'), mappers=[unwrap])
-    assert policy.rewrite('select lower(a + 1), lower(b), lower(-2) from v').sql == ('SELECT v.a + 1, v.b, - 2 FROM v')
-
-
-def test_keyword_forms_as_arguments():
-    seen: list[Any] = []
-
-    @mapper(Function)
-    def record(function: Function, context: Any) -> p14g.ExprLike:
-        seen.extend(function.args)
-        return function
-
-    policy = DensePolicy(Select('v'), mappers=[record])
-    sql = 'select concat(coalesce(a, 1), nullif(a, 1), greatest(a, 1), current_date, trim(a), extract(year from b)) from v'
-    assert policy.rewrite(sql).sql == (
-        'SELECT concat(COALESCE(v.a, 1), NULLIF(v.a, 1), GREATEST(v.a, 1), CURRENT_DATE, TRIM(BOTH FROM v.a), EXTRACT(YEAR FROM v.b)) FROM v'
-    )
-    # each arrives as an opaque expression, which can be passed on but not taken apart
-    assert [type(arg) for arg in seen] == [Expr] * 6
-
-
-def test_mapper_builds_invalid_sql():
-    @mapper(Column)
-    def constant(column: Column, context: Any) -> p14g.ExprLike:
-        return 'x' if column.name == 'b' else column
-
-    policy = DensePolicy(Select('v'), mappers=[constant])
-    assert policy.rewrite('select a from v where b = a').sql == "SELECT v.a FROM v WHERE 'x' = v.a"
-    # Postgres rejects a bare constant in ORDER BY and GROUP BY, so p14g will not write one
-    for sql, clause in ('select a from v order by b', 'ORDER BY'), ('select count(*) from v group by b', 'GROUP BY'):
-        with pytest.raises(P14gError, match=f'a constant that is not a column position in {clause}') as exc_info:
-            policy.rewrite(sql)
-        assert exc_info.value.kind == 'unsupported'
-
-    # a function named after a keyword form is an ordinary call, which Postgres will say does not exist
-    @mapper(Function)
-    def not_a_keyword(function: Function, context: Any) -> p14g.ExprLike:
-        return Function('nullif', [1])
-
-    assert DensePolicy(Select('v'), mappers=[not_a_keyword]).rewrite('select lower(a) from v').sql == (
-        'SELECT "nullif"(1) FROM v'
-    )
 
 
 def test_context_is_passed_through_unchanged():
     marker = object()
     seen: list[Any] = []
 
-    @mapper(Table)
-    def table(table: Table, context: Any) -> Table:
+    def filter(context: Any) -> LiteralString:
         seen.append(context)
-        return table
+        return 'true'
 
     def extra(context: Any) -> dict[str, Any]:
         seen.append(context)
         return {}
 
-    policy = DensePolicy(Select('t'), Insert('t', extra=extra), mappers=[table])
+    policy = DensePolicy(Select('t', filter=filter), Insert('t', extra=extra))
     policy.rewrite('insert into t (a) values (1)', context=marker)
-    assert seen == [marker, marker]
+    assert seen == [marker]
+    seen.clear()
+    policy.rewrite('select a from t', context=marker)
+    assert seen == [marker]
     seen.clear()
     policy.rewrite('select a from t')
     assert seen == [None]
@@ -711,20 +377,15 @@ def test_extra_is_called_once_per_check():
 
 
 def test_extra_values():
-    policy = DensePolicy(
-        Insert(
-            't',
-            extra={'col': Column('x'), 'fn': Function('now'), 'lit': Literal('s'), 'neg': -1.5, 'nan': float('nan')},
-        )
-    )
+    policy = DensePolicy(Insert('t', extra={'s': 's', 'null': None, 'b': True, 'neg': -1.5, 'nan': float('nan')}))
     assert policy.rewrite('insert into t (a) values (1)').sql == (
-        "INSERT INTO t (a, col, fn, lit, neg, nan) VALUES (1, x, now(), 's', - 1.5, CAST('NaN' AS double precision))"
+        "INSERT INTO t (a, s, \"null\", b, neg, nan) VALUES (1, 's', NULL, TRUE, - 1.5, CAST('NaN' AS double precision))"
     )
     params = DensePolicy(Insert('t', extra={'s': 'from policy'}), literals='params')
     safe = params.rewrite("insert into t (a) values ('x')")
     assert safe.sql == 'INSERT INTO t (a, s) VALUES ($1, $2)'
     assert safe.params == ['x', 'from policy']
-    with pytest.raises(TypeError, match='expected a Column, Function, Literal, Expr, None, bool, int, float or str'):
+    with pytest.raises(TypeError, match='expected None, bool, int, float or str, not bytes'):
         Insert('t', extra={'a': b'bytes'})  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError, match='the keys of extra must be column names'):
         Insert('t', extra={1: 'a'})  # pyright: ignore[reportArgumentType]
@@ -733,26 +394,24 @@ def test_extra_values():
 def test_policy_can_be_used_from_a_callback():
     inner = DensePolicy(Select('v'))
 
-    @mapper(Literal)
-    def nested(literal: Literal, context: Any) -> p14g.ExprLike:
-        if literal.value == 'sql':
-            return inner.rewrite('select a from v').sql
-        return literal
+    def nested(context: Any) -> dict[str, Any]:
+        return {'b': inner.rewrite('select a from v').sql}
 
-    outer = DensePolicy(Select('v'), mappers=[nested])
-    assert outer.rewrite("select 'sql' from v").sql == "SELECT 'SELECT v.a FROM v' FROM v"
+    outer = DensePolicy(Insert('v', extra=nested))
+    assert outer.rewrite('insert into v (a) values (1)').sql == ("INSERT INTO v (a, b) VALUES (1, 'SELECT v.a FROM v')")
 
-    # and a policy can check from inside its own mapper
+    # and a policy can check from inside its own callback
     policies: list[Policy] = []
 
-    @mapper(Table)
-    def recursive(table: Table, context: Any) -> Table:
+    def recursive(context: int) -> dict[str, Any]:
         if context == 0:
-            return table
-        return Table(policies[0].rewrite('select 1 from v', context=context - 1).kind)
+            return {}
+        return {'b': policies[0].rewrite('insert into v (a) values (1)', context=context - 1).sql}
 
-    policies.append(DensePolicy(Select('v'), mappers=[recursive]))
-    assert policies[0].rewrite('select a from v', context=3).sql == 'SELECT v.a FROM "select" AS v'
+    policies.append(DensePolicy(Insert('v', extra=recursive)))
+    assert policies[0].rewrite('insert into v (a) values (1)', context=2).sql == (
+        "INSERT INTO v (a, b) VALUES (1, 'INSERT INTO v (a, b) VALUES (1, ''INSERT INTO v (a) VALUES (1)'')')"
+    )
 
 
 def test_threads():
@@ -761,11 +420,10 @@ def test_threads():
     def extra(context: int) -> dict[str, int]:
         return {'n': context}
 
-    @mapper(Table)
-    def suffix(table: Table, context: int) -> Table:
-        return Table(f'{table.name}_{context}')
+    def by_n(context: int) -> tuple[LiteralString, dict[str, int]]:
+        return 'n = :n', {'n': context}
 
-    policy = DensePolicy(Select('t', columns=['a']), Insert('t', extra=extra), mappers=[suffix])
+    policy = DensePolicy(Select('t', columns=['a'], filter=by_n), Insert('t', extra=extra))
 
     def work(n: int) -> list[str]:
         out: list[str] = []
@@ -780,8 +438,8 @@ def test_threads():
         results = list(pool.map(work, range(16)))
     for n, result in enumerate(results):
         assert set(result) == {
-            f'SELECT t.a FROM t_{n} AS t WHERE t.a = 1',
-            f'INSERT INTO t_{n} AS t (a, n) VALUES (1, {n})',
+            f'SELECT t.a FROM (SELECT t.a FROM t WHERE t.n = {n}) AS t WHERE t.a = 1',
+            f'INSERT INTO t (a, n) VALUES (1, {n})',
         }
 
 
@@ -852,10 +510,10 @@ def test_all_limits():
     assert rejected('insert into v (a) values (1), (2)', max_values_rows=1) == 'INSERT has more than 1 rows'
 
 
-def test_expr_like_alias():
+def test_value_alias():
     import typing
 
-    assert set(typing.get_args(p14g.ExprLike)) == {Column, Function, Literal, Expr, type(None), bool, int, float, str}
+    assert set(typing.get_args(p14g.Value)) == {type(None), bool, int, float, str}
     public = {name for name in dir(p14g) if not name.startswith('_') and name != 'p14g'}
     assert set(p14g.__all__) == public | {'__version__'}
 
@@ -870,35 +528,6 @@ def test_error_is_a_normal_exception():
         assert isinstance(e, P14gError)
         assert e.args == ('reading from table "t" is not allowed',)
         assert e.__cause__ is None
-
-
-def test_nodes_have_no_order():
-    pairs: list[list[Any]] = [
-        [Table('a'), Table('b')],
-        [Column('a'), Column('b')],
-        [Literal(1), Literal(2)],
-        [Function('a'), Function('b')],
-    ]
-    for pair in pairs:
-        with pytest.raises(TypeError, match="'<' not supported"):
-            sorted(pair)
-
-
-def test_opaque_expr():
-    first, second, third = Function('f', [-1, -1, -2]).args
-    assert isinstance(first, Expr)
-    assert first == second
-    assert first != third
-    assert hash(first) == hash(second)
-    assert first != -1
-
-
-def test_mapper_repr():
-    def f(node: Any, context: Any) -> Any:
-        return node
-
-    for kind in Table, Column, Function, Literal:
-        assert repr(mapper(kind)(f)).startswith(f'<Mapper of {kind.__name__} <function test_mapper_repr.<locals>.f')
 
 
 def test_only():
@@ -947,31 +576,6 @@ def test_only():
         policy.rewrite('with c as (select id from orders) select id from only c')
 
 
-def test_only_and_mappers():
-    seen: list[Table] = []
-
-    @mapper(Table)
-    def record(table: Table, context: Any) -> Table:
-        seen.append(table)
-        return Table(table.name, alias=table.alias, only=not table.only)
-
-    policy = DensePolicy(Select('family', only=True), Select('orders'), mappers=[record])
-    assert policy.rewrite('select f.id, o.id from family f join orders o on o.id = f.id').sql == (
-        'SELECT f.id, o.id FROM "family" AS f INNER JOIN ONLY orders AS o ON o.id = f.id'
-    )
-    assert seen == [Table('family', alias='f', only=True), Table('orders', alias='o')]
-    assert seen[0].only
-    assert Table('a', only=True) != Table('a')
-    assert repr(Table('a', only=True)) == 'Table("a", schema=None, alias=None, only=True)'
-
-    @mapper(Table)
-    def only_on_insert(table: Table, context: Any) -> Table:
-        return Table(table.name, only=True)
-
-    with pytest.raises(P14gError, match='INSERT cannot use ONLY'):
-        DensePolicy(Insert('t'), mappers=[only_on_insert]).rewrite('insert into t (a) values (1)')
-
-
 def test_default_schema():
     policy = DensePolicy(Select('orders', columns=['id']), Delete('public.orders'), default_schema='public')
     safe = policy.rewrite('select * from orders')
@@ -984,17 +588,6 @@ def test_default_schema():
     with pytest.raises(P14gError, match='invalid default schema ""') as exc_info:
         DensePolicy(default_schema='')
     assert exc_info.value.kind == 'config'
-
-    # a mapper is given the qualified table
-    seen: list[Table] = []
-
-    @mapper(Table)
-    def record(table: Table, context: Any) -> Table:
-        seen.append(table)
-        return table
-
-    DensePolicy(Select('orders'), default_schema='app', mappers=[record]).rewrite('select id from orders')
-    assert seen == [Table('orders', schema='app')]
 
 
 def test_grants():
@@ -1248,13 +841,13 @@ FILTER_ERRORS: list[tuple[Any, str, type[Exception] | None]] = [
     (('a = 1', [1]), 'callback failed: TypeError: a filter must return (sql, values) or sql', TypeError),
     (
         ('a = :x', {'x': object()}),
-        'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not object',
+        'callback failed: TypeError: expected None, bool, int, float or str, not object',
         TypeError,
     ),
     # a tuple is not a list, and not one value either
     (
         ('a in (:x)', {'x': (1, 2)}),
-        'callback failed: TypeError: expected a Column, Function, Literal, Expr, None, bool, int, float or str, not tuple',
+        'callback failed: TypeError: expected None, bool, int, float or str, not tuple',
         TypeError,
     ),
     (
@@ -1307,22 +900,17 @@ def by_tenant(request: Request) -> tuple[LiteralString, dict[str, int]]:
 
 
 def test_context_type():
-    @mapper(Table)
-    def per_tenant(table: Table, request: Request) -> Table:
-        return Table(f'{table.name}_{request.tenant_id}', alias=table.name)
-
     # not DensePolicy: functools.partial loses the type parameter
     policy = Policy(
         Select('orders', columns=['id'], filter=by_tenant),
         # rules with no callback take any context
         Insert('orders', columns=['qty']),
         Delete('orders'),
-        mappers=[per_tenant],
         layout='dense',
     )
     assert_type(policy, Policy[Request])
     assert policy.rewrite('select id from orders', context=Request(42)).sql == (
-        'SELECT orders.id FROM (SELECT orders.id FROM orders_42 AS orders WHERE orders.tenant_id = 42) AS orders'
+        'SELECT orders.id FROM (SELECT orders.id FROM orders WHERE orders.tenant_id = 42) AS orders'
     )
     assert policy.grants('app', context=Request(42)) == [
         'GRANT SELECT ("id", "tenant_id") ON "orders" TO "app"',
@@ -1348,7 +936,6 @@ def test_context_type_subscript():
         (Insert[Request], Insert),
         (Update[Request], Update),
         (Delete[Request], Delete),
-        (p14g.Mapper[Request], p14g.Mapper),
     ]
     for alias, cls in aliases:
         assert get_origin(alias) is cls

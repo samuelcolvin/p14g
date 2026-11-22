@@ -16,8 +16,8 @@ error messages.
 
 ## Trusted: everything else
 
-- The policy author, and everything in the policy: rules, filters, mappers, `Insert.extra` callbacks, added functions.
-  p14g does not check what a filter or a mapper produces against the policy.
+- The policy author, and everything in the policy: rules, filters, `Insert.extra` callbacks, added functions.
+  p14g does not check what a filter or an `extra` produces against the policy.
 - The `context` you pass to `rewrite()`.
   It usually says who the request is for, and p14g believes it.
   Values from it can still contain anything: a value bound to a filter placeholder or returned by `extra` is written as
@@ -95,9 +95,9 @@ The README's [Rows](README.md#rows) section has more on filters.
   Postgres checks constraints without it.
 - Timing.
   How long a statement takes can depend on rows the author cannot read.
-- Mistakes in the policy: a column or table allowed that should not be, an added function with side effects, a mapper
-  that renames a table to one with no rule, an `Insert` on a filtered table with no `extra` for the filter's column.
-- Anything the grants do not cover: tables a mapper renames statements to, and sequences.
+- Mistakes in the policy: a column or table allowed that should not be, an added function with side effects, an
+  `Insert` on a filtered table with no `extra` for the filter's column.
+- Sequences that inserted rows take defaults from, which the grants do not cover.
   The grants also cannot express a filter, so they let the role read and write every row.
 - A compromised database, application, or Python process.
 

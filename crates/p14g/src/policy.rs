@@ -3,13 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    ast::{Column, Expr, Function, Ident, Literal, StatementKind, Table},
+    ast::{Expr, Ident, Literal, StatementKind},
     backend::{self, Backend, Layout, QuoteIdentifiers, Style},
     check,
     dialect::Dialect,
     error::{Error, Result},
     filter, functions, lower,
-    map::{self, Mapper},
 };
 
 /// An operator or predicate form that a rule can allow or forbid.
@@ -635,7 +634,6 @@ pub struct PolicyBuilder<C = ()> {
     default_schema: Option<String>,
     dialect: Dialect,
     backend: Backend,
-    mappers: Vec<Box<dyn Mapper<C>>>,
 }
 
 impl<C> Default for PolicyBuilder<C> {
@@ -659,7 +657,6 @@ impl<C> Default for PolicyBuilder<C> {
             default_schema: None,
             dialect: Dialect::default(),
             backend: Backend::default(),
-            mappers: Vec::new(),
         }
     }
 }
@@ -792,53 +789,6 @@ impl<C> PolicyBuilder<C> {
         self
     }
 
-    /// Add a mapper. Mappers run in the order they were added, after the statement has passed the policy.
-    #[must_use]
-    pub fn mapper(mut self, mapper: impl Mapper<C> + 'static) -> Self {
-        self.mappers.push(Box::new(mapper));
-        self
-    }
-
-    /// Add a mapper for tables and views, in `FROM` and as the target of a write. See [`Mapper::map_table`].
-    #[must_use]
-    pub fn map_table<F>(self, f: F) -> Self
-    where
-        C: 'static,
-        F: Fn(Table, &C) -> Result<Table> + Send + Sync + 'static,
-    {
-        self.mapper(map::TableMapper(f))
-    }
-
-    /// Add a mapper for column references.
-    #[must_use]
-    pub fn map_column<F>(self, f: F) -> Self
-    where
-        C: 'static,
-        F: Fn(Column, &C) -> Result<Expr> + Send + Sync + 'static,
-    {
-        self.mapper(map::ColumnMapper(f))
-    }
-
-    /// Add a mapper for function calls.
-    #[must_use]
-    pub fn map_function<F>(self, f: F) -> Self
-    where
-        C: 'static,
-        F: Fn(Function, &C) -> Result<Expr> + Send + Sync + 'static,
-    {
-        self.mapper(map::FunctionMapper(f))
-    }
-
-    /// Add a mapper for literals.
-    #[must_use]
-    pub fn map_literal<F>(self, f: F) -> Self
-    where
-        C: 'static,
-        F: Fn(Literal, &C) -> Result<Expr> + Send + Sync + 'static,
-    {
-        self.mapper(map::LiteralMapper(f))
-    }
-
     pub fn build(self) -> Result<Policy<C>> {
         let operators = self
             .operators
@@ -957,7 +907,6 @@ impl<C> PolicyBuilder<C> {
             default_schema: default_schema.clone(),
             dialect: self.dialect,
             backend: self.backend,
-            mappers: self.mappers,
         })
     }
 }
@@ -1004,7 +953,7 @@ pub struct SafeSql {
 
 /// A compiled set of rules. Build one with [`Policy::builder`] and reuse it for every statement.
 ///
-/// `C` is the type of the context value passed to [`Policy::rewrite`] and handed on to mappers and
+/// `C` is the type of the context value passed to [`Policy::rewrite`] and handed on to `filter` and
 /// [`Insert::extra`] callbacks.
 pub struct Policy<C = ()> {
     /// Tables that are always written `ONLY table`.
@@ -1026,7 +975,6 @@ pub struct Policy<C = ()> {
     pub(crate) default_schema: Option<Ident>,
     dialect: Dialect,
     backend: Backend,
-    mappers: Vec<Box<dyn Mapper<C>>>,
 }
 
 impl<C> Policy<C> {
@@ -1048,8 +996,7 @@ impl<C> Policy<C> {
     /// * `only` has no equivalent, a grant on a parent table always covers its children's rows;
     /// * a `filter` has no equivalent either: the grants let the role read and write every row.
     ///
-    /// Not included: `USAGE` on sequences that inserted rows take defaults from, and anything for tables
-    /// that a mapper renames statements to.
+    /// Not included: `USAGE` on sequences that inserted rows take defaults from.
     pub fn grants(&self, role: &str, context: &C) -> Result<Vec<String>> {
         #[derive(Default)]
         struct Columns {
@@ -1167,7 +1114,6 @@ impl<C> Policy<C> {
         if let Some(max_rows) = self.max_rows {
             check::apply_max_rows(&mut statement, max_rows)?;
         }
-        map::apply(&self.mappers, &mut statement, context)?;
         let style = Style {
             literals: self.literals,
             quote: self.quote_identifiers,

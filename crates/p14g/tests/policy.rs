@@ -5,9 +5,9 @@ mod common;
 use std::thread;
 
 use p14g::{
-    Delete, Dialect, Error, ErrorKind, Filter, Insert, Layout, Limits, Literals, Mapper, Op, Policy, PolicyBuilder,
+    Delete, Dialect, Error, ErrorKind, Filter, Insert, Layout, Limits, Literals, Op, Policy, PolicyBuilder,
     QuoteIdentifiers, Select, Star, StatementKind, Update,
-    ast::{Expr, Function, Ident, Literal, MAX_PLACEHOLDER, Table},
+    ast::{Expr, Literal, MAX_PLACEHOLDER},
     functions,
 };
 
@@ -706,14 +706,27 @@ fn params_are_numbered_after_the_input_placeholders() {
 }
 
 #[test]
-fn mapped_placeholder_past_the_limit() {
-    // a mapper is trusted, but the writer still refuses a placeholder Postgres cannot bind
-    let policy: Policy = dense()
-        .select(orders())
-        .map_literal(|_, ()| Ok(Expr::Placeholder(MAX_PLACEHOLDER + 1)))
-        .build()
-        .unwrap();
-    assert_eq!(kind(&policy, "select 'x' from orders"), ErrorKind::Unsupported);
+fn trusted_values_the_writer_refuses() {
+    // an `extra` is trusted, but the writer still refuses what it cannot write safely
+    let build = |value: Expr| -> Policy {
+        dense()
+            .insert(
+                Insert::table("orders")
+                    .columns(["product"])
+                    .extra(move |()| [("qty", value.clone())]),
+            )
+            .build()
+            .unwrap()
+    };
+    let sql = "insert into orders (product) values ('tea')";
+    // a placeholder Postgres cannot bind
+    assert_eq!(
+        kind(&build(Expr::Placeholder(MAX_PLACEHOLDER + 1)), sql),
+        ErrorKind::Unsupported
+    );
+    // a number that is not a number
+    let number = Expr::Literal(Literal::Number("1; DROP TABLE orders".into()));
+    assert_eq!(kind(&build(number), sql), ErrorKind::Unsupported);
 }
 
 struct Tenant {
@@ -947,109 +960,6 @@ fn scoping() {
     assert_eq!(
         kind(&policy, "select x.count from (select count(*) from orders) x"),
         ErrorKind::Denied
-    );
-}
-
-#[test]
-fn mappers() {
-    let policy: Policy<Tenant> = dense()
-        .select(Select::table("events").columns(["id", "kind", "at"]))
-        .select(Select::table("other").columns(["id"]))
-        .insert(Insert::table("events").columns(["kind"]))
-        .update(Update::table("events").columns(["kind"]))
-        .delete(Delete::table("events"))
-        .map_table(|mut table, tenant: &Tenant| {
-            if table.name.as_str() == "events" {
-                table.schema = Some(Ident::new(tenant.schema)?);
-                table.name = Ident::new(format!("events_{}", tenant.id))?;
-            }
-            Ok(table)
-        })
-        .map_function(|function, _| {
-            Ok(if function.name.as_str() == "now" {
-                Expr::Function(Function {
-                    schema: Some(Ident::new("app")?),
-                    name: Ident::new("frozen_now")?,
-                    ..function
-                })
-            } else {
-                Expr::Function(function)
-            })
-        })
-        .map_literal(|literal, _| {
-            Ok(match literal {
-                Literal::String(s) if s == "secret" => Expr::Literal(Literal::Null),
-                other => Expr::Literal(other),
-            })
-        })
-        .map_column(|column, _| {
-            Ok(if column.name.as_str() == "at" {
-                Expr::Function(Function::call(
-                    Ident::new("date_trunc")?,
-                    vec!["day".into(), Expr::Column(column)],
-                ))
-            } else {
-                Expr::Column(column)
-            })
-        })
-        .build()
-        .unwrap();
-    let tenant = Tenant {
-        id: 42,
-        schema: "tenants",
-    };
-    let rewrite = |sql: &str| policy.rewrite(sql, &tenant).unwrap_or_else(|e| panic!("{sql}: {e}"));
-
-    let safe = rewrite("select id, at from events where kind = 'secret' and at < now()");
-    assert_eq!(
-        safe.sql,
-        "SELECT events.id, date_trunc('day', events.at) FROM tenants.events_42 AS events WHERE events.kind = NULL AND date_trunc('day', events.at) < app.frozen_now()"
-    );
-    // the result reports the tables the statement named, not what they were mapped to
-    assert_eq!(safe.tables, ["events"]);
-
-    assert_eq!(
-        rewrite("select e.id from events e join other on other.id = e.id").sql,
-        "SELECT e.id FROM tenants.events_42 AS e INNER JOIN other ON other.id = e.id"
-    );
-    assert_eq!(
-        rewrite("insert into events (kind) values ('a') returning id").sql,
-        "INSERT INTO tenants.events_42 AS events (kind) VALUES ('a') RETURNING events.id"
-    );
-    assert_eq!(
-        rewrite("update events set kind = 'b' where id = 1").sql,
-        "UPDATE tenants.events_42 AS events SET kind = 'b' WHERE events.id = 1"
-    );
-    assert_eq!(
-        rewrite("delete from events where id = 1").sql,
-        "DELETE FROM tenants.events_42 AS events WHERE events.id = 1"
-    );
-    // the mapper's functions were not, and did not need to be, in the allowed set
-    assert_eq!(
-        policy.rewrite("select app.frozen_now()", &tenant).unwrap_err().kind(),
-        ErrorKind::Denied
-    );
-
-    // a mapper that builds something unwritable is an error, not bad SQL
-    let bad = Tenant {
-        id: 1,
-        schema: "has\0nul",
-    };
-    assert!(policy.rewrite("select id from events", &bad).is_err());
-    let policy: Policy = dense()
-        .select(orders())
-        .map_literal(|_, ()| Ok(Expr::Literal(Literal::Number("1; DROP TABLE orders".into()))))
-        .map_column(|_, ()| Err(Error::callback("no columns today")))
-        .build()
-        .unwrap();
-    assert_eq!(
-        policy.rewrite("select 1", &()).unwrap_err().kind(),
-        ErrorKind::Unsupported
-    );
-    let error = policy.rewrite("select id from orders", &()).unwrap_err();
-    assert_eq!(
-        (error.kind(), error.message()),
-        (ErrorKind::Callback, "no columns today")
     );
 }
 
@@ -1334,8 +1244,6 @@ fn keyword_forms() {
 
 #[test]
 fn order_and_group_keys() {
-    use p14g::ast::{Expr, Literal};
-
     let policy: Policy = dense().select(orders()).build().unwrap();
     // a bare integer is a position; any other bare constant is a syntax error in Postgres
     assert_eq!(
@@ -1364,32 +1272,6 @@ fn order_and_group_keys() {
             "select count(*) over (order by 1, 'x') from orders order by id + 1, 'x' || product"
         ),
         "SELECT count(*) OVER (ORDER BY 1, 'x') FROM orders ORDER BY orders.id + 1, 'x' || orders.product"
-    );
-
-    // a mapper cannot put a constant there either, and a position is not a literal for a mapper to change
-    let mapped: Policy = dense()
-        .select(orders())
-        .map_column(|column, ()| {
-            Ok(if column.name.as_str() == "qty" {
-                Expr::Literal(Literal::Number("7".into()))
-            } else {
-                Expr::Column(column)
-            })
-        })
-        .map_literal(|_, ()| Ok(Expr::Literal(Literal::Number("9".into()))))
-        .build()
-        .unwrap();
-    assert_eq!(
-        kind(&mapped, "select id from orders order by qty"),
-        ErrorKind::Unsupported
-    );
-    assert_eq!(
-        kind(&mapped, "select count(*) from orders group by qty"),
-        ErrorKind::Unsupported
-    );
-    assert_eq!(
-        rewrite(&mapped, "select id, 5 from orders order by 1, qty + 1"),
-        "SELECT orders.id, 9 FROM orders ORDER BY 1, 9 + 9"
     );
 }
 
@@ -1970,32 +1852,6 @@ fn deep_input_does_not_overflow() {
         }
     });
     thread.unwrap().join().unwrap();
-}
-
-/// A mapper can also be a type, which is the way to handle several kinds of node with shared state.
-#[test]
-fn mapper_trait() {
-    struct Prefix(&'static str);
-
-    impl Mapper<()> for Prefix {
-        fn map_table(&self, mut table: Table, (): &()) -> Result<Table, Error> {
-            table.name = Ident::new(format!("{}{}", self.0, table.name))?;
-            Ok(table)
-        }
-
-        fn map_literal(&self, literal: Literal, (): &()) -> Result<Expr, Error> {
-            Ok(match literal {
-                Literal::String(s) => Expr::Literal(Literal::String(format!("{}{s}", self.0))),
-                other => Expr::Literal(other),
-            })
-        }
-    }
-
-    let policy: Policy = dense().select(orders()).mapper(Prefix("x_")).build().unwrap();
-    assert_eq!(
-        rewrite(&policy, "select id from orders where product = 'tea' and qty = 1"),
-        "SELECT orders.id FROM x_orders AS orders WHERE orders.product = 'x_tea' AND orders.qty = 1"
-    );
 }
 
 /// Why p14g writes its own SQL: sqlparser's `Display` turns this one string literal into a `UNION`.

@@ -47,15 +47,14 @@ P14G_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/postgres mak
 
 ## Architecture
 
-`Policy::rewrite` in `policy.rs` runs five stages:
+`Policy::rewrite` in `policy.rs` runs four stages:
 
 1. `lower::parse` tokenises and parses with sqlparser, then lowers sqlparser's AST into p14g's own (`ast.rs`).
 2. `check::check` binds every column to a table instance, checks the statement against the rules, and edits the AST
    in place: columns are qualified, `*` is expanded, `extra` insert columns are added, `only` and `default_schema` are
    applied.
 3. `check::apply_max_rows` adds or lowers `LIMIT`.
-4. `map::apply` runs the user's mappers.
-5. `backend::write` writes SQL from the AST.
+4. `backend::write` writes SQL from the AST.
 
 sqlparser's AST is never written out, and no later stage sees it.
 Its `Display` turns one string literal into several tokens for some inputs (`sqlparser_display_is_not_safe_to_emit`).
@@ -114,7 +113,7 @@ so the shared test policy and the fuzz policies' read-back check leave filtered 
 
 ### Python bindings
 
-`Policy<C>` is generic over a context passed to `rewrite` and on to mappers and `Insert::extra`; the bindings use
+`Policy<C>` is generic over a context passed to `rewrite` and on to `filter` and `Insert::extra` callbacks; the bindings use
 `Py<PyAny>`.
 An exception in a Python callback is carried through as a `Callback` error and becomes the `__cause__` of the
 `P14gError`.
@@ -133,7 +132,7 @@ A change to the Python API needs `p14g.pyi` updated; stubtest fails otherwise.
 - Test policies set `layout='dense'` (`dense()` in `tests/policy.rs`, `DensePolicy` in the Python tests) so expected
   SQL is one line. The defaults are `layout='multiline'` and `quote_identifiers='minimal'`.
 
-New syntax needs changes in `ast.rs`, `lower/`, `check.rs`, `map.rs` and `backend/`, a case in each corpus file, and an
+New syntax needs changes in `ast.rs`, `lower/`, `check.rs` and `backend/`, a case in each corpus file, and an
 entry in `SEEDS` or `FRAGMENTS` in `crates/fuzz/src/lib.rs` so the fuzzer reaches it.
 
 Use the `review-security` skill (`.agents/skills/review-security/SKILL.md`) before merging a change to lowering, the
