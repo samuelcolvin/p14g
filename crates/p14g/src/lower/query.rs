@@ -301,8 +301,8 @@ impl Lower<'_> {
         })
     }
 
-    /// Lower a select list, also used for `RETURNING`.
-    /// A select list or a `RETURNING` list, `what` in the error when it is longer than `max_projection`.
+    /// Lower a select list or a `RETURNING` list, which is called `what` in the error when it has more than
+    /// `max_projection` items.
     pub(super) fn select_items(&mut self, items: Vec<sp::SelectItem>, what: &str) -> Result<Vec<SelectItem>> {
         if items.len() > self.limits.max_projection {
             return Err(Error::limit(format!(
