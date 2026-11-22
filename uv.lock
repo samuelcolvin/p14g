@@ -25,20 +25,17 @@ dev = [
     { name = "pytest-pretty" },
 ]
 fuzz-agent = [
-    { name = "logfire", extras = ["psycopg"], marker = "python_full_version >= '3.11'" },
-    { name = "pglast", marker = "python_full_version >= '3.11'" },
-    { name = "psycopg", extras = ["binary"], marker = "python_full_version >= '3.11'" },
-    { name = "pydantic-ai-harness", extras = ["code-mode"], marker = "python_full_version >= '3.11'", specifier = ">=0.68.0" },
-    { name = "pydantic-ai-slim", extras = ["openai"], marker = "python_full_version >= '3.11'" },
+    { name = "logfire", extras = ["psycopg"] },
+    { name = "pglast" },
+    { name = "psycopg", extras = ["binary"] },
+    { name = "pydantic-ai-harness", extras = ["code-mode"], specifier = ">=0.68.0" },
+    { name = "pydantic-ai-slim", extras = ["openai"] },
 ]
 linting = [
     { name = "basedpyright" },
     { name = "mypy" },
     { name = "ruff" },
 ]
-
-[manifest.group-requires-python]
-fuzz-agent = ">=3.11"
 
 [[package]]
 name = "annotated-types"

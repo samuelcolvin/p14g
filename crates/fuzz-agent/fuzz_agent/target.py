@@ -10,10 +10,9 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, LiteralString
 
 from p14g import Delete, Insert, Policy, Select, Update
-from typing_extensions import LiteralString
 
 Row = dict[str, Any]
 

@@ -14,8 +14,6 @@ which defines the policy and schema it attacks.
 `/library` is a read-only mount of `crates/fuzz-agent/.library/`, which each run empties and fills with a fresh copy of
 every tracked or unignored file, so the sandbox never sees `.env`, the virtual environment or earlier runs.
 
-The fuzzer needs Python 3.11 or later, for Code Mode.
-
 ## Run it
 
 Models are reached through the Pydantic AI Gateway and traces go to [Logfire](https://logfire.pydantic.dev/). One
