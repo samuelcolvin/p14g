@@ -28,13 +28,13 @@ uvx logfire-cli init
 uvx logfire-cli api-key write gateway --name p14g-fuzz-agent
 ```
 
-The key is printed once; keep it in your secret manager. Then start the disposable Postgres container and run one
-short round:
+The key is printed once; keep it in your secret manager. Then start the disposable Postgres container and run a
+short session:
 
 ```bash
 export LOGFIRE_API_KEY=...
 make postgres
-make fuzz-agent ARGS='--rounds 1 --turns 20'
+make fuzz-agent ARGS='--turns 20'
 ```
 
 The default attacker is GLM 5.3 on [Doubleword](https://docs.doubleword.ai/inference-api/models), reached through the
@@ -49,9 +49,8 @@ Useful options:
 
 ```text
 --model MODEL             model that writes attacking SQL
---focus TEXT              one area to attack in every round; by default the agent picks an area each round
---rounds N                number of independent attack rounds
---turns N                 maximum model requests in each round
+--focus TEXT              one area to attack; by default the agent chooses
+--turns N                 maximum model requests (default: 40)
 --database-url URL        disposable Postgres server (default: P14G_TEST_DATABASE_URL)
 ```
 
@@ -59,8 +58,7 @@ Run `uv run --group fuzz-agent python -m fuzz_agent --help` from this directory 
 
 ## Traces
 
-Each run is one trace: a span for the run, one for each round, and under those the model requests and tool calls
-that Pydantic AI records. Every `rewrite` call has an `attempt` span with the statement, whether it was accepted,
+Each run is one trace: a span for the run, and under it the model requests and tool calls that Pydantic AI records. Every `rewrite` call has an `attempt` span with the statement, whether it was accepted,
 the output, the rejection and what Postgres did. Under it are spans for the rewrite in each literal mode, the
 structure check, the `EXPLAIN` as the restricted role and the run as the owner, along with the statements psycopg
 sent. Every finding is also a warning-level log, so `level >= warn` in Logfire lists them.
@@ -78,7 +76,7 @@ The deterministic oracle:
 
 Runs are written under `crates/fuzz-agent/runs/`. `attempts.jsonl` is written before p14g sees a statement, so its
 last line survives a process crash. `findings.jsonl` contains the failed checks and anything the agent reported with
-`report_finding`, and `notes.md` contains the attacking model's round summaries.
+`report_finding`, and `summary.md` contains the attacking model's summary.
 
 Run the API-free regression tests with `make test-fuzz-agent`. Most need Postgres, as `make test-postgres` does,
 and are skipped without `P14G_TEST_DATABASE_URL`.

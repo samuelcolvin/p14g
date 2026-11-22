@@ -61,14 +61,14 @@ def test_turns(tmp_path: Path) -> None:
 
     assert not session.last_turn(0)
     assert not session.last_turn(3)
-    # the fifth request, after four, is the last the round allows
+    # the fifth request, after four, is the last the run allows
     assert session.last_turn(4)
 
-    assert session.turn_instructions(0) == 'You have 5 turns left in this round, counting this one.'
-    assert session.turn_instructions(3).startswith('You have not tried a statement this round')
+    assert session.turn_instructions(0) == 'You have 5 turns left, counting this one.'
+    assert session.turn_instructions(3).startswith('You have not tried a statement yet')
     session.attempts = 2
-    assert session.turn_instructions(3) == 'You have 2 turns left in this round, counting this one.'
-    assert session.turn_instructions(4).startswith('This is the last turn of the round')
+    assert session.turn_instructions(3) == 'You have 2 turns left, counting this one.'
+    assert session.turn_instructions(4).startswith('This is the last turn')
 
 
 def test_usable_summary() -> None:
@@ -120,10 +120,10 @@ def test_code_mode(oracle: Oracle, tmp_path: Path) -> None:
     assert 'read-only' in output
     assert 'False' in output
     assert 'SELECT customers.id' in output
-    assert session.tried == ['accepted: select id from customers']
+    assert session.attempts == session.accepted == 1
     assert not (library.PATH / 'written').exists()
 
-    # on the last turn of a round the model may not call `run_code`, so the reply is the summary
+    # on the last turn the model may not call `run_code`, so the reply is the summary
     tool_choices.clear()
     session.turns = 1
     assert run() == 'summary'

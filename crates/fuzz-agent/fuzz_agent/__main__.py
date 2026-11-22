@@ -24,9 +24,6 @@ from . import attacker, library
 from .attacker import PACKAGE, Session
 from .oracle import Oracle
 
-TRIED_IN_NOTES = 60
-"""How many of a round's statements the rounds after it are shown."""
-
 
 def usable_summary(text: str) -> str:
     """The model's summary, or a note that there is none when it wrote out a tool call instead.
@@ -46,11 +43,8 @@ def parse_args() -> argparse.Namespace:
         help='the model that writes the SQL, as a Pydantic AI model name; a `gateway/` model is reached through '
         'the Pydantic AI Gateway with LOGFIRE_API_KEY (default: %(default)s)',
     )
-    parser.add_argument('--rounds', type=int, default=7, help='rounds to run, each on one area of the library')
-    parser.add_argument('--turns', type=int, default=40, help='model requests the agent gets in a round')
-    parser.add_argument(
-        '--focus', help='what to attack, in your own words, for every round; by default the agent chooses an area'
-    )
+    parser.add_argument('--turns', type=int, default=40, help='model requests the agent gets')
+    parser.add_argument('--focus', help='what to attack, in your own words; by default the agent chooses')
     parser.add_argument(
         '--database-url',
         default=os.environ.get('P14G_TEST_DATABASE_URL'),
@@ -65,8 +59,6 @@ def parse_args() -> argparse.Namespace:
         )
     if not args.database_url:
         parser.error('set P14G_TEST_DATABASE_URL or pass --database-url: every statement is run on Postgres')
-    if args.rounds < 1:
-        parser.error('--rounds must be at least 1')
     if args.turns < 1:
         parser.error('--turns must be at least 1')
     return args
@@ -86,64 +78,36 @@ async def run(args: argparse.Namespace) -> int:
         print(f'traces: {"sent to Logfire" if sending else "not sent, set LOGFIRE_API_KEY"}')
         print(f'writing to {directory}\n')
 
+        prompt = f'You have {args.turns} turns.'
+        if args.focus:
+            prompt += f'\n\nAttack this area:\n\n{args.focus}'
         usage = RunUsage()
-        notes: list[str] = []
-        with logfire.span(
-            'fuzz run {model}', model=args.model, rounds=args.rounds, directory=str(directory)
-        ) as run_span:
-            for number in range(1, args.rounds + 1):
-                print(f'round {number} of {args.rounds}')
-                prompt = f'This is round {number} of {args.rounds}. You have {args.turns} turns.'
-                if args.focus:
-                    prompt += f'\n\nThis round, attack this area:\n\n{args.focus}'
-                if notes:
-                    prompt += '\n\nSummaries of the rounds before this one:\n\n' + '\n\n'.join(notes)
-                session.round_start = session.attempts
-                findings_before = len(session.findings)
-                tried_before = len(session.tried)
-                # the limit is on the usage it is given, so each round has its own
-                round_usage = RunUsage()
-                with logfire.span('round {number}', number=number, focus=args.focus) as round_span:
-                    try:
-                        result = await attacker.agent.run(
-                            prompt,
-                            model=attacking_model,
-                            deps=session,
-                            usage_limits=UsageLimits(request_limit=args.turns),
-                            usage=round_usage,
-                        )
-                        summary = usable_summary(result.output)
-                    except UsageLimitExceeded:
-                        summary = 'The round ran out of turns before a summary was written.'
-                    except (ModelAPIError, UnexpectedModelBehavior) as e:
-                        # a provider refusing a request, or an answer that cannot be used, ends the round, not the run
-                        summary = f'The round stopped on a model error: {type(e).__name__}: {str(e)[:500]}'
-                    round_span.set_attributes(
-                        {
-                            'summary': summary,
-                            'attempts': session.attempts - session.round_start,
-                            'findings': len(session.findings) - findings_before,
-                        }
-                    )
-                usage.incr(round_usage)
-                found = sorted({f'{finding.kind}: {finding.detail.splitlines()[0]}' for finding in session.findings})
-                note = f'## Round {number}\n\n{summary}\n\n{session.attempts - session.round_start} statements tried.'
-                if found:
-                    note += ' Findings recorded so far:\n' + '\n'.join(f'- {line}' for line in found)
-                # kept by the fuzzer, so the next round knows what was tried whether or not the model summarised it
-                tried = session.tried[tried_before:]
-                if tried:
-                    shown = tried[-TRIED_IN_NOTES:]
-                    skipped = f' (the last {len(shown)} of {len(tried)})' if len(shown) < len(tried) else ''
-                    note += f'\n\nStatements tried{skipped}:\n' + '\n'.join(f'- {line}' for line in shown)
-                notes.append(note)
-                (directory / 'notes.md').write_text('\n\n'.join(notes) + '\n')
-                print(f'\n{summary}\n')
-
+        with logfire.span('fuzz run {model}', model=args.model, focus=args.focus, directory=str(directory)) as span:
+            try:
+                result = await attacker.agent.run(
+                    prompt,
+                    model=attacking_model,
+                    deps=session,
+                    usage_limits=UsageLimits(request_limit=args.turns),
+                    usage=usage,
+                )
+                summary = usable_summary(result.output)
+            except UsageLimitExceeded:
+                summary = 'The run ran out of turns before a summary was written.'
+            except (ModelAPIError, UnexpectedModelBehavior) as e:
+                # a provider refusing a request, or an answer that cannot be used; the findings so far still count
+                summary = f'The run stopped on a model error: {type(e).__name__}: {str(e)[:500]}'
             kinds = Counter(finding.kind for finding in session.findings)
-            run_span.set_attributes(
-                {'attempts': session.attempts, 'accepted': session.accepted, 'findings': dict(kinds)}
+            span.set_attributes(
+                {
+                    'summary': summary,
+                    'attempts': session.attempts,
+                    'accepted': session.accepted,
+                    'findings': dict(kinds),
+                }
             )
+        (directory / 'summary.md').write_text(summary + '\n')
+        print(f'\n{summary}\n')
         print(f'{session.attempts} statements tried, {session.accepted} accepted')
         print(f'{usage.requests} requests, {usage.input_tokens} input and {usage.output_tokens} output tokens')
         for kind, count in sorted(kinds.items()):

@@ -67,7 +67,7 @@ yours to change.
   statements in a loop or with `asyncio.gather`, printing what each one returned.
 - Reading is only worth what it leads you to try. Call `rewrite` within your first three or four turns, and from
   then on try statements in most turns, several at once, reading more only to explain a result or to find the
-  next idea. A round that reads the whole library and tries nothing has found nothing.
+  next idea. A run that reads the whole library and tries nothing has found nothing.
 - Use `report_finding` only for a real problem the checks cannot see, such as output that leaks through timing or
   through which error is raised, or an answer about rows you should not be able to count. Give the exact SQL.
   Do not report things the README documents as limits, such as an error raised before a row filter is applied.
@@ -75,12 +75,12 @@ yours to change.
 
 ## Where to look
 
-A run is several rounds. Spend each round on one area: unless the prompt names one, choose an area the summaries
-of the earlier rounds have not covered, or go deeper where an earlier finding suggests there is more.
+Work on one area at a time: unless the prompt names one, start where you think a bug is likeliest, go deeper where
+a finding suggests there is more, and move on when an area stops giving you ideas.
 
 These are some of the places where p14g's understanding of SQL and Postgres's could part. The list is not
-complete: the bug worth finding may be somewhere it does not mention, so look beyond it, especially once the
-earlier rounds have covered these.
+complete: the bug worth finding may be somewhere it does not mention, so look beyond it, especially once you have
+covered these.
 
 - The writer (`crates/p14g/src/backend/`): string and identifier escaping, which names are left unquoted,
   keywords, where parentheses are left out, tokens that could run together or start a comment.
@@ -101,9 +101,9 @@ earlier rounds have covered these.
 - Limits and crashes: a panic, a statement that makes `rewrite()` slow, deep or wide input, and a SELECT that
   returns more than `max_rows` rows.
 
-When you are out of ideas for the round's area, stop and reply with a short summary: which area you chose, what
-you tried, what p14g did, and what you would try next. On your last turn you may not call `run_code`, and the reply you write then
-is that summary. The next round starts from it and nothing else you saw.
+When you are out of ideas, stop and reply with a short summary: which areas you covered, what you tried, what p14g
+did, and what you would try next. On your last turn you may not call `run_code`, and the reply you write then is
+that summary.
 
 ## Start here
 
@@ -118,7 +118,7 @@ Read these in your first `run_code` call:
 
 
 READING_TURNS = 3
-"""Turns a round may spend reading before the agent is told to try a statement."""
+"""Turns the agent may spend reading before it is told to try a statement."""
 
 
 @dataclass
@@ -128,14 +128,10 @@ class Session:
     oracle: Oracle
     directory: Path
     turns: int = 40
-    """Model requests in a round. The last may not call a tool, so that it is the round's summary."""
-    round_start: int = 0
-    """`attempts` when the current round began."""
+    """Model requests in the run. The last may not call a tool, so that it is the summary."""
     attempts: int = 0
     accepted: int = 0
     findings: list[Finding] = field(default_factory=list[Finding])
-    tried: list[str] = field(default_factory=list[str])
-    """One line per statement: what happened to it, then the statement. The next round is shown this."""
 
     def record(self, name: str, entry: dict[str, Any]) -> None:
         with (self.directory / f'{name}.jsonl').open('a') as f:
@@ -154,24 +150,24 @@ class Session:
         print(f'  FINDING ({finding.kind}): {finding.detail.splitlines()[0][:150]}')
 
     def last_turn(self, requests: int) -> bool:
-        """Whether the request after `requests` made this round is the last the round's limit allows."""
+        """Whether the request after `requests` made so far is the last the run's limit allows."""
         return requests >= self.turns - 1
 
     def turn_instructions(self, requests: int) -> str:
         """Instructions for the next request only: the summary on the last turn, and a push to start testing."""
         if self.last_turn(requests):
             return (
-                'This is the last turn of the round and you may not call `run_code`. Do not call or write out any '
-                'tool call. Reply now, in plain text, with the summary of the round: what you tried, what p14g did, '
-                'and what you would try next.'
+                'This is the last turn and you may not call `run_code`. Do not call or write out any tool call. '
+                'Reply now, in plain text, with your summary: what you tried, what p14g did, and what you would try '
+                'next.'
             )
         left = self.turns - requests
-        if requests >= READING_TURNS and self.attempts == self.round_start:
+        if requests >= READING_TURNS and self.attempts == 0:
             return (
-                f'You have not tried a statement this round and have {left} turns left. Stop reading and call '
+                f'You have not tried a statement yet and have {left} turns left. Stop reading and call '
                 '`rewrite` from `run_code` now, with several statements at once.'
             )
-        return f'You have {left} turns left in this round, counting this one.'
+        return f'You have {left} turns left, counting this one.'
 
 
 agent = Agent(
@@ -182,7 +178,7 @@ agent = Agent(
         # try a batch of statements
         CodeMode(mount=MountDir(host_path=library.PATH, virtual_path='/library', mode='read-only')),
     ],
-    # on the last turn no tool may be called, so the reply is the round's summary
+    # on the last turn no tool may be called, so the reply is the summary
     model_settings=lambda ctx: ModelSettings(
         thinking='high', tool_choice='none' if ctx.deps.last_turn(ctx.usage.requests) else 'auto'
     ),
@@ -204,17 +200,10 @@ async def rewrite(ctx: RunContext[Session], sql: str) -> str:
     # written before anything is run, so a statement that crashes the process is the last line of the file
     session.record('attempts', {'n': number, 'sql': sql})
     attempt = await asyncio.to_thread(session.oracle.attempt, sql)
-    flat = ' '.join(sql.split())
-    if attempt.output is None:
-        outcome = f'rejected ({(attempt.rejection or "")[:100]})'
-        print(f'{number:4} rejected: {flat[:120]}')
-    else:
+    if attempt.output is not None:
         session.accepted += 1
-        outcome = 'accepted'
-        print(f'{number:4} accepted: {flat[:120]}')
-    if attempt.findings:
-        outcome += ', FINDING ' + ', '.join(finding.kind for finding in attempt.findings)
-    session.tried.append(f'{outcome}: {flat[:160]}')
+    flat = ' '.join(sql.split())
+    print(f'{number:4} {"rejected" if attempt.output is None else "accepted"}: {flat[:120]}')
     for finding in attempt.findings:
         session.found(finding)
     return attempt.render()
