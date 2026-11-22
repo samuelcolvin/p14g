@@ -540,7 +540,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "p14g"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "pg_query",
  "postgres",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "p14g-python"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "p14g",
  "pyo3",
