@@ -540,6 +540,9 @@ CREATE POLICY by_org ON orders
 ```
 
 ```python
+from p14g import Delete, Insert, Policy, Select, Update
+
+
 def org(context):
     return 'org = :org_id', {'org_id': context['org_id']}
 
@@ -551,10 +554,12 @@ policy = Policy(
     Delete('orders', filter=org),
 )
 
-# with psycopg 3
-with conn.transaction():
-    conn.execute("select set_config('app.org_id', %s, true)", [str(org_id)])
-    rows = conn.execute(policy.rewrite(sql, context={'org_id': org_id}).sql).fetchall()
+
+def run(conn, sql, org_id):
+    """Run untrusted `sql` for one org; `conn` is a psycopg 3 connection."""
+    with conn.transaction():
+        conn.execute("select set_config('app.org_id', %s, true)", [str(org_id)])
+        return conn.execute(policy.rewrite(sql, context={'org_id': org_id}).sql).fetchall()
 ```
 
 If row-level security is missing or bypassed, the filter still limits which rows the statement returns and changes.
