@@ -33,6 +33,8 @@ Each of these runs a query written in a string, which p14g sees only as a litera
 That query can call `set_config`, read any table the role can, or do anything else the role can do.
 
 - `query_to_xml` and `query_to_xml_and_xmlschema` run the query and return its rows as XML.
+- `query_to_xmlschema` plans the query, without running it, and returns the XML schema of its result.
+  Planning still reads the catalog for every table the query names.
 - `ts_stat` runs the query to collect statistics on its `tsvector` column.
 - `ts_rewrite`, in its two-argument form, runs a query that returns the rewrite rules.
 - `dblink`, `dblink_exec`, `dblink_open`, `dblink_send_query` and the other `dblink_*` functions (extension `dblink`)
@@ -54,7 +56,6 @@ The role's grants and row-level security still do.
 - `schema_to_xml`, `schema_to_xmlschema` and `schema_to_xml_and_xmlschema` read every table in the schema.
 - `database_to_xml`, `database_to_xmlschema` and `database_to_xml_and_xmlschema` read every table in the database.
 - `cursor_to_xml` and `cursor_to_xmlschema` read from a cursor by name.
-- `query_to_xmlschema` plans the query given as text, without running it.
 
 ## Files and the server
 

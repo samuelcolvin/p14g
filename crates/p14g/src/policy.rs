@@ -249,9 +249,9 @@ impl<C> Select<C> {
     /// a statement may read.
     ///
     /// For security reasons, all column names allowed need to be listed: there is no rule that allows every
-    /// column, and [`PolicyBuilder::build`] refuses `"*"` in the list. Postgres reads `t.name` as the function call
-    /// `name(t)` when `t` has no column `name`, so a name p14g cannot be sure is a column could call any function
-    /// that takes the table's row. See "Why every column is listed" in the README.
+    /// column, and [`PolicyBuilder::build`] refuses `"*"` in the list. Postgres's functional notation reads `t.name`
+    /// as the function call `name(t)` when `t` has no column `name`, so a name p14g cannot be sure is a column could
+    /// call any function that takes the table's row. See "Why every column is listed" in the README.
     pub fn table<S: Into<String>>(table: impl Into<String>, columns: impl IntoIterator<Item = S>) -> Self {
         Self {
             table: table.into(),

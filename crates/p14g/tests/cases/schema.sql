@@ -43,9 +43,9 @@ INSERT INTO app.events VALUES (1, 'click', 'x');
 INSERT INTO limited VALUES (1, 2, 3);
 INSERT INTO secrets VALUES (1, 'hunter2');
 
--- Postgres reads `t.reset_role` as the call `reset_role(t)` when `t` has no column of that name, which is why
--- every select rule lists its columns. These would reset the role, and PUBLIC can execute them as it can any
--- new function; `tests/postgres.rs` checks that no accepted statement changes the role.
+-- Postgres's functional notation reads `t.reset_role` as the call `reset_role(t)` when `t` has no column of that
+-- name, which is why every select rule lists its columns. These would reset the role, and PUBLIC can execute them
+-- as it can any new function; `tests/postgres.rs` checks that no accepted statement changes the role.
 CREATE FUNCTION reset_role(orders) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
 CREATE FUNCTION reset_role(customers) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
 CREATE FUNCTION reset_role(v) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;

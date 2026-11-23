@@ -10,7 +10,8 @@
 --   UPDATE pg_settings is set_config by another name; it cannot set role, which pg_settings does not show.
 -- * GRANT, ALTER ROLE, ownership and row-level security policies change what any role may do.
 -- * DO, CALL, EXECUTE, functions, triggers, views and foreign servers run code as another role or later.
--- * Postgres reads t.f as the call f(t) when t has no column f, so a name that is not a column can be a call.
+-- * Postgres's functional notation reads t.f as the call f(t) when t has no column f, so a name that is not a column
+--   can be a call.
 --   cases/schema.sql defines reset_role(t) for several tables. p14g only accepts names a select rule lists, and
 --   refuses a subquery alias that would make Postgres resolve an outer table's column to an inner table.
 -- * A second statement after the first would be sent with it.
@@ -177,7 +178,7 @@ denied: select pg_catalog.query_to_xml('select 1', true, true, '')
 denied: select count(*) from orders where ts_stat('select 1') is not null
 denied: select ts_rewrite(product, 'select 1') from orders
 denied: select public.dblink('user=postgres', 'reset role')
--- a column reference that Postgres reads as a call, because the table has no column of that name
+-- functional notation: a column reference that Postgres reads as a call, because the table has no column of that name
 denied: select reset_role from orders
 denied: select o.reset_role from orders o
 denied: select v.reset_role from v
