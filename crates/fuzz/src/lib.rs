@@ -414,6 +414,9 @@ pub const FRAGMENTS: &[&str] = &[
     " .reset_role ",
     " v.row_to_json ",
     " .to_jsonb ",
+    // a subquery alias that hides the outer table, so an outer column would resolve to the inner one
+    " (select name from orders as customers) ",
+    " exists (select 1 from customers as orders where product = 'x') ",
     " pg_settings ",
     " pg_catalog.pg_settings ",
     "; reset role",

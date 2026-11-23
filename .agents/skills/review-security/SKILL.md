@@ -91,7 +91,8 @@ Ask what the SQL author can now read, write or call that no rule names:
     `SELECT t FROM t`, `t.*` in an expression, `row_to_json(t)`, `ctid`, `xmin`, `tableoid` must stay unreachable
     unless a rule lists them.
 - **Star handling?**
-    `allow` must refuse a table whose rule lists columns; `expand` must use the columns of the rule that was chosen.
+    `expand` must use the columns of the rule that was chosen, and no `*` may reach the writer: there is no way to
+    allow every column.
 - **Writes?**
     Insert columns, `SET` targets, `extra` collisions, the unfiltered guard, and that anything a write reads needs a
     `Select` rule. `only` and `default_schema` must be applied to every reference to the table, including write

@@ -349,10 +349,9 @@ impl<'a, S: Syntax> Writer<'a, S> {
                         w.ident(alias);
                     }
                 }
-                SelectItem::Wildcard => w.push("*"),
-                SelectItem::QualifiedWildcard(table) => {
-                    w.ident(table);
-                    w.push(".*");
+                // the check expands every `*` to listed columns: writing one would allow every column
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {
+                    return Err(invalid("* must be expanded before the statement is written"));
                 }
             }
             Ok(())

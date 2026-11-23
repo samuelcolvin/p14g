@@ -286,6 +286,9 @@ An unqualified name is bound to the table whose rule lists it.
 A name that two rules list is rejected; qualify it.
 A name that one rule lists is bound to that table even if another table has an unlisted column of that name.
 Postgres would call the name ambiguous then, but the output reads the listed column, which the policy allows.
+In a subquery, a name that no table of the subquery lists is bound to the enclosing query, as in Postgres.
+A subquery that gives one of its tables the same alias as that outer table is rejected, as in
+`select (select name from orders as customers) from customers`: Postgres would read `customers.name` from `orders`.
 
 Whole-row references such as `SELECT orders FROM orders` or `row_to_json(o)` are rejected, because `orders` is not a
 column.
