@@ -123,10 +123,11 @@ If a fix needs the same check in both lowering and the writer, change the type.
 
 ### The check (`check.rs`)
 
-p14g has no schema, so the policy is the schema: a table has the columns its rules list, or an unknown set when a rule
-allows all of them.
+p14g has no schema, so the policy is the schema: a table has the columns its rules list.
 Scopes, CTEs, derived tables and correlated subqueries are resolved here, and every use of a column is recorded
 against a table instance.
+A column bound to an enclosing query is written `alias.name`, so a subquery may not hide that alias with one of its
+own tables: Postgres would resolve the name to the inner table.
 Operators are not: `Policy.operators` is one set for the whole statement, because a set per table would have to follow
 each column through every subquery and CTE.
 Several rules for one table are alternatives; one rule must cover everything an instance uses.

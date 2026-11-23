@@ -61,8 +61,11 @@ For any statement `rewrite()` accepts, in a deployment that does the above:
   `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET`, and `COMMIT`, `ROLLBACK` and
   `ROLLBACK TO SAVEPOINT`, which undo a `SET LOCAL ROLE`, are all statements other than the four below.
   No default function can change it.
-  p14g writes only column names a `Select` rule lists, because Postgres reads `t.name` as the call `name(t)` when `t`
-  has no column `name`.
+  p14g writes after a table only column names that table's `Select` rule lists.
+  Postgres's functional notation reads `t.name` as the call `name(t)` when `t` has no column `name`, for any function
+  on the `search_path` that takes the row, and no spelling avoids it: quoting, `(t).name` and `(t.*).name` all call it.
+  A subquery may not give one of its tables the alias of a table in an enclosing query whose column it uses, since
+  Postgres would resolve `alias.name` to the inner table.
   p14g does not refuse any function a policy adds or a filter calls, or an `UPDATE` rule for `pg_settings`.
   `set_config`, the built-ins that run SQL given as text such as `query_to_xml`, and updates of `pg_settings` can all
   change it; [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) has more, and is not exhaustive.
@@ -112,8 +115,8 @@ The README's [Rows](README.md#rows) section has more on filters.
   An added function, or one a filter calls, that is `SECURITY DEFINER` runs as its owner, and one that calls
   `set_config` or runs SQL can change the role; [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) has some known
   examples, and is not exhaustive.
-  A name a `Select` rule lists that is not a column of the table is read by Postgres as a call to a function of that
-  name; running `policy.grants()` catches it, since a column grant fails on a column that does not exist.
+  A name a `Select` rule lists that is not a column of the table is read by Postgres, through functional notation, as
+  a call to a function of that name; running `policy.grants()` catches it, since a column grant fails on a column that does not exist.
 - Sequences that inserted rows take defaults from, which the grants do not cover.
   The grants also cannot express a filter, so they let the role read and write every row.
 - A compromised database, application, or Python process.
@@ -172,7 +175,8 @@ Include the policy, the input SQL, the output, and what the output did when you 
 - `tests/postgres.rs` runs every accepted statement against Postgres 18 as a role whose grants match the test policy.
   A permission or syntax error fails the test, and so does a change to the role or to `search_path`, `row_security`
   or `session_replication_role`.
-  The test schema has a function `reset_role(t)` for several tables, which an output naming `t.reset_role` would call.
+  The test schema has a function `reset_role(t)` for several tables, which an output naming `t.reset_role` would call
+  through functional notation.
   It also checks the keyword list against the server and that filters hold through joins, subqueries and writes.
 - `tests/pg_query.rs` parses the output with libpg_query, Postgres's own parser, and checks it is one `SELECT`,
   `INSERT`, `UPDATE` or `DELETE` with no call to a function that can change the role.

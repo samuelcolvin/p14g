@@ -61,7 +61,9 @@ fn generic_alias<'py>(cls: &Bound<'py, PyType>, item: &Bound<'py, PyAny>) -> PyR
 
 /// Allows reading the listed columns of a table or view.
 ///
-/// For security reasons, all column names allowed need to be listed: see `p14g.pyi`.
+/// For security reasons, all column names allowed need to be listed: see `p14g.pyi`. Every mention of a
+/// column counts as a read, wherever it is: in the select list, in a `WHERE` or `ORDER BY`, or in the
+/// `WHERE` of an `UPDATE`.
 #[pyclass(frozen, module = "p14g", name = "Select")]
 struct PySelect {
     #[pyo3(get)]

@@ -1,9 +1,9 @@
 //! Resolve every column to the table it belongs to and check the statement against the policy.
 //!
 //! p14g never sees the database, so the policy doubles as the schema: a table has the columns its rules
-//! list. Every column reference is bound to
-//! one table instance here and written fully qualified, so if Postgres would have resolved a name
-//! differently the query fails in the database instead of reading something that was not checked.
+//! list. Every column reference is bound to one table instance here and written fully qualified, so if
+//! Postgres would have resolved a name differently the query fails in the database instead of reading
+//! something that was not checked.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -383,7 +383,7 @@ impl<'p, C> Checker<'p, C> {
     }
 
     /// `GROUP BY name` prefers an input column, and falls back to an output alias. p14g cannot always
-    /// tell which Postgres will pick, so it only accepts the cases where it can, or where both are allowed.
+    /// tell which Postgres will pick, so it only accepts the cases where it can.
     fn group_by(
         &mut self,
         key: &mut KeyExpr,
@@ -612,7 +612,7 @@ impl<'p, C> Checker<'p, C> {
     fn resolve(&self, column: &Column) -> Result<usize> {
         let name = &column.name;
         let mut hidden = false;
-        for scope in self.scopes.iter().rev() {
+        for (depth, scope) in self.scopes.iter().enumerate().rev() {
             if hidden {
                 break;
             }
@@ -635,7 +635,22 @@ impl<'p, C> Checker<'p, C> {
                 .filter(|&i| self.instances[i].lists(name))
                 .collect();
             match listed.as_slice() {
-                [index] => return Ok(*index),
+                [index] => {
+                    // the name is written `alias.name`, which Postgres resolves to the innermost table called
+                    // `alias`: one in a nested scope would take it, and read a column or call a function that
+                    // no rule of its own lists
+                    let alias = &self.instances[*index].alias;
+                    let shadowed = self.scopes[depth + 1..]
+                        .iter()
+                        .any(|inner| inner.instances.iter().any(|&i| &self.instances[i].alias == alias));
+                    if shadowed {
+                        return Err(Error::denied(format!(
+                            "column {name:?} belongs to the outer {alias:?}, which a table in the subquery \
+                             hides; give one of them another alias"
+                        )));
+                    }
+                    return Ok(*index);
+                }
                 [] => {}
                 _ => {
                     return Err(Error::denied(format!(

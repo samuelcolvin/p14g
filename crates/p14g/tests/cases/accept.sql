@@ -328,3 +328,7 @@ select array_length(tags, 1), cardinality(tags), array_position(tags, 'a'), gen_
 
 select pg_catalog.lower(product), PG_CATALOG.COUNT(*) over () from orders
 => SELECT lower(orders.product), count(*) OVER () FROM orders
+
+-- a subquery may reuse an outer alias for its own table while it reads only that table's columns
+select id from customers where exists (select 1 from orders as customers where qty > 1)
+=> SELECT customers.id FROM customers WHERE EXISTS (SELECT 1 FROM orders AS customers WHERE customers.qty > 1)
