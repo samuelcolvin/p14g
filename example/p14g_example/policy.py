@@ -56,6 +56,5 @@ policy = Policy(
     Delete('tasks', filter=by_org),
     # table names in statements are written `app.name`, never resolved through the search_path
     default_schema='app',
-    qualify_builtins=True,
     max_rows=settings.max_rows,
 )

@@ -62,8 +62,13 @@ fn identity(transaction: &mut postgres::Transaction<'_>) -> Result<Vec<Option<St
 ///
 /// Panics if the statement changed the role or the settings in [`IDENTITY`].
 fn run(client: &mut Client, sql: &str, params: &[String]) -> Result<usize, postgres::Error> {
+    run_with(client, "", sql, params)
+}
+
+/// [`run`], after `setup` has run as the restricted role in the same transaction.
+fn run_with(client: &mut Client, setup: &str, sql: &str, params: &[String]) -> Result<usize, postgres::Error> {
     let mut transaction = client.transaction()?;
-    transaction.batch_execute(&format!("SET LOCAL ROLE {ROLE}"))?;
+    transaction.batch_execute(&format!("SET LOCAL ROLE {ROLE}; {setup}"))?;
     let before = identity(&mut transaction)?;
     assert_eq!(before[0].as_deref(), Some(ROLE));
     let count = |messages: Vec<SimpleQueryMessage>| {
@@ -522,18 +527,16 @@ fn function_names(client: &mut Client) {
         }
     }
 
-    // and every default function, called by name, is found
-    let plain = policy();
-    let qualified: Policy = common::builder().qualify_builtins(true).build().unwrap();
+    // and with an empty `search_path` and every table qualified, which the docs recommend, every accepted
+    // statement still runs: nothing p14g writes needs a function, operator or type outside `pg_catalog`
+    let qualified: Policy = common::builder().default_schema("public").build().unwrap();
     for case in accept_cases() {
         if case.sql.contains('$') && !case.sql.contains("$$") && !case.sql.contains("$tag$") {
             continue;
         }
-        for policy in [&plain, &qualified] {
-            let safe = policy.rewrite(case.sql, &()).unwrap();
-            run(client, &safe.sql, &[])
-                .unwrap_or_else(|e| panic!("line {}: {}\n  {}", case.line, safe.sql, describe(&e)));
-        }
+        let safe = qualified.rewrite(case.sql, &()).unwrap();
+        run_with(client, "SET LOCAL search_path = ''", &safe.sql, &[])
+            .unwrap_or_else(|e| panic!("line {}: {}\n  {}", case.line, safe.sql, describe(&e)));
     }
 }
 

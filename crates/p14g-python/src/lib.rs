@@ -508,7 +508,6 @@ impl PyPolicy {
         literals="inline",
         quote_identifiers="minimal",
         layout="multiline",
-        qualify_builtins=false,
         max_rows=None,
         default_schema=None,
         dialect="postgres",
@@ -526,7 +525,6 @@ impl PyPolicy {
         literals: &str,
         quote_identifiers: &str,
         layout: &str,
-        qualify_builtins: bool,
         max_rows: Option<u64>,
         default_schema: Option<String>,
         dialect: &str,
@@ -541,7 +539,6 @@ impl PyPolicy {
             .literals(Literals::parse(literals).map_err(config)?)
             .quote_identifiers(p14g::QuoteIdentifiers::parse(quote_identifiers).map_err(config)?)
             .layout(p14g::Layout::parse(layout).map_err(config)?)
-            .qualify_builtins(qualify_builtins)
             .max_rows(max_rows)
             .dialect(p14g::Dialect::parse(dialect).map_err(config)?);
         if let Some(default_schema) = default_schema {

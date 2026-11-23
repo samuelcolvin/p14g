@@ -43,9 +43,10 @@ The output is only as safe as the text the writer produces. Ask:
     by `chained` must bind tighter than `AND` and `OR` in Postgres. Look for a new construct written without spaces
     (`- -1` becoming a comment).
 - **Is anything written unqualified that Postgres could resolve to something else?**
-    Columns are written `table.column`, default functions `pg_catalog.name` when `qualify_builtins` is set, and
-    tables with their schema when the rule or `default_schema` gives one. The bare forms that exist (insert columns, `SET` targets, `KeyExpr::Output`,
-    `KeyExpr::Position`) each need a reason they cannot name something unchecked.
+    Columns are written `table.column`, and tables with their schema when the rule or `default_schema` gives one. The bare forms that exist (insert columns, `SET` targets, `KeyExpr::Output`,
+    `KeyExpr::Position`) each need a reason they cannot name something unchecked. Functions, operators and types
+    are written by name and resolved through the `search_path`; the deployment keeps untrusted objects off it, and
+    nothing p14g writes should depend on a schema other than `pg_catalog` for them.
 - **Can the IR hold something Postgres's grammar does not have?**
     Prefer a type that cannot represent it over a check: `f(*)` has no `DISTINCT`, `NULLIF` has two arguments,
     `ORDER BY` items are a position, an output name or an expression. A new runtime check in both lowering and the

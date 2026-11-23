@@ -1439,39 +1439,29 @@ fn parentheses() {
 }
 
 #[test]
-fn qualify_builtins() {
-    let build = |qualify| -> Policy {
-        dense()
-            .select(orders())
-            .functions(["app.total", "mine"])
-            .qualify_builtins(qualify)
-            .build()
-            .unwrap()
-    };
+fn function_names() {
+    // `replace` is not a default function, but a policy can add it
+    let policy: Policy = dense()
+        .select(orders())
+        .functions(["app.total", "mine", "replace"])
+        .build()
+        .unwrap();
     let sql = "select count(*), lower(product), left(product, 1), replace(product, 'a', 'b'), \
                substring(product from 2), position('a' in product), app.total(id), mine(id), pg_catalog.upper(product) \
                from orders";
-    // off: builtins are written by name. A name that is a keyword is quoted, because some keywords are
-    // grammar before a `(` (`substring`, `position`), except the builtins known to be fine (`left`, `replace`)
-    let plain = build(false);
+    // builtins are written by name. A name that is a keyword is quoted, because some keywords are grammar
+    // before a `(` (`substring`, `position`), except the functions known to be fine (`left`, `replace`). A
+    // function the policy added is written as it named it.
     assert_eq!(
-        rewrite(&plain, sql),
+        rewrite(&policy, sql),
         r#"SELECT count(*), lower(orders.product), left(orders.product, 1), replace(orders.product, 'a', 'b'), "substring"(orders.product, 2), "position"(orders.product, 'a'), app.total(orders.id), mine(orders.id), upper(orders.product) FROM orders"#
     );
-    // on: the default functions get their schema, the ones the policy added are written as it named them
-    let qualified = build(true);
-    assert_eq!(
-        rewrite(&qualified, sql),
-        "SELECT pg_catalog.count(*), pg_catalog.lower(orders.product), pg_catalog.left(orders.product, 1), pg_catalog.replace(orders.product, 'a', 'b'), pg_catalog.substring(orders.product, 2), pg_catalog.position(orders.product, 'a'), app.total(orders.id), mine(orders.id), pg_catalog.upper(orders.product) FROM orders"
-    );
-    for policy in [&plain, &qualified] {
-        let once = rewrite(policy, sql);
-        assert_eq!(rewrite(policy, &once), once);
-    }
-    // the keyword forms are grammar and have no schema either way
+    let once = rewrite(&policy, sql);
+    assert_eq!(rewrite(&policy, &once), once);
+    // the keyword forms are grammar and have no schema
     assert_eq!(
         rewrite(
-            &qualified,
+            &policy,
             "select coalesce(qty, 0), trim(product), extract(year from current_date) from orders"
         ),
         "SELECT COALESCE(orders.qty, 0), TRIM(BOTH FROM orders.product), EXTRACT(YEAR FROM CURRENT_DATE) FROM orders"

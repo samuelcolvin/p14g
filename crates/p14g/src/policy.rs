@@ -646,7 +646,6 @@ pub struct PolicyBuilder<C = ()> {
     literals: Literals,
     quote_identifiers: QuoteIdentifiers,
     layout: Layout,
-    qualify_builtins: bool,
     limits: Limits,
     max_rows: Option<u64>,
     default_schema: Option<String>,
@@ -669,7 +668,6 @@ impl<C> Default for PolicyBuilder<C> {
             literals: Literals::default(),
             quote_identifiers: QuoteIdentifiers::default(),
             layout: Layout::default(),
-            qualify_builtins: false,
             limits: Limits::default(),
             max_rows: None,
             default_schema: None,
@@ -762,17 +760,6 @@ impl<C> PolicyBuilder<C> {
     #[must_use]
     pub fn layout(mut self, layout: Layout) -> Self {
         self.layout = layout;
-        self
-    }
-
-    /// Write the default functions as `pg_catalog.name(...)`. Off by default.
-    ///
-    /// Postgres looks in `pg_catalog` first, but among functions with different argument types it picks the
-    /// best match wherever it is in the `search_path`. Turn this on if the role's `search_path` has a schema
-    /// that people you do not trust can create functions in.
-    #[must_use]
-    pub fn qualify_builtins(mut self, qualify_builtins: bool) -> Self {
-        self.qualify_builtins = qualify_builtins;
         self
     }
 
@@ -936,7 +923,6 @@ impl<C> PolicyBuilder<C> {
             literals: self.literals,
             quote_identifiers: self.quote_identifiers,
             layout: self.layout,
-            qualify_builtins: self.qualify_builtins,
             limits: self.limits,
             max_rows: self.max_rows,
             default_schema: default_schema.clone(),
@@ -1003,7 +989,6 @@ pub struct Policy<C = ()> {
     literals: Literals,
     quote_identifiers: QuoteIdentifiers,
     layout: Layout,
-    qualify_builtins: bool,
     pub(crate) limits: Limits,
     max_rows: Option<u64>,
     /// The schema unqualified table names are given before they are looked up and written.
@@ -1153,7 +1138,6 @@ impl<C> Policy<C> {
             literals: self.literals,
             quote: self.quote_identifiers,
             layout: self.layout,
-            qualify_builtins: self.qualify_builtins,
         };
         let written = backend::write(self.backend, &statement, style, lowered.max_placeholder)?;
         Ok(SafeSql {

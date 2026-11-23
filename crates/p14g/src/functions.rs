@@ -7,6 +7,8 @@
 //! Deliberately left out:
 //!
 //! * `repeat`, `lpad`, `rpad`, `format`: a length or pattern from the query lets one call allocate gigabytes.
+//! * `replace`: the result can be as long as the string times the replacement, so a few nested calls in a few
+//!   kilobytes of SQL allocate a gigabyte.
 //! * `regexp_*`: regular expressions can be made very slow.
 //! * `generate_series`, `unnest`, `jsonb_array_elements`, `regexp_split_to_table`: set-returning, they multiply rows.
 //! * `version`, `current_user`, `session_user`, `current_setting`, `current_database`, `inet_server_addr`:
@@ -65,7 +67,6 @@ pub const TEXT: &[&str] = &[
     "right",
     "position",
     "strpos",
-    "replace",
     "concat",
     "concat_ws",
     "starts_with",
@@ -126,7 +127,7 @@ pub fn defaults() -> impl Iterator<Item = &'static str> {
     DEFAULT_GROUPS.iter().flat_map(|group| group.iter().copied())
 }
 
-/// Whether `name` is one of the built-in defaults, which are written qualified with `pg_catalog`.
+/// Whether `name` is one of the built-in defaults.
 #[must_use]
 pub fn is_default(name: &str) -> bool {
     defaults().any(|n| n == name)

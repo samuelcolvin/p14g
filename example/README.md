@@ -75,16 +75,16 @@ logged-in user.
 
 All tables are in schema `app`, owned by `example_owner`. See `schema.sql`.
 
-| table | untrusted SQL may |
-|---|---|
-| `countries` | read `code` and `name` of every row |
-| `organisations` | read `id` and `name` of its own org; not `plan` or `stripe_customer_id` |
-| `users` | read `id`, `name`, `email`, `created_at` in its own org; not `password_hash` |
-| `projects` | read, insert, update and delete in its own org |
-| `tasks` | read, insert, update and delete in its own org |
-| `api_keys` | nothing |
-| `invoices` | nothing, though it is per-org data |
-| `audit_log` | nothing; the server writes a row for every request |
+| table           | untrusted SQL may                                                            |
+| --------------- | ---------------------------------------------------------------------------- |
+| `countries`     | read `code` and `name` of every row                                          |
+| `organisations` | read `id` and `name` of its own org; not `plan` or `stripe_customer_id`      |
+| `users`         | read `id`, `name`, `email`, `created_at` in its own org; not `password_hash` |
+| `projects`      | read, insert, update and delete in its own org                               |
+| `tasks`         | read, insert, update and delete in its own org                               |
+| `api_keys`      | nothing                                                                      |
+| `invoices`      | nothing, though it is per-org data                                           |
+| `audit_log`     | nothing; the server writes a row for every request                           |
 
 `org_id` is not in any rule's columns, so a statement can neither read it nor set it.
 The filter adds `org_id = <org>` and the `Insert` rules' `extra` sets it.

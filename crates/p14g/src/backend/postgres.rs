@@ -3,14 +3,10 @@
 use std::fmt::Write;
 
 use super::{QuoteIdentifiers, Syntax, keywords};
-use crate::{
-    ast::{DataType, Ident},
-    functions,
-};
+use crate::ast::{DataType, Ident};
 
 pub(super) struct Postgres {
     pub quote: QuoteIdentifiers,
-    pub qualify_builtins: bool,
 }
 
 /// Whether `name` is lower case letters, digits and underscores, not starting with a digit: the names
@@ -115,28 +111,18 @@ impl Syntax for Postgres {
         out.push_str(name);
     }
 
-    /// With `qualify_builtins`, the default functions are written `pg_catalog.name`, so that a function of
-    /// the same name in another schema of the `search_path` cannot be picked instead. Postgres prefers the
-    /// function whose argument types match exactly, wherever it is in the path.
     fn function_name(&self, out: &mut String, schema: Option<&Ident>, name: &Ident) {
-        match schema {
-            Some(schema) => {
-                self.ident(out, schema);
-                out.push('.');
-                self.member(out, name);
-            }
-            None if self.qualify_builtins && functions::is_default(name.as_str()) => {
-                out.push_str("pg_catalog.");
-                self.member(out, name);
-            }
-            None => {
-                let name = name.as_str();
-                let bare = plain_name(name) && (!keywords::is_keyword(name) || keywords::keyword_function_name(name));
-                if self.quote == QuoteIdentifiers::Minimal && bare {
-                    out.push_str(name);
-                } else {
-                    Self::quoted(out, name);
-                }
+        if let Some(schema) = schema {
+            self.ident(out, schema);
+            out.push('.');
+            self.member(out, name);
+        } else {
+            let name = name.as_str();
+            let bare = plain_name(name) && (!keywords::is_keyword(name) || keywords::keyword_function_name(name));
+            if self.quote == QuoteIdentifiers::Minimal && bare {
+                out.push_str(name);
+            } else {
+                Self::quoted(out, name);
             }
         }
     }

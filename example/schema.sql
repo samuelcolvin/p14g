@@ -43,6 +43,8 @@ alter role example_authenticator set work_mem = '4MB';
 alter role example_authenticator set temp_file_limit = '100MB';
 -- one query uses one process
 alter role example_authenticator set max_parallel_workers_per_gather = 0;
+-- functions, operators and types are found through the search_path, so it holds only `app`, which the untrusted role
+-- cannot create anything in, and `pg_catalog`, which Postgres searches first
 alter role example_authenticator set search_path = app;
 alter role example_authenticator set client_encoding = 'UTF8';
 
