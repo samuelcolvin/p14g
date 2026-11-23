@@ -44,8 +44,11 @@ The README's [Security considerations](README.md#security-considerations) has th
   condition.
   Set the setting the row-level security policy reads with `SET LOCAL` or `set_config(..., true)` in the transaction
   that runs the statement.
-- Set `default_schema` or write rules as `schema.table`, and set `qualify_builtins=True` if anyone you do not trust can
-  create objects in a schema on the `search_path`.
+- Set `default_schema` or write rules as `schema.table`, and make sure nobody you do not trust can create objects in a
+  schema on the role's `search_path`: functions, operators and types are written by name and looked up through it.
+  `search_path = ''` on the role does both.
+- Create views over tables with row-level security `WITH (security_invoker = true)`, or the view reads them as its
+  owner and the row-level security does not apply.
 - Use a UTF-8 `client_encoding`, or `literals='params'`.
 - Show Postgres's error messages to the SQL author only if you are content for them to read what the messages say.
 - Use a current 18.x minor release of Postgres, the version p14g's keyword list and tests are for.

@@ -755,19 +755,14 @@ def test_parentheses():
     )
 
 
-def test_qualify_builtins():
+def test_function_names():
     sql = "select count(*), lower(a), left(a, 1), position('x' in a), app.f(a) from t"
-    plain = Policy(Select('t', ['a']), functions=['app.f'], layout='dense')
-    assert plain.rewrite(sql).sql == (
+    policy = Policy(Select('t', ['a']), functions=['app.f'], layout='dense')
+    assert policy.rewrite(sql).sql == (
         """SELECT count(*), lower(t.a), left(t.a, 1), "position"(t.a, 'x'), app.f(t.a) FROM t"""
     )
-    qualified = Policy(Select('t', ['a']), functions=['app.f'], layout='dense', qualify_builtins=True)
-    assert qualified.rewrite(sql).sql == (
-        "SELECT pg_catalog.count(*), pg_catalog.lower(t.a), pg_catalog.left(t.a, 1), pg_catalog.position(t.a, 'x'), "
-        'app.f(t.a) FROM t'
-    )
     with pytest.raises(TypeError):
-        Policy(qualify_builtins='yes')  # pyright: ignore[reportArgumentType]
+        Policy(qualify_builtins=True)  # pyright: ignore[reportCallIssue]
 
 
 def test_filter():

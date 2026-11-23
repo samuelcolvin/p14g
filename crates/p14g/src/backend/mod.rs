@@ -81,17 +81,12 @@ pub(crate) struct Style {
     pub literals: Literals,
     pub quote: QuoteIdentifiers,
     pub layout: Layout,
-    /// Write builtin functions with their schema.
-    pub qualify_builtins: bool,
 }
 
 pub(crate) fn write(backend: Backend, statement: &Statement, style: Style, max_placeholder: u32) -> Result<Written> {
     match backend {
         Backend::Postgres => {
-            let syntax = postgres::Postgres {
-                quote: style.quote,
-                qualify_builtins: style.qualify_builtins,
-            };
+            let syntax = postgres::Postgres { quote: style.quote };
             Writer::new(&syntax, style, max_placeholder).finish(statement)
         }
     }
@@ -103,7 +98,6 @@ pub(crate) fn quote_ident(backend: Backend, ident: &Ident) -> String {
     match backend {
         Backend::Postgres => postgres::Postgres {
             quote: QuoteIdentifiers::Always,
-            qualify_builtins: true,
         }
         .ident(&mut out, ident),
     }

@@ -33,6 +33,7 @@ To install `p14g`, run
 ```bash
 uv add p14g
 ```
+
 Or `pip install p14g` for the boomers.
 
 Here's an example of using `p14g` in Python:
@@ -201,10 +202,20 @@ It does not replace database privileges, and it cannot limit how much work a per
   Otherwise table names are written unqualified and Postgres resolves them through the `search_path`, where a
   temporary table or a table in an earlier schema with the same name is found first.
   Functions you add with `functions=[...]` are written as you name them, so give those a schema too.
-- Set `qualify_builtins=True` if that `search_path` has a schema that people you do not trust can create functions in.
-  Built-in functions are then written `pg_catalog.lower(...)`.
-  Postgres looks in `pg_catalog` first, but between functions with different argument types it picks the closest
-  match wherever it is in the path, so a `public.lower(varchar)` would be called for a `varchar` argument.
+- Make sure nobody you do not trust can create objects in any schema on that role's `search_path`.
+  p14g writes functions, operators and types by name, and Postgres looks them up through the path.
+  It looks in `pg_catalog` first, but among functions and operators with different argument types it picks the closest
+  match wherever it is in the path.
+  A `public.=` for two `varchar`s would be called for `name = 'x'`, and could reset the role.
+  The simplest way is `ALTER ROLE app_role SET search_path = ''` together with `default_schema`: Postgres then finds
+  every function, operator and type in `pg_catalog`.
+  The statements p14g accepts cannot change `search_path`.
+  Functions you add, and functions a filter calls, then need their schema.
+  Since Postgres 15 `PUBLIC` cannot create objects in schema `public`; on a database created earlier, run
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC`.
+- Create views over tables with row-level security `WITH (security_invoker = true)`.
+  A view otherwise reads its tables as the view's owner, and the owner is usually not subject to the row-level
+  security policies, so a statement reading the view would see every row.
 - Do not show database error messages to the author of the SQL unless you are content for them to see them.
   A unique-violation error says that a value exists.
 
@@ -239,12 +250,12 @@ from that representation.
 
 A statement is rejected unless a rule allows it.
 
-| Rule | Allows |
-| --- | --- |
-| `Select(table, columns, only=False, filter=None)` | Reading the listed columns. |
-| `Insert(table, columns=None, extra=None)` | `INSERT ... VALUES` setting the listed columns. |
-| `Update(table, columns=None, allow_unfiltered=False, only=False, filter=None)` | `UPDATE ... SET` on the listed columns. |
-| `Delete(table, allow_unfiltered=False, only=False, filter=None)` | `DELETE FROM`. |
+| Rule                                                                           | Allows                                          |
+| ------------------------------------------------------------------------------ | ----------------------------------------------- |
+| `Select(table, columns, only=False, filter=None)`                              | Reading the listed columns.                     |
+| `Insert(table, columns=None, extra=None)`                                      | `INSERT ... VALUES` setting the listed columns. |
+| `Update(table, columns=None, allow_unfiltered=False, only=False, filter=None)` | `UPDATE ... SET` on the listed columns.         |
+| `Delete(table, allow_unfiltered=False, only=False, filter=None)`               | `DELETE FROM`.                                  |
 
 - `table` is `name` or `schema.name`, spelled as Postgres stores it.
   An unquoted name in the SQL is folded to lower case before it is compared, as Postgres does.
@@ -344,12 +355,12 @@ runs as or get round the policy.
 
 The defaults have no side effects, read nothing but their arguments, and cannot be made to allocate much more than
 their input.
-That leaves out, among others, `repeat`, `lpad`, `format`, `regexp_*`, `generate_series`, `current_setting`,
+That leaves out, among others, `repeat`, `lpad`, `format`, `replace`, `regexp_*`, `generate_series`, `current_setting`,
 `nextval`, `pg_sleep` and everything else named `pg_*`.
 `substring` is in the defaults, and `substring(text, text)` is a regular expression match.
 
-Functions are written by name, as `lower(...)`.
-With `qualify_builtins=True` the default functions are written `pg_catalog.lower(...)`.
+Functions are written by name, as `lower(...)`, and Postgres finds them through the `search_path`: see
+[Security considerations](#security-considerations).
 
 ### Rows
 
@@ -413,7 +424,7 @@ For row-level security, see [Why you should use `filter` and RLS together](#why-
 A view takes the place of a filter:
 
 ```sql
-CREATE VIEW cheap_orders WITH (security_barrier = true) AS
+CREATE VIEW cheap_orders WITH (security_barrier = true, security_invoker = true) AS
     SELECT id, product, qty FROM orders WHERE qty < 10
     WITH CHECK OPTION;
 GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO app_role;
@@ -422,6 +433,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON cheap_orders TO app_role;
 A view over one table with no aggregates is updatable, and an `UPDATE` or `DELETE` through it only touches rows that
 match its `WHERE`.
 `WITH CHECK OPTION` rejects an insert or update that would produce a row outside the view.
+`security_invoker = true` makes the view read `orders` as the role running the statement, so the row-level security
+on `orders` still applies; without it the view reads as its owner.
 List the view in the policy like a table.
 
 ### Inheritance and partitions

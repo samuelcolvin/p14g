@@ -52,7 +52,7 @@ The response holds the rewritten SQL, which is what ran:
 
 ```json
 {
-  "sql": "SELECT p.name, pg_catalog.count(t.id)\nFROM (SELECT projects.id, projects.name, projects.country_code, projects.created_at FROM app.projects WHERE projects.org_id = '10000000-0000-4000-8000-000000000001') AS p\nLEFT JOIN (SELECT tasks.id, ... FROM app.tasks WHERE tasks.org_id = '10000000-0000-4000-8000-000000000001') AS t ON t.project_id = p.id\nGROUP BY p.name\nLIMIT 1000",
+  "sql": "SELECT p.name, count(t.id)\nFROM (SELECT projects.id, projects.name, projects.country_code, projects.created_at FROM app.projects WHERE projects.org_id = '10000000-0000-4000-8000-000000000001') AS p\nLEFT JOIN (SELECT tasks.id, ... FROM app.tasks WHERE tasks.org_id = '10000000-0000-4000-8000-000000000001') AS t ON t.project_id = p.id\nGROUP BY p.name\nLIMIT 1000",
   "status": "SELECT 2",
   "rows": [{"name": "Giant magnet", "count": 1}, {"name": "Rocket skates", "count": 2}]
 }
@@ -75,16 +75,16 @@ logged-in user.
 
 All tables are in schema `app`, owned by `example_owner`. See `schema.sql`.
 
-| table | untrusted SQL may |
-|---|---|
-| `countries` | read `code` and `name` of every row |
-| `organisations` | read `id` and `name` of its own org; not `plan` or `stripe_customer_id` |
-| `users` | read `id`, `name`, `email`, `created_at` in its own org; not `password_hash` |
-| `projects` | read, insert, update and delete in its own org |
-| `tasks` | read, insert, update and delete in its own org |
-| `api_keys` | nothing |
-| `invoices` | nothing, though it is per-org data |
-| `audit_log` | nothing; the server writes a row for every request |
+| table           | untrusted SQL may                                                            |
+| --------------- | ---------------------------------------------------------------------------- |
+| `countries`     | read `code` and `name` of every row                                          |
+| `organisations` | read `id` and `name` of its own org; not `plan` or `stripe_customer_id`      |
+| `users`         | read `id`, `name`, `email`, `created_at` in its own org; not `password_hash` |
+| `projects`      | read, insert, update and delete in its own org                               |
+| `tasks`         | read, insert, update and delete in its own org                               |
+| `api_keys`      | nothing                                                                      |
+| `invoices`      | nothing, though it is per-org data                                           |
+| `audit_log`     | nothing; the server writes a row for every request                           |
 
 `org_id` is not in any rule's columns, so a statement can neither read it nor set it.
 The filter adds `org_id = <org>` and the `Insert` rules' `extra` sets it.

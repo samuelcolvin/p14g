@@ -299,8 +299,8 @@ select trim(product), trim(both 'x' from product), trim(leading 'x' from product
 select substring(product from 1 for 2), substring(product from 2), substring(product for 2), substring(product, 1, 2), substr(product, 1, 2) from orders
 => SELECT "substring"(orders.product, 1, 2), "substring"(orders.product, 2), "substring"(orders.product, 1, 2), "substring"(orders.product, 1, 2), "substring"(orders.product, 1, 2) FROM orders
 
-select left(product, 2), right(product, 2), position('a' in product), strpos(product, 'a'), replace(product, 'a', 'b') from orders
-=> SELECT left(orders.product, 2), right(orders.product, 2), "position"(orders.product, 'a'), strpos(orders.product, 'a'), replace(orders.product, 'a', 'b') FROM orders
+select left(product, 2), right(product, 2), position('a' in product), strpos(product, 'a') from orders
+=> SELECT left(orders.product, 2), right(orders.product, 2), "position"(orders.product, 'a'), strpos(orders.product, 'a') FROM orders
 
 select concat(product, 'x', qty), concat_ws('-', product, product), starts_with(product, 't'), split_part(product, 'e', 1) from orders
 => SELECT concat(orders.product, 'x', orders.qty), concat_ws('-', orders.product, orders.product), starts_with(orders.product, 't'), split_part(orders.product, 'e', 1) FROM orders

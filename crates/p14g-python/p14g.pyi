@@ -256,8 +256,6 @@ class Policy(Generic[_C]):
         quote_identifiers: `minimal` puts double quotes only around names that need them: anything that is not
             plain lower case, and Postgres keywords where they are not after a dot. `always` quotes every name.
         layout: `multiline` writes each clause of the statement on its own line, `dense` writes one line.
-        qualify_builtins: Write the default functions as `pg_catalog.name(...)`. Turn this on if the role's
-            `search_path` has a schema that people you do not trust can create functions in.
         max_rows: Cap on the rows a `SELECT` returns: a missing `LIMIT` is added and a larger one reduced.
         default_schema: The schema that unqualified table names belong to, in rules and in statements. Without it
             they are written unqualified and Postgres resolves them through the `search_path`.
@@ -276,7 +274,6 @@ class Policy(Generic[_C]):
         literals: _Literal['inline', 'params'] = 'inline',
         quote_identifiers: _Literal['minimal', 'always'] = 'minimal',
         layout: _Literal['multiline', 'dense'] = 'multiline',
-        qualify_builtins: bool = False,
         max_rows: int | None = None,
         default_schema: str | None = None,
         dialect: _Literal['postgres', 'generic', 'ansi', 'mysql', 'sqlite'] = 'postgres',

@@ -128,6 +128,7 @@ denied: select lpad('x', 1000000000)
 denied: select rpad('x', 1000000000)
 denied: select format('%s', product) from orders
 denied: select regexp_replace(product, '(a+)+$', '') from orders
+denied: select replace(replace(product, 'a', 'aaaa'), 'a', 'aaaa') from orders
 denied: select regexp_match(product, 'a') from orders
 denied: select regexp_split_to_array(product, 'a') from orders
 denied: select generate_series(1, 1000000000)

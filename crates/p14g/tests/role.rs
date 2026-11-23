@@ -46,7 +46,6 @@ fn role_cases_are_rejected_in_every_dialect() {
     ] {
         let policies = [
             builder().dialect(dialect).build().unwrap(),
-            builder().dialect(dialect).qualify_builtins(true).build().unwrap(),
             builder().dialect(dialect).literals(Literals::Params).build().unwrap(),
         ];
         for policy in &policies {

@@ -33,8 +33,7 @@ fn assert_within_policy(sql: &str, line: usize) {
         );
     }
     for function in common::called_functions(&parsed) {
-        // builtins are written by name unless the policy sets `qualify_builtins`; the grammar qualifies the
-        // ones it produces itself, `btrim` for `TRIM` and `like_escape` for `LIKE ... ESCAPE`
+        // builtins are written by name; the grammar qualifies the ones it produces itself, `btrim` for `TRIM` and `like_escape` for `LIKE ... ESCAPE`
         let name = function.strip_prefix("pg_catalog.").unwrap_or(&function);
         assert!(
             functions::is_default(name) || name == "btrim" || name == "like_escape",
