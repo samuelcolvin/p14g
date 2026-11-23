@@ -290,9 +290,10 @@ System columns such as `ctid` and `xmin` are rejected unless a rule lists them.
 
 #### Why every column is listed
 
-Postgres reads `t.name` as the function call `name(t)` when `t` has no column called `name`.
-This is its "functional notation", and it works for any function that takes one argument of the table's row type, or
-of a type that accepts any row, such as `record` or `anyelement`:
+Postgres has a feature called functional notation: it reads `t.name` as the function call `name(t)` when `t` has no
+column called `name`.
+It works for any function that takes one argument of the table's row type, or of a type that accepts any row, such as
+`record` or `anyelement`:
 
 ```sql
 CREATE FUNCTION reset_role(orders) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
@@ -313,8 +314,9 @@ the table is not granted.
 
 With every column listed, the only names p14g writes after a table are ones you wrote down as columns, and Postgres
 reads a name that is a column as the column.
-A listed name that is not really a column of the table would still be read as a call, but `policy.grants()` catches
-that: `GRANT SELECT (name) ON t` fails if `t` has no column `name`, so running the grants checks every list.
+A listed name that is not really a column of the table would still be read as a call through functional notation,
+but `policy.grants()` catches that: `GRANT SELECT (name) ON t` fails if `t` has no column `name`, so running the grants
+checks every list.
 
 ### Operators
 

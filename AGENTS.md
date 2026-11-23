@@ -31,9 +31,10 @@ What enforces it:
   statement. That leaves out `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET` (such as
   `search_path` and `row_security`), `GRANT`, `ALTER ROLE`, `DO`, `CALL`, `EXECUTE`, and transaction control:
   `COMMIT`, `ROLLBACK` and `ROLLBACK TO SAVEPOINT` undo a `SET LOCAL ROLE` the caller ran.
-- Every `Select` rule lists its columns, and p14g writes only listed names after a table. Postgres reads `t.name` as
-  the call `name(t)` when `t` has no column `name`, for any function on the `search_path` that takes the row, so a
-  rule that allowed every column would let a statement call such functions. Never add a way to allow every column.
+- Every `Select` rule lists its columns, and p14g writes only listed names after a table. Postgres's functional notation
+  reads `t.name` as the call `name(t)` when `t` has no column `name`, for any function on the `search_path` that takes
+  the row, so a rule that allowed every column would let a statement call such functions. Never add a way to allow every
+  column.
 - Functions are an allowlist only. A default function must not run SQL, change a setting, or be `SECURITY DEFINER`.
   p14g deliberately has no blocklist, since one would read as complete: `DANGEROUS_FUNCTIONS.md` lists some known
   dangerous functions, says it is not exhaustive, and is where a newly found one goes.

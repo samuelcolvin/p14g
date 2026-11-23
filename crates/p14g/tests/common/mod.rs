@@ -141,7 +141,8 @@ pub fn changes_role(name: &str) -> bool {
         .is_some_and(|name| ROLE_CHANGING.contains(&name))
 }
 
-/// Every column reference in `parsed`, by its last name: Postgres reads `t.name` as the call `name(t)` when `t`
+/// Every column reference in `parsed`, by its last name: Postgres's functional notation reads `t.name` as the call
+/// `name(t)` when `t`
 /// has no column `name`.
 pub fn column_names(parsed: &pg_query::ParseResult) -> Vec<String> {
     fn walk(value: &Value, names: &mut Vec<String>) {

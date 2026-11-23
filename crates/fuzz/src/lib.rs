@@ -187,7 +187,8 @@ fn changes_role(name: &str) -> bool {
     name.rsplit('.').next().is_some_and(|name| ROLE_CHANGING.contains(&name))
 }
 
-/// Every column reference in `parsed`, by its last name: Postgres reads `t.name` as the call `name(t)` when `t`
+/// Every column reference in `parsed`, by its last name: Postgres's functional notation reads `t.name` as the call
+/// `name(t)` when `t`
 /// has no column `name`. `tests/common/mod.rs` has the same function.
 fn column_names(parsed: &ParseResult) -> Vec<String> {
     fn walk(value: &Value, names: &mut Vec<String>) {
@@ -407,7 +408,7 @@ pub const FRAGMENTS: &[&str] = &[
     " ts_stat('select 1') ",
     " dblink_exec('','reset role') ",
     " \"set_config\"(",
-    // a column reference Postgres reads as a call when the table has no column of that name
+    // functional notation: a column reference Postgres reads as a call when the table has no column of that name
     " reset_role ",
     " v.reset_role ",
     " orders.reset_role ",

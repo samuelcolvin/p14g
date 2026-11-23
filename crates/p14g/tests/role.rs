@@ -62,8 +62,8 @@ fn role_cases_are_rejected_in_every_dialect() {
     assert!(accepted.len() <= 3, "{}", accepted.join("\n"));
 }
 
-/// Postgres reads `t.name` as the call `name(t)` when `t` has no column `name`, so p14g only writes names a rule
-/// lists, and a select rule has to list its columns.
+/// Postgres's functional notation reads `t.name` as the call `name(t)` when `t` has no column `name`, so p14g only
+/// writes names a rule lists, and a select rule has to list its columns.
 #[test]
 fn select_rules_list_their_columns() {
     let error = Policy::<()>::builder()
@@ -143,7 +143,7 @@ fn every_call_is_seen() {
         "SELECT \"pg_catalog\".\"set_config\"('role', 'none', false)",
         "SELECT query_to_xml('select 1', true, true, '')",
         "SELECT * FROM public.dblink('', 'select 1') AS d (x int)",
-        // a column reference Postgres reads as a call when the table has no such column
+        // functional notation: a column reference Postgres reads as a call when the table has no such column
         "SELECT t.reset_role FROM t",
         "SELECT a FROM t ORDER BY t.reset_role",
     ] {

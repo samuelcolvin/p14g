@@ -220,7 +220,7 @@ def test_role_cannot_change():
         'reset role',
         'commit',
         "select set_config('role', 'none', false)",
-        # Postgres would read `orders.reset_role` as the call `reset_role(orders)`
+        # Postgres's functional notation would read `orders.reset_role` as the call `reset_role(orders)`
         'select reset_role from orders',
         'select o.row_to_json from orders o',
     ):
