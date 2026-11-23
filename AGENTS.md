@@ -20,7 +20,7 @@ The workspace has three crates:
 ## The most important restriction: the role cannot change
 
 Nothing p14g accepts may change, reset or get around the role its output runs as, in every dialect, under any policy
-whose added functions and filters cannot change it.
+whose added functions, filters and rules cannot change it.
 The caller's grants and row-level security belong to that role, so a statement that leaves it bypasses everything else.
 Treat any way round this as the most serious bug p14g can have, and never add syntax, a default function or a policy
 option that weakens it.

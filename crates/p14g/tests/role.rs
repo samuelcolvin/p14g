@@ -113,8 +113,9 @@ fn select_rules_list_their_columns() {
     }
 }
 
-/// None of the default functions can change the role. p14g does not refuse any function a policy adds, see
-/// `DANGEROUS_FUNCTIONS.md`.
+/// None of the default functions is one the tests know can change the role. This only compares names with the
+/// non-exhaustive `common::ROLE_CHANGING`: what keeps a dangerous function out of the defaults is the rule in
+/// `functions.rs` and review, and `tests/postgres.rs` checks the role after every accepted statement it runs. p14g does not refuse any function a policy adds, see `DANGEROUS_FUNCTIONS.md`.
 #[test]
 fn no_default_function_changes_the_role() {
     for name in functions::defaults() {

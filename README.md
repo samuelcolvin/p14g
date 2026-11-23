@@ -189,9 +189,11 @@ It does not replace database privileges, and it cannot limit how much work a per
   Please be extremely careful about adding extra functions unless you know exactly what they do.
   [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) lists some known dangerous functions; it is not exhaustive.
 - Revoke `EXECUTE` on your own functions from `PUBLIC`, and grant it back only where it is needed.
-  Postgres gives `PUBLIC` `EXECUTE` on every new function, and p14g's checks are the only thing between the SQL author
-  and them.
-  `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` does the same for functions created later.
+  By default Postgres gives `PUBLIC` `EXECUTE` on every new function, and p14g's checks are the only thing between the
+  SQL author and them.
+  For functions created later, run `ALTER DEFAULT PRIVILEGES FOR ROLE owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`
+  for each role that creates functions, without `IN SCHEMA`: default privileges belong to the role that creates the
+  object.
 - Use a UTF-8 `client_encoding`, or set `literals='params'`.
   Inline string literals are escaped for UTF-8; in an encoding such as SJIS a backslash byte can be the second half of
   a character.
@@ -315,8 +317,9 @@ the table is not granted.
 With every column listed, the only names p14g writes after a table are ones you wrote down as columns, and Postgres
 reads a name that is a column as the column.
 A listed name that is not really a column of the table would still be read as a call through functional notation,
-but `policy.grants()` catches that: `GRANT SELECT (name) ON t` fails if `t` has no column `name`, so running the grants
-checks every list.
+but running the statements `policy.grants()` returns catches that: `GRANT SELECT (name) ON t` fails if `t` has no
+column `name`.
+`grants()` itself never connects to the database, so the lists are checked when you run the grants, not before.
 
 ### Operators
 

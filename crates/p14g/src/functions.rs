@@ -17,7 +17,7 @@
 //! * `to_json`, `to_jsonb`, `row_to_json`, `jsonb_build_object`: harmless while whole-row references cannot
 //!   be written, kept out until that has had more testing.
 //!
-//! `DANGEROUS_FUNCTIONS.md` says why these and others are dangerous to add with
+//! `DANGEROUS_FUNCTIONS.md` gives the reasons for many of these, and for others that are dangerous to add with
 //! [`PolicyBuilder::functions`](crate::PolicyBuilder::functions). That list is not exhaustive either.
 //!
 //! One listed name is weaker than the rule above: `substring(text, text)` is a regular expression match.

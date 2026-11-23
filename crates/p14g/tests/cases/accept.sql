@@ -332,3 +332,7 @@ select pg_catalog.lower(product), PG_CATALOG.COUNT(*) over () from orders
 -- a subquery may reuse an outer alias for its own table while it reads only that table's columns
 select id from customers where exists (select 1 from orders as customers where qty > 1)
 => SELECT customers.id FROM customers WHERE EXISTS (SELECT 1 FROM orders AS customers WHERE customers.qty > 1)
+
+-- an output alias that is also the name of a function on the row: a bare name is never read as a call
+select id as reset_role from orders order by reset_role
+=> SELECT orders.id AS reset_role FROM orders ORDER BY reset_role

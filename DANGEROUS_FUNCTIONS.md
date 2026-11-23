@@ -35,6 +35,7 @@ That query can call `set_config`, read any table the role can, or do anything el
 | Function | Why |
 | --- | --- |
 | `query_to_xml`, `query_to_xml_and_xmlschema` | Run the query and return its rows as XML. |
+| `query_to_xmlschema` | Plans the query, without running it, and returns the XML schema of its result. Planning still reads the catalog for every table the query names. |
 | `ts_stat` | Runs the query to collect statistics on its `tsvector` column. |
 | `ts_rewrite` | The two-argument form runs a query that returns the rewrite rules. |
 | `dblink`, `dblink_exec`, `dblink_open`, `dblink_send_query` and the other `dblink_*` functions (extension `dblink`) | Connect to a database, possibly this one and as another user, and run SQL there. |
@@ -56,7 +57,6 @@ The role's grants and row-level security still do.
 | `schema_to_xml`, `schema_to_xmlschema`, `schema_to_xml_and_xmlschema` | Read every table in the schema. |
 | `database_to_xml`, `database_to_xmlschema`, `database_to_xml_and_xmlschema` | Read every table in the database. |
 | `cursor_to_xml`, `cursor_to_xmlschema` | Read from a cursor by name. |
-| `query_to_xmlschema` | Plans the query given as text, without running it. |
 
 ## Files and the server
 

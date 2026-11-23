@@ -55,8 +55,8 @@ The README's [Security considerations](README.md#security-considerations) has th
 
 For any statement `rewrite()` accepts, in a deployment that does the above:
 
-- It cannot change, reset or get around the role it runs as, under any policy whose added functions and filters
-  cannot change it.
+- It cannot change, reset or get around the role it runs as, under any policy whose added functions, filters and
+  rules cannot change it (an `Update` rule for `pg_settings` can, below).
   This is the guarantee the rest depend on, since the grants and row-level security belong to that role.
   `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET`, and `COMMIT`, `ROLLBACK` and
   `ROLLBACK TO SAVEPOINT`, which undo a `SET LOCAL ROLE`, are all statements other than the four below.
@@ -116,7 +116,7 @@ The README's [Rows](README.md#rows) section has more on filters.
   `set_config` or runs SQL can change the role; [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) has some known
   examples, and is not exhaustive.
   A name a `Select` rule lists that is not a column of the table is read by Postgres, through functional notation, as
-  a call to a function of that name; running `policy.grants()` catches it, since a column grant fails on a column that does not exist.
+  a call to a function of that name; running the statements `policy.grants()` returns catches it, since a column grant fails on a column that does not exist.
 - Sequences that inserted rows take defaults from, which the grants do not cover.
   The grants also cannot express a filter, so they let the role read and write every row.
 - A compromised database, application, or Python process.

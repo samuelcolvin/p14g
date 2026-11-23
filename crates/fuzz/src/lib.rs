@@ -3,7 +3,7 @@
 //! Whatever the input, `Policy::rewrite` must not panic. When it accepts a statement:
 //!
 //! * Postgres's own parser (`libpg_query`) must parse the output as one `SELECT`, `INSERT`, `UPDATE` or `DELETE`
-//!   that calls none of [`ROLE_CHANGING`], directly or as a column reference, and names no `pg_settings`, so it
+//!   that calls none of `ROLE_CHANGING`, directly or as a column reference, and names no `pg_settings`, so it
 //!   cannot change the role it runs as. Nothing matters more than this;
 //! * that statement must only name tables and functions the policy allows;
 //! * p14g reading its own output back must produce the same SQL again;
@@ -187,9 +187,9 @@ fn changes_role(name: &str) -> bool {
     name.rsplit('.').next().is_some_and(|name| ROLE_CHANGING.contains(&name))
 }
 
-/// Every column reference in `parsed`, by its last name: Postgres's functional notation reads `t.name` as the call
-/// `name(t)` when `t`
-/// has no column `name`. `tests/common/mod.rs` has the same function.
+/// Every qualified column reference in `parsed`, by its last name: Postgres's functional notation reads `t.name`
+/// as the call `name(t)` when `t` has no column `name`. A bare `name` is never read as a call, and can be an output
+/// alias, as in `ORDER BY name`. `tests/common/mod.rs` has the same function.
 fn column_names(parsed: &ParseResult) -> Vec<String> {
     fn walk(value: &Value, names: &mut Vec<String>) {
         match value {
@@ -197,6 +197,7 @@ fn column_names(parsed: &ParseResult) -> Vec<String> {
                 if let Some(column) = map.get("ColumnRef")
                     && let Some(name) = column["fields"]
                         .as_array()
+                        .filter(|fields| fields.len() > 1)
                         .and_then(|fields| fields.last())
                         .and_then(|field| field.pointer("/node/String/sval"))
                         .and_then(Value::as_str)

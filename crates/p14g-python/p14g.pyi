@@ -63,7 +63,7 @@ class Select(Generic[_C]):
     `ORDER BY`, or in the `WHERE` of an `UPDATE`.
 
     For security reasons, all column names allowed need to be listed: there is no rule that allows every column,
-    and `'*'` in the list is an error. Postgres's functional notation reads `t.name` as the function call `name(t)`
+    and `Policy(...)` raises `P14gError` for an empty list or one with `'*'`. Postgres's functional notation reads `t.name` as the function call `name(t)`
     when `t` has no column `name`, so a name p14g cannot be sure is a column could call any function that takes the
     table's row. See "Why every column is listed" in the README.
 
