@@ -19,8 +19,8 @@ The workspace has three crates:
 
 ## The most important restriction: the role cannot change
 
-Nothing p14g accepts may change, reset or get around the role its output runs as, whatever the policy says and in
-every dialect.
+Nothing p14g accepts may change, reset or get around the role its output runs as, in every dialect, under any policy
+whose added functions, filters and rules cannot change it.
 The caller's grants and row-level security belong to that role, so a statement that leaves it bypasses everything else.
 Treat any way round this as the most serious bug p14g can have, and never add syntax, a default function or a policy
 option that weakens it.
@@ -31,26 +31,30 @@ What enforces it:
   statement. That leaves out `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET` (such as
   `search_path` and `row_security`), `GRANT`, `ALTER ROLE`, `DO`, `CALL`, `EXECUTE`, and transaction control:
   `COMMIT`, `ROLLBACK` and `ROLLBACK TO SAVEPOINT` undo a `SET LOCAL ROLE` the caller ran.
-- `functions::FORBIDDEN` lists the functions that can change the role: `set_config`, which sets `role` and
-  `session_authorization`, and the built-ins that run SQL given as text (`query_to_xml`, `ts_stat` and others).
-  None is a default. `PolicyBuilder::build` refuses them in `functions` in any schema, and lowering refuses them in a
-  rule's `filter`, which is otherwise trusted.
-- `PolicyBuilder::build` refuses an `Update` rule for `pg_settings`, whose `UPDATE` rule calls `set_config`.
-  Postgres does not list `role` in `pg_settings`, but `search_path` and `row_security` are there.
-- A default function must not run SQL, change a setting, or be `SECURITY DEFINER`. A built-in found to do one of
-  these belongs in `FORBIDDEN`.
+- Every `Select` rule lists its columns, and p14g writes only listed names after a table. Postgres's functional notation
+  reads `t.name` as the call `name(t)` when `t` has no column `name`, for any function on the `search_path` that takes
+  the row, so a rule that allowed every column would let a statement call such functions. Never add a way to allow every
+  column.
+- Functions are an allowlist only. A default function must not run SQL, change a setting, or be `SECURITY DEFINER`.
+  p14g deliberately has no blocklist, since one would read as complete: `DANGEROUS_FUNCTIONS.md` lists some known
+  dangerous functions, says it is not exhaustive, and is where a newly found one goes.
+- A function a policy adds, or a filter calls, is the policy author's responsibility. `set_config` sets `role`, and the
+  built-ins that run SQL given as text (`query_to_xml`, `ts_stat` and others) can call it; the docs on `functions`
+  and `filter` warn about them.
 
 What tests it:
 
 - `tests/cases/role.sql` lists the ways in, each with the error kind the test policy gives. `tests/role.rs` checks
   each is rejected, and in every dialect is either rejected or accepted only as a statement that cannot change the role.
 - `common::assert_cannot_change_role` checks with libpg_query that output is one of the four statements with no
-  call to a `FORBIDDEN` function and no `pg_settings`. `tests/pg_query.rs` calls it on every accepted case.
+  call to a function in the test-only `common::ROLE_CHANGING`, no column reference of such a name, and no
+  `pg_settings`. `tests/pg_query.rs` calls it on every accepted case.
   It finds calls with `common::called_functions`, which walks the whole tree: pg_query's own `functions()` misses
   calls in `VALUES`, `RETURNING`, `FILTER`, `OVER`, `LIMIT` and elsewhere, so do not use it.
 - `run` in `tests/postgres.rs` compares `current_user`, `session_user`, `role`, `search_path`, `row_security`,
   `session_replication_role` and `transaction_read_only` before and after every statement.
-  `role_changes_are_caught` checks that comparison does fail.
+  `role_changes_are_caught` checks that comparison does fail. `cases/schema.sql` defines `reset_role(t)` for several
+  tables, which an output naming `t.reset_role` would call.
 - The fuzzers make the libpg_query check on every output, and with a database check the session's role and settings
   after each `EXPLAIN`. `FRAGMENTS` in `crates/fuzz/src/lib.rs` has role-changing statements and calls.
 
@@ -120,10 +124,11 @@ If a fix needs the same check in both lowering and the writer, change the type.
 
 ### The check (`check.rs`)
 
-p14g has no schema, so the policy is the schema: a table has the columns its rules list, or an unknown set when a rule
-allows all of them.
+p14g has no schema, so the policy is the schema: a table has the columns its rules list.
 Scopes, CTEs, derived tables and correlated subqueries are resolved here, and every use of a column is recorded
 against a table instance.
+A column bound to an enclosing query is written `alias.name`, so a subquery may not hide that alias with one of its
+own tables: Postgres would resolve the name to the inner table.
 Operators are not: `Policy.operators` is one set for the whole statement, because a set per table would have to follow
 each column through every subquery and CTE.
 Several rules for one table are alternatives; one rule must cover everything an instance uses.

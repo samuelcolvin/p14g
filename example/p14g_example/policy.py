@@ -37,7 +37,7 @@ def set_org(org_id: str) -> dict[str, str]:
 
 policy = Policy(
     # reference data, every row
-    Select('countries'),
+    Select('countries', columns=['code', 'name']),
     # Anne's own organisation, without `plan` or `stripe_customer_id`
     Select('organisations', columns=['id', 'name'], filter=own_org),
     # people in Anne's organisation, never `password_hash`

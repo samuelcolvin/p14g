@@ -9,7 +9,7 @@ mod common;
 use std::panic;
 
 use common::{assert_cannot_change_role, builder, policy, role_cases};
-use p14g::{Dialect, Filter, Literals, Policy, Select, Update, functions};
+use p14g::{Dialect, Insert, Literals, Policy, Select, Update, functions};
 
 #[test]
 fn role_cases_are_rejected() {
@@ -62,75 +62,68 @@ fn role_cases_are_rejected_in_every_dialect() {
     assert!(accepted.len() <= 3, "{}", accepted.join("\n"));
 }
 
-/// A policy cannot allow a function that can change the role, in any schema or in a filter, or an `UPDATE` of
-/// `pg_settings`, which calls `set_config`.
+/// Postgres's functional notation reads `t.name` as the call `name(t)` when `t` has no column `name`, so p14g only
+/// writes names a rule lists, and a select rule has to list its columns.
 #[test]
-fn policy_cannot_allow_changing_the_role() {
-    for name in functions::FORBIDDEN {
-        for function in [
-            (*name).to_owned(),
-            format!("pg_catalog.{name}"),
-            format!("public.{name}"),
-        ] {
-            let error = Policy::<()>::builder()
-                .functions([function.as_str()])
-                .build()
-                .err()
-                .unwrap_or_else(|| panic!("{function} was allowed"));
-            assert!(error.message().contains("change the role"), "{function}: {error}");
-        }
-    }
+fn select_rules_list_their_columns() {
     let error = Policy::<()>::builder()
-        .default_functions(false)
-        .functions(["set_config"])
+        .select(Select::table("orders", Vec::<String>::new()))
         .build()
         .err()
         .unwrap();
-    assert!(error.message().contains("set_config"), "{error}");
-
-    for table in ["pg_settings", "pg_catalog.pg_settings"] {
+    assert!(error.message().contains("lists no columns"), "{error}");
+    for columns in [vec!["*"], vec!["id", " * "]] {
         let error = Policy::<()>::builder()
-            .update(Update::table(table).columns(["setting"]))
+            .select(Select::table("orders", columns))
             .build()
             .err()
             .unwrap();
-        assert!(error.message().contains("pg_settings"), "{table}: {error}");
+        assert_eq!(
+            error.message(),
+            "the select rule for table \"orders\" lists \"*\": for security reasons a select rule must list each column \
+             it allows by name, see \"Why every column is listed\" in the README"
+        );
     }
-    // a table of that name in another schema is another table
-    Policy::<()>::builder()
-        .update(Update::table("app.pg_settings").columns(["setting"]))
+    let error = Policy::<()>::builder()
+        .update(Update::table("orders").columns(["*"]))
         .build()
+        .err()
         .unwrap();
-    Policy::<()>::builder()
-        .default_schema("app")
-        .update(Update::table("pg_settings").columns(["setting"]))
-        .build()
-        .unwrap();
-}
-
-/// A filter is trusted, but it cannot change the role either.
-#[test]
-fn filter_cannot_change_the_role() {
-    for condition in [
-        "set_config('role', 'none', false) is not null",
-        "pg_catalog.set_config('role', 'none', false) is not null",
-        "org = 1 and query_to_xml('select 1', true, true, '') is not null",
-        "length(ts_stat('select 1')::text) > 0",
-    ] {
-        let policy: Policy = Policy::builder()
-            .select(
-                Select::table("orders")
-                    .columns(["id"])
-                    .filter(move |()| Filter::new(condition)),
-            )
+    assert_eq!(
+        error.message(),
+        "the rule for table \"orders\" lists \"*\": leave out `columns` to allow every column"
+    );
+    assert!(
+        Policy::<()>::builder()
+            .insert(Insert::table("orders").columns(["*"]))
             .build()
-            .unwrap();
-        let error = policy.rewrite("select id from orders", &()).unwrap_err();
-        assert!(error.message().contains("change the role"), "{condition}: {error}");
+            .is_err()
+    );
+
+    let policy = policy();
+    for sql in [
+        "select reset_role from orders",
+        "select o.reset_role from orders o",
+        "select v.row_to_json from v",
+        "select id from v order by v.to_jsonb",
+        "select count(*) from customers group by customers.reset_role",
+    ] {
+        let error = policy.rewrite(sql, &()).unwrap_err();
+        assert!(error.message().contains("not allowed"), "{sql}: {error}");
     }
 }
 
-/// `called_functions` finds a call wherever it is, including the places `ParseResult::functions()` misses.
+/// None of the default functions is one the tests know can change the role. This only compares names with the
+/// non-exhaustive `common::ROLE_CHANGING`: what keeps a dangerous function out of the defaults is the rule in
+/// `functions.rs` and review, and `tests/postgres.rs` checks the role after every accepted statement it runs. p14g does not refuse any function a policy adds, see `DANGEROUS_FUNCTIONS.md`.
+#[test]
+fn no_default_function_changes_the_role() {
+    for name in functions::defaults() {
+        assert!(!common::changes_role(name), "{name} is a default");
+    }
+}
+
+/// `assert_cannot_change_role` finds a call wherever it is, including the places `ParseResult::functions()` misses.
 #[test]
 fn every_call_is_seen() {
     for sql in [
@@ -151,6 +144,9 @@ fn every_call_is_seen() {
         "SELECT \"pg_catalog\".\"set_config\"('role', 'none', false)",
         "SELECT query_to_xml('select 1', true, true, '')",
         "SELECT * FROM public.dblink('', 'select 1') AS d (x int)",
+        // functional notation: a column reference Postgres reads as a call when the table has no such column
+        "SELECT t.reset_role FROM t",
+        "SELECT a FROM t ORDER BY t.reset_role",
     ] {
         let caught = panic::catch_unwind(|| assert_cannot_change_role(sql, "test"));
         assert!(caught.is_err(), "not caught: {sql}");

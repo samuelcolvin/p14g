@@ -16,7 +16,7 @@ select name, count(*) as n from orders join customers on customers.id = customer
 => SELECT customers.name, count(*) AS n FROM orders INNER JOIN customers ON customers.id = orders.customer_id GROUP BY customers.name HAVING count(*) > 1 ORDER BY n DESC
 
 select * from v
-=> SELECT v.* FROM v
+=> SELECT v.id, v.product, v.qty, v.created, v.data, v.tags, v."a""b", v."MiXed" FROM v
 
 select v.id, lower(v.product) lp from v where qty is not null
 => SELECT v.id, lower(v.product) AS lp FROM v WHERE v.qty IS NOT NULL
@@ -182,7 +182,7 @@ select string_agg(product, ',' order by product desc) from orders
 => SELECT string_agg(orders.product, ',' ORDER BY orders.product DESC) FROM orders
 
 select date_trunc('day', created) as created, count(*) from v group by created order by created
-=> SELECT date_trunc('day', v.created) AS created, count(*) FROM v GROUP BY created ORDER BY created
+=> SELECT date_trunc('day', v.created) AS created, count(*) FROM v GROUP BY v.created ORDER BY created
 
 select customer_id, count(*) from orders group by 1 order by 2 desc, 1
 => SELECT orders.customer_id, count(*) FROM orders GROUP BY 1 ORDER BY 2 DESC, 1
@@ -268,7 +268,7 @@ insert into cheap_orders (product, qty) values ('gum', 1)
 => INSERT INTO cheap_orders (product, qty) VALUES ('gum', 1)
 
 update cheap_orders set qty = 3 where product = 'tea' returning *
-=> UPDATE cheap_orders SET qty = 3 WHERE cheap_orders.product = 'tea' RETURNING cheap_orders.*
+=> UPDATE cheap_orders SET qty = 3 WHERE cheap_orders.product = 'tea' RETURNING cheap_orders.id, cheap_orders.product, cheap_orders.qty
 
 delete from cheap_orders where qty = 0
 => DELETE FROM cheap_orders WHERE cheap_orders.qty = 0
@@ -328,3 +328,11 @@ select array_length(tags, 1), cardinality(tags), array_position(tags, 'a'), gen_
 
 select pg_catalog.lower(product), PG_CATALOG.COUNT(*) over () from orders
 => SELECT lower(orders.product), count(*) OVER () FROM orders
+
+-- a subquery may reuse an outer alias for its own table while it reads only that table's columns
+select id from customers where exists (select 1 from orders as customers where qty > 1)
+=> SELECT customers.id FROM customers WHERE EXISTS (SELECT 1 FROM orders AS customers WHERE customers.qty > 1)
+
+-- an output alias that is also the name of a function on the row: a bare name is never read as a call
+select id as reset_role from orders order by reset_role
+=> SELECT orders.id AS reset_role FROM orders ORDER BY reset_role

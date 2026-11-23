@@ -159,13 +159,9 @@ impl FromIterator<Op> for OpSet {
 pub enum Star {
     /// Any `*` is an error.
     Reject,
-    /// Replace `*` with the columns the matching rule allows. For a rule that allows every column it
-    /// becomes `"t".*`.
+    /// Replace `*` with the columns the matching rule lists.
     #[default]
     Expand,
-    /// Leave `*` as it is, and reject it when a table it covers has a rule with a column list, because the
-    /// database would return columns the rule does not grant.
-    Allow,
 }
 
 impl Star {
@@ -173,7 +169,6 @@ impl Star {
         match s.to_ascii_lowercase().as_str() {
             "reject" => Ok(Self::Reject),
             "expand" => Ok(Self::Expand),
-            "allow" => Ok(Self::Allow),
             _ => Err(Error::config(format!("unknown star behaviour {s:?}"))),
         }
     }
@@ -238,33 +233,32 @@ impl Default for Limits {
     }
 }
 
-/// Allows reading from a table or view.
+/// Allows reading the listed columns of a table or view.
 ///
 /// Reads include every mention of a column, wherever it appears: a column used in a `WHERE` or
 /// `ORDER BY`, or in the `WHERE` of an `UPDATE`, has been read just as much as one in the select list.
 pub struct Select<C = ()> {
     table: String,
-    columns: Option<Vec<String>>,
+    columns: Vec<String>,
     only: bool,
     filter: Option<Box<FilterFn<C>>>,
 }
 
 impl<C> Select<C> {
-    /// `table` is `name` or `schema.name`, spelled exactly as Postgres stores it.
-    pub fn table(table: impl Into<String>) -> Self {
+    /// `table` is `name` or `schema.name`, spelled exactly as Postgres stores it, and `columns` are the columns
+    /// a statement may read.
+    ///
+    /// For security reasons, all column names allowed need to be listed: there is no rule that allows every
+    /// column, and [`PolicyBuilder::build`] refuses `"*"` in the list. Postgres's functional notation reads `t.name`
+    /// as the function call `name(t)` when `t` has no column `name`, so a name p14g cannot be sure is a column could
+    /// call any function that takes the table's row. See "Why every column is listed" in the README.
+    pub fn table<S: Into<String>>(table: impl Into<String>, columns: impl IntoIterator<Item = S>) -> Self {
         Self {
             table: table.into(),
-            columns: None,
+            columns: columns.into_iter().map(Into::into).collect(),
             only: false,
             filter: None,
         }
-    }
-
-    /// Restrict the rule to these columns. Without this, every column is allowed.
-    #[must_use]
-    pub fn columns<S: Into<String>>(mut self, columns: impl IntoIterator<Item = S>) -> Self {
-        self.columns = Some(columns.into_iter().map(Into::into).collect());
-        self
     }
 
     /// Write the table as `ONLY table`, so that rows of its inheritance children are left out.
@@ -285,7 +279,8 @@ impl<C> Select<C> {
     ///
     /// The table is replaced in the statement by a subquery with the condition as its `WHERE`, so it holds
     /// through joins and subqueries. The condition is p14g's to write: it may use columns and functions
-    /// the rule does not otherwise allow.
+    /// the rule does not otherwise allow. Be as careful with the functions it calls as with those added by
+    /// [`PolicyBuilder::functions`]: p14g does not check them.
     ///
     /// Postgres may evaluate the statement's own conditions on a row before this one, so an error such as
     /// a division by zero can reveal something about rows the filter excludes. Row-level security or a
@@ -576,11 +571,30 @@ impl TableKey {
     }
 }
 
+/// Which kind of rule a column list belongs to, for the error when it contains `*`.
+#[derive(Clone, Copy)]
+enum RuleKind {
+    Select,
+    /// `Insert` and `Update`, where leaving out `columns` allows every column.
+    Write,
+}
+
 /// A column list in the order the rule gave it, which is the order `*` expands to.
-fn parse_columns(columns: Option<Vec<String>>, table: &str) -> Result<Option<Vec<Ident>>> {
-    let Some(columns) = columns else { return Ok(None) };
+fn parse_columns(columns: Vec<String>, table: &str, kind: RuleKind) -> Result<Vec<Ident>> {
     let mut out = Vec::with_capacity(columns.len());
     for column in columns {
+        // a column really called `*` is possible in Postgres, but far likelier to be a mistake
+        if column.trim() == "*" {
+            return Err(Error::config(match kind {
+                RuleKind::Select => format!(
+                    "the select rule for table {table:?} lists \"*\": for security reasons a select rule must list each \
+                     column it allows by name, see \"Why every column is listed\" in the README"
+                ),
+                RuleKind::Write => {
+                    format!("the rule for table {table:?} lists \"*\": leave out `columns` to allow every column")
+                }
+            }));
+        }
         let ident = Ident::new(column.as_str()).map_err(|e| {
             Error::config(format!(
                 "invalid column {column:?} for table {table:?}: {}",
@@ -594,11 +608,11 @@ fn parse_columns(columns: Option<Vec<String>>, table: &str) -> Result<Option<Vec
         }
         out.push(ident);
     }
-    Ok(Some(out))
+    Ok(out)
 }
 
 pub(crate) struct SelectRule<C> {
-    pub columns: Option<Vec<Ident>>,
+    pub columns: Vec<Ident>,
     pub filter: Option<Box<FilterFn<C>>>,
 }
 
@@ -692,10 +706,10 @@ impl<C> PolicyBuilder<C> {
 
     /// Allow more functions, by `name` or `schema.name`, on top of the defaults.
     ///
-    /// The functions in [`functions::FORBIDDEN`](crate::functions::FORBIDDEN), such as `set_config` and
-    /// `query_to_xml`, cannot be allowed: [`build`](Self::build) fails if one is. A function added here runs with
-    /// the privileges of its owner if it is `SECURITY DEFINER`, and can change settings itself, so only add
-    /// functions that do neither.
+    /// Please be extremely careful about adding extra functions here unless you know exactly what they do.
+    /// p14g cannot see inside a function: one that changes a setting, runs SQL given as text, or is
+    /// `SECURITY DEFINER` can change the role the statement runs as or get round the policy.
+    /// `DANGEROUS_FUNCTIONS.md` lists some known dangerous functions; it is not exhaustive.
     #[must_use]
     pub fn functions<S: Into<String>>(mut self, functions: impl IntoIterator<Item = S>) -> Self {
         self.functions.extend(functions.into_iter().map(Into::into));
@@ -830,7 +844,13 @@ impl<C> PolicyBuilder<C> {
         for rule in self.selects {
             let key = table_key(&rule.table)?;
             agree(&key, &rule.table, rule.only)?;
-            let columns = parse_columns(rule.columns, &rule.table)?;
+            if rule.columns.is_empty() {
+                return Err(Error::config(format!(
+                    "the select rule for table {:?} lists no columns",
+                    rule.table
+                )));
+            }
+            let columns = parse_columns(rule.columns, &rule.table, RuleKind::Select)?;
             selects.entry(key).or_default().push(SelectRule {
                 columns,
                 filter: rule.filter,
@@ -839,7 +859,10 @@ impl<C> PolicyBuilder<C> {
         let mut inserts: BTreeMap<TableKey, Vec<InsertRule<C>>> = BTreeMap::new();
         for rule in self.inserts {
             let key = table_key(&rule.table)?;
-            let columns = parse_columns(rule.columns, &rule.table)?;
+            let columns = rule
+                .columns
+                .map(|columns| parse_columns(columns, &rule.table, RuleKind::Write))
+                .transpose()?;
             inserts.entry(key).or_default().push(InsertRule {
                 columns,
                 extra: rule.extra,
@@ -848,15 +871,11 @@ impl<C> PolicyBuilder<C> {
         let mut updates: BTreeMap<TableKey, Vec<UpdateRule<C>>> = BTreeMap::new();
         for rule in self.updates {
             let key = table_key(&rule.table)?;
-            // an update of `pg_catalog.pg_settings` is a call to `set_config`
-            if key.name.as_str() == "pg_settings" && key.schema.as_ref().is_none_or(|s| s.as_str() == "pg_catalog") {
-                return Err(Error::config(format!(
-                    "cannot allow updates to {:?}: updating it changes the session's settings",
-                    rule.table
-                )));
-            }
             agree(&key, &rule.table, rule.only)?;
-            let columns = parse_columns(rule.columns, &rule.table)?;
+            let columns = rule
+                .columns
+                .map(|columns| parse_columns(columns, &rule.table, RuleKind::Write))
+                .transpose()?;
             updates.entry(key).or_default().push(UpdateRule {
                 columns,
                 allow_unfiltered: rule.allow_unfiltered,
@@ -888,14 +907,7 @@ impl<C> PolicyBuilder<C> {
             allowed.extend(functions::defaults().map(str::to_owned));
         }
         for function in self.functions {
-            let key = function_key(&function)?;
-            // nothing p14g accepts may change the role, see `functions::FORBIDDEN`
-            if key.rsplit('.').next().is_some_and(functions::is_forbidden) {
-                return Err(Error::config(format!(
-                    "cannot allow function {function:?}: it can change the role the statement runs as"
-                )));
-            }
-            allowed.insert(key);
+            allowed.insert(function_key(&function)?);
         }
         for function in self.deny_functions {
             let key = function_key(&function)?;
@@ -1063,7 +1075,7 @@ impl<C> Policy<C> {
         for (key, rules) in &self.selects {
             for rule in rules {
                 let columns = &mut tables.entry(key).or_default()[0];
-                columns.add(rule.columns.as_deref());
+                columns.add(Some(&rule.columns));
                 columns.add(Some(&filter_columns(key, rule.filter.as_deref())?));
             }
         }

@@ -48,26 +48,33 @@ The README's [Security considerations](README.md#security-considerations) has th
   create objects in a schema on the `search_path`.
 - Use a UTF-8 `client_encoding`, or `literals='params'`.
 - Show Postgres's error messages to the SQL author only if you are content for them to read what the messages say.
-- Use Postgres 18, the version p14g's keyword list and tests are for.
+- Use a current 18.x minor release of Postgres, the version p14g's keyword list and tests are for.
   A later version can add keywords, which p14g would write as bare names.
 
 ## What p14g guarantees
 
 For any statement `rewrite()` accepts, in a deployment that does the above:
 
-- It cannot change, reset or get around the role it runs as, whatever the policy says.
+- It cannot change, reset or get around the role it runs as, under any policy whose added functions, filters and
+  rules cannot change it (an `Update` rule for `pg_settings` can, below).
   This is the guarantee the rest depend on, since the grants and row-level security belong to that role.
   `SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET`, `DISCARD`, every other `SET`, and `COMMIT`, `ROLLBACK` and
   `ROLLBACK TO SAVEPOINT`, which undo a `SET LOCAL ROLE`, are all statements other than the four below.
-  A policy cannot add `set_config`, or a built-in function that runs SQL given as text such as `query_to_xml`, even in
-  a filter, and cannot have an `UPDATE` rule for `pg_settings`, which calls `set_config`.
+  No default function can change it.
+  p14g writes after a table only column names that table's `Select` rule lists.
+  Postgres's functional notation reads `t.name` as the call `name(t)` when `t` has no column `name`, for any function
+  on the `search_path` that takes the row, and no spelling avoids it: quoting, `(t).name` and `(t.*).name` all call it.
+  A subquery may not give one of its tables the alias of a table in an enclosing query whose column it uses, since
+  Postgres would resolve `alias.name` to the inner table.
+  p14g does not refuse any function a policy adds or a filter calls, or an `UPDATE` rule for `pg_settings`.
+  `set_config`, the built-ins that run SQL given as text such as `query_to_xml`, and updates of `pg_settings` can all
+  change it; [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) has more, and is not exhaustive.
 - The output is one `SELECT`, `INSERT`, `UPDATE` or `DELETE`, and Postgres parses it as the statement p14g checked.
   No text from the input reaches the output: names are validated and quoted, literals are escaped, and everything else
   is written from a fixed set of tokens.
 - It reads only tables and columns a `Select` rule allows, with one rule covering every column used on each table.
   Whole-row references such as `row_to_json(t)` are refused.
-  System columns such as `ctid` and `xmin` are refused on a table whose rule lists its columns.
-  A rule that allows every column also allows them, as a table-level `SELECT` grant does in Postgres.
+  Every `Select` rule lists its columns; system columns such as `ctid` and `xmin` are refused unless one lists them.
 - It writes only the columns an `Insert` or `Update` rule lists, plus the columns `extra` sets.
 - It calls only the functions the policy allows and uses only the operators it allows, and casts only to p14g's fixed
   list of types.
@@ -105,8 +112,11 @@ The README's [Rows](README.md#rows) section has more on filters.
   How long a statement takes can depend on rows the author cannot read.
 - Mistakes in the policy: a column or table allowed that should not be, an added function with side effects, an
   `Insert` on a filtered table with no `extra` for the filter's column.
-  An added function of your own that is `SECURITY DEFINER` runs as its owner, and one that calls `set_config` or runs
-  SQL can change the role.
+  An added function, or one a filter calls, that is `SECURITY DEFINER` runs as its owner, and one that calls
+  `set_config` or runs SQL can change the role; [DANGEROUS_FUNCTIONS.md](DANGEROUS_FUNCTIONS.md) has some known
+  examples, and is not exhaustive.
+  A name a `Select` rule lists that is not a column of the table is read by Postgres, through functional notation, as
+  a call to a function of that name; running the statements `policy.grants()` returns catches it, since a column grant fails on a column that does not exist.
 - Sequences that inserted rows take defaults from, which the grants do not cover.
   The grants also cannot express a filter, so they let the role read and write every row.
 - A compromised database, application, or Python process.
@@ -120,7 +130,7 @@ not.
 These are vulnerabilities:
 
 - Output that changes the role, the session user, or a setting such as `search_path` or `row_security`, under any
-  policy that does not add a function that does so.
+  policy that does not add or call in a filter a function that does so.
 - Output that runs and does something the policy does not allow: reads a table or column no rule allows,
   writes a column no rule lists, calls a function the policy does not allow, or uses a table without its filter.
 - With a filter and row-level security on the same condition, a way to read or learn about rows both exclude.
@@ -144,8 +154,8 @@ These are bugs, to report as ordinary issues:
 
 These are not failures:
 
-- Postgres refusing output for a reason p14g cannot know without the schema: a type mismatch, a column that does not
-  exist on a table whose rule allows every column, an aggregate in `WHERE`, the wrong number of arguments to a function.
+- Postgres refusing output for a reason p14g cannot know without the schema: a type mismatch, an aggregate in
+  `WHERE`, the wrong number of arguments to a function.
 - Errors from the data: division by zero, a failed cast, a constraint violation.
 - A statement that is slow.
 
@@ -165,6 +175,8 @@ Include the policy, the input SQL, the output, and what the output did when you 
 - `tests/postgres.rs` runs every accepted statement against Postgres 18 as a role whose grants match the test policy.
   A permission or syntax error fails the test, and so does a change to the role or to `search_path`, `row_security`
   or `session_replication_role`.
+  The test schema has a function `reset_role(t)` for several tables, which an output naming `t.reset_role` would call
+  through functional notation.
   It also checks the keyword list against the server and that filters hold through joins, subqueries and writes.
 - `tests/pg_query.rs` parses the output with libpg_query, Postgres's own parser, and checks it is one `SELECT`,
   `INSERT`, `UPDATE` or `DELETE` with no call to a function that can change the role.

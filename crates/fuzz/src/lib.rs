@@ -3,8 +3,8 @@
 //! Whatever the input, `Policy::rewrite` must not panic. When it accepts a statement:
 //!
 //! * Postgres's own parser (`libpg_query`) must parse the output as one `SELECT`, `INSERT`, `UPDATE` or `DELETE`
-//!   that calls no `set_config` and updates no `pg_settings`, so it cannot change the role it runs as. Nothing
-//!   matters more than this;
+//!   that calls none of `ROLE_CHANGING`, directly or as a column reference, and names no `pg_settings`, so it
+//!   cannot change the role it runs as. Nothing matters more than this;
 //! * that statement must only name tables and functions the policy allows;
 //! * p14g reading its own output back must produce the same SQL again;
 //! * if `P14G_TEST_DATABASE_URL` is set, Postgres itself must be willing to plan the output for a role
@@ -26,23 +26,21 @@ use pg_query::{NodeEnum, ParseResult};
 use postgres::{Client, Config, NoTls, SimpleQueryMessage, error::SqlState};
 use serde_json::Value;
 
-/// The same shape of policy as the test suite: column lists, an all-columns view, a schema-qualified
-/// table, and writes.
+/// The same shape of policy as the test suite: column lists, a view, a schema-qualified table, and writes.
 fn builder() -> PolicyBuilder {
     Policy::builder()
-        .select(Select::table("orders").columns(["id", "product", "qty", "customer_id"]))
-        .select(Select::table("customers").columns(["id", "name"]))
-        .select(Select::table("v"))
-        .select(Select::table("app.events").columns(["id", "kind"]))
-        .select(Select::table("limited").columns(["a", "b"]))
+        .select(Select::table("orders", ["id", "product", "qty", "customer_id"]))
+        .select(Select::table("customers", ["id", "name"]))
+        .select(Select::table("v", ["id", "product", "qty", "created", "data"]))
+        .select(Select::table("app.events", ["id", "kind"]))
+        .select(Select::table("limited", ["a", "b"]))
         .insert(Insert::table("orders").columns(["product", "qty"]))
         .insert(Insert::table("audit").columns(["message"]))
         .update(Update::table("orders").columns(["qty"]))
         .delete(Delete::table("orders"))
         // a table whose rules have a filter, reading a column the statement may not
         .select(
-            Select::table("scoped")
-                .columns(["id", "val"])
+            Select::table("scoped", ["id", "val"])
                 .filter(|()| scoped_filter()),
         )
         .update(Update::table("scoped").columns(["val"]).filter(|()| scoped_filter()))
@@ -76,6 +74,10 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS audit (id int, message text, tenant_id int);
     CREATE TABLE IF NOT EXISTS secrets (id int, password text);
     CREATE TABLE IF NOT EXISTS scoped (id int, val text, org int, kind text, hidden text);
+    CREATE OR REPLACE FUNCTION reset_role(orders) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+    CREATE OR REPLACE FUNCTION reset_role(customers) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+    CREATE OR REPLACE FUNCTION reset_role(v) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
+    CREATE OR REPLACE FUNCTION reset_role(scoped) RETURNS text LANGUAGE sql AS $$ SELECT set_config('role', 'none', false) $$;
     DO $$ BEGIN CREATE ROLE p14g_fuzz_role; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ";
 
@@ -161,6 +163,60 @@ fn explain(input: &str, output: &str) {
     panic!("{problem}: {}\n input: {input}\noutput: {output}", db_error.message());
 }
 
+/// Functions the output check looks for: each can change the role a statement runs as, by setting `role` or by
+/// running SQL given as text. `reset_role` is the function [`SCHEMA`] defines for several tables' rows, which
+/// Postgres would call for a column reference `t.reset_role`.
+///
+/// Not exhaustive: `DANGEROUS_FUNCTIONS.md` has more, and p14g refuses every function its policy does not allow,
+/// rather than these. `tests/common/mod.rs` has the same list.
+const ROLE_CHANGING: &[&str] = &[
+    "set_config",
+    "query_to_xml",
+    "query_to_xml_and_xmlschema",
+    "ts_stat",
+    "ts_rewrite",
+    "dblink",
+    "dblink_exec",
+    "dblink_open",
+    "dblink_send_query",
+    "reset_role",
+];
+
+/// Whether the last part of `name` is in [`ROLE_CHANGING`].
+fn changes_role(name: &str) -> bool {
+    name.rsplit('.').next().is_some_and(|name| ROLE_CHANGING.contains(&name))
+}
+
+/// Every qualified column reference in `parsed`, by its last name: Postgres's functional notation reads `t.name`
+/// as the call `name(t)` when `t` has no column `name`. A bare `name` is never read as a call, and can be an output
+/// alias, as in `ORDER BY name`. `tests/common/mod.rs` has the same function.
+fn column_names(parsed: &ParseResult) -> Vec<String> {
+    fn walk(value: &Value, names: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(column) = map.get("ColumnRef")
+                    && let Some(name) = column["fields"]
+                        .as_array()
+                        .filter(|fields| fields.len() > 1)
+                        .and_then(|fields| fields.last())
+                        .and_then(|field| field.pointer("/node/String/sval"))
+                        .and_then(Value::as_str)
+                {
+                    names.push(name.to_owned());
+                }
+                map.values().for_each(|value| walk(value, names));
+            }
+            Value::Array(values) => values.iter().for_each(|value| walk(value, names)),
+            _ => {}
+        }
+    }
+
+    let tree = serde_json::to_value(&parsed.protobuf).expect("a parse tree serializes");
+    let mut names = Vec::new();
+    walk(&tree, &mut names);
+    names
+}
+
 /// Every function call in `parsed`, as `schema.name` or `name`, wherever it is in the statement.
 ///
 /// `ParseResult::functions()` and `nodes()` miss calls in `VALUES`, `RETURNING`, `FILTER`, `OVER`, `LIMIT`,
@@ -190,8 +246,8 @@ fn called_functions(parsed: &ParseResult) -> Vec<String> {
     calls
 }
 
-/// Panic unless `parsed` is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls none of
-/// [`functions::FORBIDDEN`] and names no `pg_settings`, whose `UPDATE` rule calls `set_config`.
+/// Panic unless `parsed` is one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls none of [`ROLE_CHANGING`],
+/// directly or as a column reference, and names no `pg_settings`, whose `UPDATE` rule calls `set_config`.
 ///
 /// Every other kind of statement is a utility statement or `MERGE`, and Postgres's grammar has no way to put one
 /// inside these four. `tests/common/mod.rs` makes the same check on the test cases.
@@ -211,8 +267,14 @@ fn assert_cannot_change_role(parsed: &ParseResult, input: &str, output: &str) {
     );
     for function in called_functions(parsed) {
         assert!(
-            !function.rsplit('.').next().is_some_and(functions::is_forbidden),
+            !changes_role(&function),
             "calls {function}\n input: {input}\noutput: {output}"
+        );
+    }
+    for column in column_names(parsed) {
+        assert!(
+            !changes_role(&column),
+            "reads {column}, which can be a call\n input: {input}\noutput: {output}"
         );
     }
     for table in parsed.tables() {
@@ -347,6 +409,16 @@ pub const FRAGMENTS: &[&str] = &[
     " ts_stat('select 1') ",
     " dblink_exec('','reset role') ",
     " \"set_config\"(",
+    // functional notation: a column reference Postgres reads as a call when the table has no column of that name
+    " reset_role ",
+    " v.reset_role ",
+    " orders.reset_role ",
+    " .reset_role ",
+    " v.row_to_json ",
+    " .to_jsonb ",
+    // a subquery alias that hides the outer table, so an outer column would resolve to the inner one
+    " (select name from orders as customers) ",
+    " exists (select 1 from customers as orders where product = 'x') ",
     " pg_settings ",
     " pg_catalog.pg_settings ",
     "; reset role",

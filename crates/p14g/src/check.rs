@@ -1,9 +1,9 @@
 //! Resolve every column to the table it belongs to and check the statement against the policy.
 //!
 //! p14g never sees the database, so the policy doubles as the schema: a table has the columns its rules
-//! list, or an unknown set of columns when a rule allows all of them. Every column reference is bound to
-//! one table instance here and written fully qualified, so if Postgres would have resolved a name
-//! differently the query fails in the database instead of reading something that was not checked.
+//! list. Every column reference is bound to one table instance here and written fully qualified, so if
+//! Postgres would have resolved a name differently the query fails in the database instead of reading
+//! something that was not checked.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -83,8 +83,6 @@ enum InstanceKind<'p, C> {
     },
     Derived {
         columns: Vec<Ident>,
-        /// The subquery has a `*` that was left unexpanded, so it has columns p14g does not know about.
-        open: bool,
     },
 }
 
@@ -92,18 +90,8 @@ impl<C> Instance<'_, C> {
     /// Whether the instance is known to have this column.
     fn lists(&self, column: &Ident) -> bool {
         match &self.kind {
-            InstanceKind::Base { rules, .. } => rules
-                .iter()
-                .any(|rule| rule.columns.as_ref().is_some_and(|columns| columns.contains(column))),
-            InstanceKind::Derived { columns, .. } => columns.contains(column),
-        }
-    }
-
-    /// Whether the instance may have columns p14g does not know about.
-    fn open(&self) -> bool {
-        match &self.kind {
-            InstanceKind::Base { rules, .. } => rules.iter().any(|rule| rule.columns.is_none()),
-            InstanceKind::Derived { open, .. } => *open,
+            InstanceKind::Base { rules, .. } => rules.iter().any(|rule| rule.columns.contains(column)),
+            InstanceKind::Derived { columns } => columns.contains(column),
         }
     }
 }
@@ -118,8 +106,6 @@ struct Scope {
 struct Outputs {
     /// One per output column, `None` where the column has no usable name.
     names: Vec<Option<Ident>>,
-    /// The query has an unexpanded `*`, so there are more columns than `names`.
-    open: bool,
 }
 
 impl Outputs {
@@ -134,7 +120,7 @@ struct Checker<'p, C> {
     context: &'p C,
     scopes: Vec<Scope>,
     /// CTEs in scope, innermost `WITH` last.
-    ctes: Vec<BTreeMap<Ident, (Vec<Ident>, bool)>>,
+    ctes: Vec<BTreeMap<Ident, Vec<Ident>>>,
     tables: BTreeSet<String>,
 }
 
@@ -159,10 +145,7 @@ impl<'p, C> Checker<'p, C> {
         for cte in &mut query.with {
             let outputs = self.query(&mut cte.query, true)?;
             let frame = self.ctes.last_mut().expect("query pushed a CTE frame");
-            if frame
-                .insert(cte.name.clone(), (outputs.named(), outputs.open))
-                .is_some()
-            {
+            if frame.insert(cte.name.clone(), outputs.named()).is_some() {
                 return Err(Error::denied(format!("CTE name {:?} is used more than once", cte.name)));
             }
         }
@@ -208,7 +191,7 @@ impl<'p, C> Checker<'p, C> {
                 {
                     item.key = KeyExpr::Output(name.clone());
                 }
-                KeyExpr::Expr(Expr::Literal(Literal::Number(number))) if !outputs.open => {
+                KeyExpr::Expr(Expr::Literal(Literal::Number(number))) => {
                     item.key = KeyExpr::Position(ordinal(number, outputs.names.len())?);
                 }
                 _ => {
@@ -336,20 +319,18 @@ impl<'p, C> Checker<'p, C> {
             let filter = filter(self.context)?;
             // inside the subquery the table has no alias, its columns go by its own name
             let bound = filter::bind(&filter, &table.name, &table.name, &self.policy.limits)?;
-            // name the columns when the rule does: `*` would need the privilege to read all of them
-            let projection = match &rule.columns {
-                Some(columns) => columns
-                    .iter()
-                    .map(|name| SelectItem::Expr {
-                        expr: Expr::Column(Column {
-                            table: Some(table.name.clone()),
-                            name: name.clone(),
-                        }),
-                        alias: None,
-                    })
-                    .collect(),
-                None => vec![SelectItem::Wildcard],
-            };
+            // name the columns: `*` would need the privilege to read all of them
+            let projection = rule
+                .columns
+                .iter()
+                .map(|name| SelectItem::Expr {
+                    expr: Expr::Column(Column {
+                        table: Some(table.name.clone()),
+                        name: name.clone(),
+                    }),
+                    alias: None,
+                })
+                .collect();
             let alias = table.reference_name().clone();
             let inner = Table {
                 alias: None,
@@ -402,7 +383,7 @@ impl<'p, C> Checker<'p, C> {
     }
 
     /// `GROUP BY name` prefers an input column, and falls back to an output alias. p14g cannot always
-    /// tell which Postgres will pick, so it only accepts the cases where it can, or where both are allowed.
+    /// tell which Postgres will pick, so it only accepts the cases where it can.
     fn group_by(
         &mut self,
         key: &mut KeyExpr,
@@ -430,22 +411,17 @@ impl<'p, C> Checker<'p, C> {
             // a real input column of that name wins in Postgres too
             return self.expr(expr);
         }
-        let any_open = scope.instances.iter().any(|&i| self.instances[i].open());
-        if scope.instances.iter().all(|&i| self.instances[i].open_base_only()) {
-            // Postgres only looks at this query level for an input column of that name, and every
-            // column of every table at this level is allowed, so the bare name is safe either way
-            *key = KeyExpr::Output(name.clone());
-            Ok(())
-        } else if !any_open && !has_wildcard {
-            // no visible table is known to have the column, so it must be the alias: say so by position
-            let position = u32::try_from(index + 1).expect("projection length is limited");
-            *key = KeyExpr::Position(position);
-            Ok(())
-        } else {
-            Err(Error::denied(format!(
+        if has_wildcard {
+            // the position of the alias is not known until `*` is expanded
+            return Err(Error::denied(format!(
                 "GROUP BY {name:?} could be a column or the output alias, repeat the expression instead"
-            )))
+            )));
         }
+        // no rule lists a column of that name, so it is read as the alias. A table may still have an unlisted
+        // column of that name, which Postgres would pick, so say so by position.
+        let position = u32::try_from(index + 1).expect("projection length is limited");
+        *key = KeyExpr::Position(position);
+        Ok(())
     }
 
     /// Finish the innermost scope: choose a rule for each table, then expand `*`.
@@ -466,11 +442,7 @@ impl<'p, C> Checker<'p, C> {
             // a write-only target: any read of it was already refused
             return Ok(());
         }
-        let columns_fit = |rule: &SelectRule<C>| {
-            rule.columns
-                .as_ref()
-                .is_none_or(|columns| instance.used_columns.iter().all(|c| columns.contains(c)))
-        };
+        let columns_fit = |rule: &SelectRule<C>| instance.used_columns.iter().all(|c| rule.columns.contains(c));
         if let Some(rule) = rules.iter().find(|rule| columns_fit(rule)) {
             instance.rule = Some(rule);
             Ok(())
@@ -489,10 +461,7 @@ impl<'p, C> Checker<'p, C> {
 
     /// Apply the star behaviour to a select list or `RETURNING`, and work out the output columns.
     fn expand_projection(&mut self, projection: &mut Vec<SelectItem>, scope_instances: &[usize]) -> Result<Outputs> {
-        let mut outputs = Outputs {
-            names: Vec::new(),
-            open: false,
-        };
+        let mut outputs = Outputs { names: Vec::new() };
         let mut expanded = Vec::with_capacity(projection.len());
         for item in projection.drain(..) {
             let targets: Vec<usize> = match &item {
@@ -521,44 +490,27 @@ impl<'p, C> Checker<'p, C> {
             };
             match self.policy.star {
                 Star::Reject => return Err(Error::denied("* is not allowed, list the columns")),
-                Star::Allow => {
-                    for &index in &targets {
-                        if self.star_columns(index)?.is_some() {
-                            return Err(Error::denied(format!(
-                                "* is not allowed on {:?} because only some of its columns are allowed, list the columns",
-                                self.instances[index].alias
-                            )));
-                        }
-                    }
-                    outputs.open = true;
-                    expanded.push(item);
-                }
                 Star::Expand => {
                     for &index in &targets {
                         let alias = self.instances[index].alias.clone();
-                        if let Some(columns) = self.star_columns(index)? {
-                            for name in columns {
-                                // checked as the list grows: each level of derived tables can multiply the
-                                // columns of the one below, so the expanded list is exponential in the input
-                                if expanded.len() >= self.policy.limits.max_projection {
-                                    return Err(Error::limit(format!(
-                                        "select list has more than {} items once * is expanded",
-                                        self.policy.limits.max_projection
-                                    )));
-                                }
-                                self.instances[index].used_columns.insert(name.clone());
-                                outputs.names.push(Some(name.clone()));
-                                expanded.push(SelectItem::Expr {
-                                    expr: Expr::Column(Column {
-                                        table: Some(alias.clone()),
-                                        name,
-                                    }),
-                                    alias: None,
-                                });
+                        for name in self.star_columns(index)? {
+                            // checked as the list grows: each level of derived tables can multiply the
+                            // columns of the one below, so the expanded list is exponential in the input
+                            if expanded.len() >= self.policy.limits.max_projection {
+                                return Err(Error::limit(format!(
+                                    "select list has more than {} items once * is expanded",
+                                    self.policy.limits.max_projection
+                                )));
                             }
-                        } else {
-                            outputs.open = true;
-                            expanded.push(SelectItem::QualifiedWildcard(alias));
+                            self.instances[index].used_columns.insert(name.clone());
+                            outputs.names.push(Some(name.clone()));
+                            expanded.push(SelectItem::Expr {
+                                expr: Expr::Column(Column {
+                                    table: Some(alias.clone()),
+                                    name,
+                                }),
+                                alias: None,
+                            });
                         }
                     }
                 }
@@ -568,12 +520,11 @@ impl<'p, C> Checker<'p, C> {
         Ok(outputs)
     }
 
-    /// The columns `*` stands for on an instance, or `None` when it has to stay a `*`.
-    fn star_columns(&self, index: usize) -> Result<Option<Vec<Ident>>> {
+    /// The columns `*` stands for on an instance.
+    fn star_columns(&self, index: usize) -> Result<Vec<Ident>> {
         let instance = &self.instances[index];
         match &instance.kind {
-            InstanceKind::Derived { open: true, .. } => Ok(None),
-            InstanceKind::Derived { columns, open: false } => Ok(Some(columns.clone())),
+            InstanceKind::Derived { columns } => Ok(columns.clone()),
             InstanceKind::Base { name, rules } => {
                 if let Some(rule) = instance.rule {
                     Ok(rule.columns.clone())
@@ -612,14 +563,14 @@ impl<'p, C> Checker<'p, C> {
                     None
                 };
                 let alias = table.reference_name().clone();
-                if let Some((columns, open)) = cte {
+                if let Some(columns) = cte {
                     if table.only {
                         return Err(Error::denied(format!(
                             "ONLY cannot be used on the CTE {:?}",
                             table.name
                         )));
                     }
-                    self.add_instance(alias, InstanceKind::Derived { columns, open })?;
+                    self.add_instance(alias, InstanceKind::Derived { columns })?;
                 } else {
                     self.qualify(table);
                     let name = table.qualified_name();
@@ -640,7 +591,6 @@ impl<'p, C> Checker<'p, C> {
                     alias.clone(),
                     InstanceKind::Derived {
                         columns: outputs.named(),
-                        open: outputs.open,
                     },
                 )?;
             }
@@ -662,7 +612,7 @@ impl<'p, C> Checker<'p, C> {
     fn resolve(&self, column: &Column) -> Result<usize> {
         let name = &column.name;
         let mut hidden = false;
-        for scope in self.scopes.iter().rev() {
+        for (depth, scope) in self.scopes.iter().enumerate().rev() {
             if hidden {
                 break;
             }
@@ -672,7 +622,7 @@ impl<'p, C> Checker<'p, C> {
                     continue;
                 };
                 let instance = &self.instances[index];
-                return if instance.lists(name) || instance.open() {
+                return if instance.lists(name) {
                     Ok(index)
                 } else {
                     Err(Error::denied(format!("column {table}.{name} is not allowed")))
@@ -685,26 +635,26 @@ impl<'p, C> Checker<'p, C> {
                 .filter(|&i| self.instances[i].lists(name))
                 .collect();
             match listed.as_slice() {
-                [index] => return Ok(*index),
+                [index] => {
+                    // the name is written `alias.name`, which Postgres resolves to the innermost table called
+                    // `alias`: one in a nested scope would take it, and read a column or call a function that
+                    // no rule of its own lists
+                    let alias = &self.instances[*index].alias;
+                    let shadowed = self.scopes[depth + 1..]
+                        .iter()
+                        .any(|inner| inner.instances.iter().any(|&i| &self.instances[i].alias == alias));
+                    if shadowed {
+                        return Err(Error::denied(format!(
+                            "column {name:?} belongs to the outer {alias:?}, which a table in the subquery \
+                             hides; give one of them another alias"
+                        )));
+                    }
+                    return Ok(*index);
+                }
                 [] => {}
                 _ => {
                     return Err(Error::denied(format!(
                         "column {name:?} is ambiguous, qualify it with a table name"
-                    )));
-                }
-            }
-            let open: Vec<usize> = scope
-                .instances
-                .iter()
-                .copied()
-                .filter(|&i| self.instances[i].open())
-                .collect();
-            match open.as_slice() {
-                [index] => return Ok(*index),
-                [] => {}
-                _ => {
-                    return Err(Error::denied(format!(
-                        "column {name:?} could belong to more than one table, qualify it with a table name"
                     )));
                 }
             }
@@ -1130,16 +1080,6 @@ impl<'p, C> Checker<'p, C> {
             selection.take(),
         );
         Ok(())
-    }
-}
-
-impl<C> Instance<'_, C> {
-    /// A base table every one of whose rules allows all columns.
-    fn open_base_only(&self) -> bool {
-        match &self.kind {
-            InstanceKind::Base { rules, .. } => !rules.is_empty() && rules.iter().all(|rule| rule.columns.is_none()),
-            InstanceKind::Derived { .. } => false,
-        }
     }
 }
 

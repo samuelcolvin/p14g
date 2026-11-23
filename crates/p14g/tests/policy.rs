@@ -24,7 +24,7 @@ fn dense<C>() -> PolicyBuilder<C> {
 }
 
 fn orders() -> Select {
-    Select::table("orders").columns(["id", "product", "qty"])
+    Select::table("orders", ["id", "product", "qty"])
 }
 
 fn rewrite(policy: &Policy, sql: &str) -> String {
@@ -116,7 +116,7 @@ fn star_behaviour() {
     let build = |star| -> Policy {
         dense()
             .select(orders())
-            .select(Select::table("v"))
+            .select(Select::table("v", ["id", "name"]))
             .star_behaviour(star)
             .build()
             .unwrap()
@@ -127,32 +127,18 @@ fn star_behaviour() {
         rewrite(&expand, "select * from orders"),
         "SELECT orders.id, orders.product, orders.qty FROM orders"
     );
-    assert_eq!(rewrite(&expand, "select * from v"), "SELECT v.* FROM v");
+    assert_eq!(rewrite(&expand, "select * from v"), "SELECT v.id, v.name FROM v");
     assert_eq!(
         rewrite(&expand, "select * from orders o join v on v.id = o.id"),
-        "SELECT o.id, o.product, o.qty, v.* FROM orders AS o INNER JOIN v ON v.id = o.id"
+        "SELECT o.id, o.product, o.qty, v.id, v.name FROM orders AS o INNER JOIN v ON v.id = o.id"
+    );
+    assert_eq!(
+        rewrite(&expand, "select x.* from (select * from v) x"),
+        "SELECT x.id, x.name FROM (SELECT v.id, v.name FROM v) AS x"
     );
     assert_eq!(
         rewrite(&expand, "select count(*) from orders"),
         "SELECT count(*) FROM orders"
-    );
-
-    let allow = build(Star::Allow);
-    assert_eq!(rewrite(&allow, "select * from v"), "SELECT * FROM v");
-    assert_eq!(rewrite(&allow, "select v.* from v"), "SELECT v.* FROM v");
-    assert_eq!(kind(&allow, "select * from orders"), ErrorKind::Denied);
-    assert_eq!(
-        kind(&allow, "select * from orders o join v on v.id = o.id"),
-        ErrorKind::Denied
-    );
-    assert_eq!(
-        rewrite(&allow, "select v.* from orders o join v on v.id = o.id"),
-        "SELECT v.* FROM orders AS o INNER JOIN v ON v.id = o.id"
-    );
-    // a subquery that kept its star has columns p14g cannot list, and is treated like the view under it
-    assert_eq!(
-        rewrite(&allow, "select x.anything from (select * from v) x"),
-        "SELECT x.anything FROM (SELECT * FROM v) AS x"
     );
 
     let reject = build(Star::Reject);
@@ -164,8 +150,8 @@ fn star_behaviour() {
 #[test]
 fn rules_for_one_table_are_alternatives() {
     let policy: Policy = dense()
-        .select(Select::table("t").columns(["a"]))
-        .select(Select::table("t").columns(["b"]))
+        .select(Select::table("t", ["a"]))
+        .select(Select::table("t", ["b"]))
         .build()
         .unwrap();
     assert_eq!(
@@ -348,7 +334,7 @@ fn every_operator_is_checked() {
 fn operators_are_checked_in_every_clause() {
     let policy: Policy = dense()
         .select(orders())
-        .select(Select::table("customers").columns(["id", "name"]))
+        .select(Select::table("customers", ["id", "name"]))
         .insert(Insert::table("orders").columns(["product", "qty"]))
         .update(Update::table("orders").columns(["qty"]))
         .delete(Delete::table("orders"))
@@ -408,11 +394,7 @@ fn operators_are_checked_in_every_clause() {
 #[test]
 fn operators_do_not_restrict_filters() {
     let policy: Policy = dense()
-        .select(
-            Select::table("docs")
-                .columns(["id"])
-                .filter(|()| Filter::new("org < 5 or title ~ '^a'")),
-        )
+        .select(Select::table("docs", ["id"]).filter(|()| Filter::new("org < 5 or title ~ '^a'")))
         .operators([Op::Eq])
         .build()
         .unwrap();
@@ -483,11 +465,13 @@ fn every_default_function_is_listed_once() {
 
 #[test]
 fn config_errors() {
-    config_error(dense::<()>().select(Select::table("")).build());
-    config_error(dense::<()>().select(Select::table("a.b.c")).build());
-    config_error(dense::<()>().select(Select::table("t").columns(["a", "a"])).build());
-    config_error(dense::<()>().select(Select::table("t").columns([""])).build());
-    config_error(dense::<()>().select(Select::table("x".repeat(64))).build());
+    config_error(dense::<()>().select(Select::table("", ["a"])).build());
+    config_error(dense::<()>().select(Select::table("a.b.c", ["a"])).build());
+    config_error(dense::<()>().select(Select::table("t", ["a", "a"])).build());
+    config_error(dense::<()>().select(Select::table("t", [""])).build());
+    config_error(dense::<()>().select(Select::table("t", Vec::<String>::new())).build());
+    config_error(dense::<()>().select(Select::table("x".repeat(64), ["a"])).build());
+    assert_eq!(Star::parse("allow").unwrap_err().kind(), ErrorKind::Config);
     config_error(dense::<()>().functions(["a.b.c"]).build());
     config_error(dense::<()>().update(Update::table("t").columns(["a\0"])).build());
     assert_eq!(Dialect::parse("oracle").unwrap_err().kind(), ErrorKind::Config);
@@ -499,7 +483,7 @@ fn config_errors() {
 
 #[test]
 fn rule_names_are_exact() {
-    let policy: Policy = dense().select(Select::table("Orders").columns(["Id"])).build().unwrap();
+    let policy: Policy = dense().select(Select::table("Orders", ["Id"])).build().unwrap();
     // unquoted names fold to lower case, as they would in Postgres, so only the quoted spelling matches
     assert_eq!(kind(&policy, "select id from orders"), ErrorKind::Denied);
     assert_eq!(kind(&policy, "select Id from Orders"), ErrorKind::Denied);
@@ -744,7 +728,7 @@ struct Tenant {
 #[test]
 fn insert_extra() {
     let policy: Policy<Tenant> = dense()
-        .select(Select::table("orders").columns(["id"]))
+        .select(Select::table("orders", ["id"]))
         .insert(
             Insert::table("orders")
                 .columns(["product", "qty"])
@@ -813,7 +797,7 @@ fn insert_extra() {
 #[test]
 fn write_rules() {
     let policy: Policy = dense()
-        .select(Select::table("t").columns(["id", "a"]))
+        .select(Select::table("t", ["id", "a"]))
         .insert(Insert::table("t"))
         .update(Update::table("t").columns(["a"]))
         .update(Update::table("t").columns(["b"]).allow_unfiltered(true))
@@ -849,8 +833,8 @@ fn write_rules() {
 fn group_by_names() {
     let policy: Policy = dense()
         .select(orders())
-        .select(Select::table("v"))
-        .select(Select::table("w"))
+        .select(Select::table("v", ["id", "x"]))
+        .select(Select::table("w", ["id"]))
         .build()
         .unwrap();
     // a listed input column wins, as it does in Postgres
@@ -861,26 +845,18 @@ fn group_by_names() {
         ),
         "SELECT lower(orders.product) AS product, count(*) FROM orders GROUP BY orders.product"
     );
-    // no listed column of that name, and no table that could be hiding one: it can only be the alias
+    // no listed column of that name: it is the alias, written by position since a table may have an unlisted
+    // column of that name, which Postgres would pick
     assert_eq!(
         rewrite(&policy, "select lower(product) as p, count(*) from orders group by p"),
         "SELECT lower(orders.product) AS p, count(*) FROM orders GROUP BY 1"
     );
-    // only all-column tables: either reading is allowed, so leave the choice to Postgres
     assert_eq!(
         rewrite(
             &policy,
             "select lower(v.x) as p, count(*) from v join w on w.id = v.id group by p"
         ),
-        "SELECT lower(v.x) AS p, count(*) FROM v INNER JOIN w ON w.id = v.id GROUP BY p"
-    );
-    // a mix: the view might have a column called `p`, the restricted table must not be asked for one
-    assert_eq!(
-        kind(
-            &policy,
-            "select lower(v.x) as p from v join orders o on o.id = v.id group by p"
-        ),
-        ErrorKind::Denied
+        "SELECT lower(v.x) AS p, count(*) FROM v INNER JOIN w ON w.id = v.id GROUP BY 1"
     );
     // ORDER BY always means the output column
     assert_eq!(
@@ -903,8 +879,8 @@ fn group_by_names() {
 fn scoping() {
     let policy: Policy = dense()
         .select(orders())
-        .select(Select::table("customers").columns(["id", "name"]))
-        .select(Select::table("v"))
+        .select(Select::table("customers", ["id", "name"]))
+        .select(Select::table("v", ["id", "other"]))
         .build()
         .unwrap();
     // a subquery in FROM cannot see the tables beside it
@@ -943,15 +919,19 @@ fn scoping() {
         ),
         ErrorKind::Denied
     );
-    // an unqualified name goes to the one table that lists it, even beside a view that might have it too
+    // an unqualified name goes to the one table that lists it
     assert_eq!(
-        rewrite(&policy, "select qty, v.other from orders join v on v.id = orders.id"),
+        rewrite(&policy, "select qty, other from orders join v on v.id = orders.id"),
         "SELECT orders.qty, v.other FROM orders INNER JOIN v ON v.id = orders.id"
     );
-    // ... and to the view when nothing lists it
+    // ... is ambiguous when two do, and refused when none does
     assert_eq!(
-        rewrite(&policy, "select other from orders join v on v.id = orders.id"),
-        "SELECT v.other FROM orders INNER JOIN v ON v.id = orders.id"
+        kind(&policy, "select id from orders join v on v.id = orders.id"),
+        ErrorKind::Denied
+    );
+    assert_eq!(
+        kind(&policy, "select missing from orders join v on v.id = orders.id"),
+        ErrorKind::Denied
     );
     // correlated subqueries resolve outwards
     assert_eq!(
@@ -999,7 +979,7 @@ fn other_dialects() {
 #[test]
 fn only() {
     let policy: Policy = dense()
-        .select(Select::table("family").columns(["id"]).only(true))
+        .select(Select::table("family", ["id"]).only(true))
         .update(Update::table("family").only(true))
         .delete(Delete::table("family").only(true))
         .insert(Insert::table("family"))
@@ -1041,29 +1021,29 @@ fn only() {
     // `only` belongs to the table, so the rules for a table have to agree on it
     let message = config_error(
         dense::<()>()
-            .select(Select::table("t").only(true))
+            .select(Select::table("t", ["id"]).only(true))
             .update(Update::table("t"))
             .build(),
     );
     assert_eq!(message, "the rules for table \"t\" disagree about `only`");
     config_error(
         dense::<()>()
-            .select(Select::table("t"))
-            .select(Select::table("t").only(true))
+            .select(Select::table("t", ["id"]))
+            .select(Select::table("t", ["id"]).only(true))
             .build(),
     );
     config_error(
         dense::<()>()
             .delete(Delete::table("s.t").only(true))
-            .select(Select::table("s.t"))
+            .select(Select::table("s.t", ["id"]))
             .build(),
     );
     // an insert rule has no `only`, and a table of the same name in another schema is another table
     assert!(
         dense::<()>()
-            .select(Select::table("t").only(true))
+            .select(Select::table("t", ["id"]).only(true))
             .insert(Insert::table("t"))
-            .select(Select::table("s.t"))
+            .select(Select::table("s.t", ["id"]))
             .build()
             .is_ok()
     );
@@ -1073,7 +1053,7 @@ fn only() {
 fn default_schema() {
     let policy: Policy = dense()
         .select(orders())
-        .select(Select::table("app.events").columns(["id"]))
+        .select(Select::table("app.events", ["id"]))
         .insert(Insert::table("orders"))
         .update(Update::table("orders"))
         .delete(Delete::table("public.orders"))
@@ -1117,7 +1097,7 @@ fn default_schema() {
     // `orders` and `public.orders` are one table, so their rules must agree about `only`
     config_error(
         dense::<()>()
-            .select(Select::table("orders").only(true))
+            .select(Select::table("orders", ["id"]).only(true))
             .delete(Delete::table("public.orders"))
             .default_schema("public")
             .build(),
@@ -1133,11 +1113,11 @@ fn default_schema() {
 #[test]
 fn grants() {
     let policy: Policy<Tenant> = dense()
-        .select(Select::table("orders").columns(["id", "qty"]))
-        .select(Select::table("orders").columns(["id", "product"]))
-        .select(Select::table("v"))
-        .select(Select::table("app.events").columns(["id"]))
-        .select(Select::table("we\"ird").columns(["a b"]))
+        .select(Select::table("orders", ["id", "qty"]))
+        .select(Select::table("orders", ["id", "product"]))
+        .select(Select::table("v", ["id", "name"]))
+        .select(Select::table("app.events", ["id"]))
+        .select(Select::table("we\"ird", ["a b"]))
         .insert(
             Insert::table("orders")
                 .columns(["product", "qty"])
@@ -1162,7 +1142,7 @@ fn grants() {
             r#"GRANT INSERT ("product", "qty", "tenant_id") ON "orders" TO "app_role""#,
             r#"GRANT UPDATE ("qty") ON "orders" TO "app_role""#,
             r#"GRANT DELETE ON "orders" TO "app_role""#,
-            r#"GRANT SELECT ON "v" TO "app_role""#,
+            r#"GRANT SELECT ("id", "name") ON "v" TO "app_role""#,
             r#"GRANT SELECT ("a b") ON "we""ird" TO "app_role""#,
             r#"GRANT SELECT ("id") ON "app"."events" TO "app_role""#,
             r#"GRANT UPDATE ON "app"."events" TO "app_role""#,
@@ -1286,9 +1266,12 @@ fn order_and_group_keys() {
 fn quote_identifiers() {
     let build = |quote| -> Policy {
         dense()
-            .select(Select::table("orders"))
-            .select(Select::table("user"))
-            .select(Select::table("app.Events"))
+            .select(Select::table(
+                "orders",
+                ["id", "user", "Mixed", "with space", "1x", "_x1", "name", "product"],
+            ))
+            .select(Select::table("user", ["id"]))
+            .select(Select::table("app.Events", ["id"]))
             .quote_identifiers(quote)
             .build()
             .unwrap()
@@ -1334,7 +1317,7 @@ fn quote_identifiers() {
     // grants are run once by hand, and are always quoted
     assert_eq!(
         minimal.grants("r", &()).unwrap()[1],
-        r#"GRANT SELECT ON "orders" TO "r""#
+        r#"GRANT SELECT ("id", "user", "Mixed", "with space", "1x", "_x1", "name", "product") ON "orders" TO "r""#
     );
 }
 
@@ -1342,7 +1325,7 @@ fn quote_identifiers() {
 fn layout() {
     let policy: Policy = Policy::builder()
         .select(orders())
-        .select(Select::table("customers"))
+        .select(Select::table("customers", ["id", "name"]))
         .insert(Insert::table("orders"))
         .update(Update::table("orders"))
         .delete(Delete::table("orders"))
@@ -1388,7 +1371,7 @@ OFFSET 5";
     // the two layouts differ only in whitespace, and each reads back as itself
     let dense: Policy = dense()
         .select(orders())
-        .select(Select::table("customers"))
+        .select(Select::table("customers", ["id", "name"]))
         .build()
         .unwrap();
     assert_eq!(rewrite(&dense, sql), multiline.replace('\n', " "));
@@ -1399,7 +1382,10 @@ OFFSET 5";
 
 #[test]
 fn parentheses() {
-    let policy: Policy = dense().select(Select::table("t")).build().unwrap();
+    let policy: Policy = dense()
+        .select(Select::table("t", ["a", "b", "c", "d", "x"]))
+        .build()
+        .unwrap();
     let where_ = |condition: &str| {
         let sql = rewrite(&policy, &format!("select a from t where {condition}"));
         // however the input was grouped, the output reads back as itself
@@ -1505,18 +1491,14 @@ fn qualify_builtins() {
 fn filters() {
     let org = |tenant: &Tenant| Filter::new("org = :org and deleted_at is null").bind("org", tenant.id);
     let policy: Policy<Tenant> = dense()
-        .select(
-            Select::table("orders")
-                .columns(["id", "qty", "customer_id"])
-                .filter(org),
-        )
-        .select(Select::table("customers").filter(|tenant: &Tenant| {
+        .select(Select::table("orders", ["id", "qty", "customer_id"]).filter(org))
+        .select(Select::table("customers", ["id", "name"]).filter(|tenant: &Tenant| {
             Filter::new("customers.org = :org and status in (:statuses) and created > :since::timestamptz")
                 .bind("org", tenant.id)
                 .bind("statuses", vec!["open", "o'k"])
                 .bind("since", "2026-01-01")
         }))
-        .select(Select::table("plain"))
+        .select(Select::table("plain", ["x"]))
         .insert(
             Insert::table("orders")
                 .columns(["qty"])
@@ -1540,12 +1522,12 @@ fn filters() {
         rewrite("select count(*) from orders where qty > 1"),
         format!("SELECT count(*) FROM {orders} AS orders WHERE orders.qty > 1")
     );
-    // which holds on either side of an outer join, and for a rule with all columns keeps `*`
+    // which holds on either side of an outer join
     assert_eq!(
         rewrite("select o.*, c.name from orders o left join customers c on c.id = o.customer_id"),
         format!(
-            "SELECT o.id, o.qty, o.customer_id, c.name FROM {orders} AS o LEFT JOIN (SELECT * FROM customers WHERE \
-             customers.org = 42 AND customers.status IN ('open', 'o''k') AND customers.created > CAST('2026-01-01' AS \
+            "SELECT o.id, o.qty, o.customer_id, c.name FROM {orders} AS o LEFT JOIN (SELECT customers.id, \
+             customers.name FROM customers WHERE customers.org = 42 AND customers.status IN ('open', 'o''k') AND customers.created > CAST('2026-01-01' AS \
              timestamp with time zone)) AS c ON c.id = o.customer_id"
         )
     );
@@ -1627,12 +1609,12 @@ fn filters() {
     assert_eq!(
         policy.grants("app", &tenant).unwrap(),
         [
-            r#"GRANT SELECT ON "customers" TO "app""#,
+            r#"GRANT SELECT ("id", "name", "created", "org", "status") ON "customers" TO "app""#,
             r#"GRANT SELECT ("id", "qty", "customer_id", "deleted_at", "org") ON "orders" TO "app""#,
             r#"GRANT INSERT ("qty", "org") ON "orders" TO "app""#,
             r#"GRANT UPDATE ("qty", "org") ON "orders" TO "app""#,
             r#"GRANT DELETE ON "orders" TO "app""#,
-            r#"GRANT SELECT ON "plain" TO "app""#,
+            r#"GRANT SELECT ("x") ON "plain" TO "app""#,
         ]
     );
 }
@@ -1643,7 +1625,7 @@ type MakeFilter = fn(&()) -> Filter;
 fn filter_values_and_errors() {
     let build = |filter: fn(&()) -> Filter| -> Policy {
         dense()
-            .select(Select::table("t").filter(filter))
+            .select(Select::table("t", ["a"]).filter(filter))
             .update(Update::table("t").allow_unfiltered(true))
             .delete(Delete::table("t").allow_unfiltered(true).filter(filter))
             .build()
@@ -1651,7 +1633,7 @@ fn filter_values_and_errors() {
     };
     let where_ = |filter: fn(&()) -> Filter| {
         let sql = rewrite(&build(filter), "select a from t");
-        sql.strip_prefix("SELECT t.a FROM (SELECT * FROM t WHERE ")
+        sql.strip_prefix("SELECT t.a FROM (SELECT t.a FROM t WHERE ")
             .and_then(|rest| rest.strip_suffix(") AS t"))
             .unwrap_or_else(|| panic!("{sql}"))
             .to_owned()
@@ -1697,14 +1679,17 @@ fn filter_values_and_errors() {
 
     // with parameters, the strings a filter binds are parameters too
     let params: Policy = dense()
-        .select(Select::table("t").filter(|()| Filter::new("a = :s and b = :n").bind("s", "x").bind("n", 1)))
+        .select(
+            Select::table("t", ["a", "c", "d"])
+                .filter(|()| Filter::new("a = :s and b = :n").bind("s", "x").bind("n", 1)),
+        )
         .literals(Literals::Params)
         .build()
         .unwrap();
     let safe = params.rewrite("select a from t where c = 'y' and d = $1", &()).unwrap();
     assert_eq!(
         safe.sql,
-        "SELECT t.a FROM (SELECT * FROM t WHERE t.a = $2 AND t.b = 1) AS t WHERE t.c = $3 AND t.d = $1"
+        "SELECT t.a FROM (SELECT t.a, t.c, t.d FROM t WHERE t.a = $2 AND t.b = 1) AS t WHERE t.c = $3 AND t.d = $1"
     );
     assert_eq!(safe.params, ["x", "y"]);
 
@@ -1769,7 +1754,7 @@ fn filter_values_and_errors() {
         assert_eq!(policy.grants("r", &()).unwrap_err().kind(), ErrorKind::Callback);
     }
     let failing: Policy = dense()
-        .select(Select::table("t").try_filter(|()| Err(Error::callback("no org"))))
+        .select(Select::table("t", ["a"]).try_filter(|()| Err(Error::callback("no org"))))
         .build()
         .unwrap();
     assert_eq!(failing.rewrite("select a from t", &()).unwrap_err().message(), "no org");
@@ -1787,10 +1772,9 @@ fn filter_values_and_errors() {
 fn filters_and_alternative_rules() {
     // everyone may read the public columns of any row, and all the columns of their own
     let policy: Policy<Tenant> = dense()
-        .select(Select::table("docs").columns(["id", "title"]))
+        .select(Select::table("docs", ["id", "title"]))
         .select(
-            Select::table("docs")
-                .columns(["id", "title", "body"])
+            Select::table("docs", ["id", "title", "body"])
                 .filter(|tenant: &Tenant| Filter::new("owner = :owner").bind("owner", tenant.id)),
         )
         .update(Update::table("docs").columns(["title"]))

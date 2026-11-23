@@ -75,21 +75,23 @@ Ask what the SQL author can now read, write or call that no rule names:
 - **Can the statement change the role it runs as?**
     This is the restriction that matters most (see AGENTS.md). A new statement kind, transaction control, a `SET`,
     or a function that sets a setting, runs SQL or is `SECURITY DEFINER` is a finding whatever else it does.
-    Check `tests/cases/role.sql` still covers the change.
+    So is any way to write a name after a table that no `Select` rule lists: Postgres's functional notation reads
+    `t.name` as the call `name(t)` when `t` has no such column. Check `tests/cases/role.sql` still covers the change.
 - **Is every column reference resolved, recorded and qualified?**
     A new `Expr` variant or clause that is not walked by `expr()` is a column the policy never sees. This includes
     `ORDER BY`, `GROUP BY`, `HAVING`, join conditions, `RETURNING`, the right side of `SET`, window and aggregate
     clauses.
 - **Can a name resolve to a different table than Postgres will pick?**
-    Scopes, CTE shadowing, derived tables, correlated subqueries, aliases, unqualified names beside an all-columns
-    table. A wrong binding must fail in the database, not read another column.
+    Scopes, CTE shadowing, derived tables, correlated subqueries, aliases, an unqualified name beside a table with an
+    unlisted column of that name. A wrong binding must fail in the database, not read another column.
 - **Are rules still alternatives?**
     One rule must cover all the columns used on a table instance; combining two rules is a bypass.
 - **Whole rows and system columns?**
     `SELECT t FROM t`, `t.*` in an expression, `row_to_json(t)`, `ctid`, `xmin`, `tableoid` must stay unreachable
     unless a rule lists them.
 - **Star handling?**
-    `allow` must refuse a table whose rule lists columns; `expand` must use the columns of the rule that was chosen.
+    `expand` must use the columns of the rule that was chosen, and no `*` may reach the writer: there is no way to
+    allow every column.
 - **Writes?**
     Insert columns, `SET` targets, `extra` collisions, the unfiltered guard, and that anything a write reads needs a
     `Select` rule. `only` and `default_schema` must be applied to every reference to the table, including write

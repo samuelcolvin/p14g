@@ -1,7 +1,7 @@
 //! The policy and case files shared by the test suites.
 #![allow(dead_code, reason = "each test binary uses a different part of this module")]
 
-use p14g::{Delete, ErrorKind, Insert, Layout, Literals, Policy, PolicyBuilder, Select, Update, functions};
+use p14g::{Delete, ErrorKind, Insert, Layout, Literals, Policy, PolicyBuilder, Select, Update};
 
 /// The policy the case files are written against. `cases/schema.sql` grants a database role the same
 /// access, so Postgres can be used to check p14g's answers.
@@ -9,14 +9,17 @@ pub fn builder() -> PolicyBuilder {
     Policy::builder()
         // one statement per line, as the case files need
         .layout(Layout::Dense)
-        .select(Select::table("orders").columns(["id", "product", "qty", "customer_id"]))
-        .select(Select::table("customers").columns(["id", "name"]))
-        .select(Select::table("v"))
-        .select(Select::table("app.events").columns(["id", "kind"]))
-        .select(Select::table("limited").columns(["a", "b"]))
-        .select(Select::table("cheap_orders"))
+        .select(Select::table("orders", ["id", "product", "qty", "customer_id"]))
+        .select(Select::table("customers", ["id", "name"]))
+        .select(Select::table(
+            "v",
+            ["id", "product", "qty", "created", "data", "tags", "a\"b", "MiXed"],
+        ))
+        .select(Select::table("app.events", ["id", "kind"]))
+        .select(Select::table("limited", ["a", "b"]))
+        .select(Select::table("cheap_orders", ["id", "product", "qty"]))
         // a table with an inheritance child the policy must not reach
-        .select(Select::table("family").columns(["id", "label"]).only(true))
+        .select(Select::table("family", ["id", "label"]).only(true))
         .insert(Insert::table("family").columns(["id", "label"]))
         .update(Update::table("family").columns(["label"]).only(true))
         .delete(Delete::table("family").only(true))
@@ -112,6 +115,64 @@ fn parse_rejects(file: &'static str) -> Vec<Reject> {
         .collect()
 }
 
+/// Functions the output checks look for: each can change the role a statement runs as, by setting `role` or by
+/// running SQL given as text. `reset_role` is the function `cases/schema.sql` defines for every table's row, which
+/// Postgres would call for a column reference `t.reset_role`.
+///
+/// This is for tests only, and not exhaustive: `DANGEROUS_FUNCTIONS.md` has more, and p14g itself refuses
+/// every function its policy does not allow, rather than these.
+pub const ROLE_CHANGING: &[&str] = &[
+    "set_config",
+    "query_to_xml",
+    "query_to_xml_and_xmlschema",
+    "ts_stat",
+    "ts_rewrite",
+    "dblink",
+    "dblink_exec",
+    "dblink_open",
+    "dblink_send_query",
+    "reset_role",
+];
+
+/// Whether the last part of `name` is in [`ROLE_CHANGING`].
+pub fn changes_role(name: &str) -> bool {
+    name.rsplit('.')
+        .next()
+        .is_some_and(|name| ROLE_CHANGING.contains(&name))
+}
+
+/// Every qualified column reference in `parsed`, by its last name: Postgres's functional notation reads `t.name`
+/// as the call `name(t)` when `t` has no column `name`. A bare `name` is never read as a call, and can be an output
+/// alias, as in `ORDER BY name`.
+pub fn column_names(parsed: &pg_query::ParseResult) -> Vec<String> {
+    fn walk(value: &Value, names: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(column) = map.get("ColumnRef")
+                    && let Some(name) = column["fields"]
+                        .as_array()
+                        .filter(|fields| fields.len() > 1)
+                        .and_then(|fields| fields.last())
+                        .and_then(|field| field.pointer("/node/String/sval"))
+                        .and_then(Value::as_str)
+                {
+                    names.push(name.to_owned());
+                }
+                map.values().for_each(|value| walk(value, names));
+            }
+            Value::Array(values) => values.iter().for_each(|value| walk(value, names)),
+            _ => {}
+        }
+    }
+
+    use serde_json::Value;
+
+    let tree = serde_json::to_value(&parsed.protobuf).expect("a parse tree serializes");
+    let mut names = Vec::new();
+    walk(&tree, &mut names);
+    names
+}
+
 /// Every function call in `parsed`, as `schema.name` or `name`, wherever it is in the statement.
 ///
 /// `ParseResult::functions()` and `nodes()` miss calls in `VALUES`, `RETURNING`, `FILTER`, `OVER`, `LIMIT`,
@@ -144,7 +205,8 @@ pub fn called_functions(parsed: &pg_query::ParseResult) -> Vec<String> {
 }
 
 /// Panic unless Postgres's own parser reads `sql` as one `SELECT`, `INSERT`, `UPDATE` or `DELETE` that calls none
-/// of [`functions::FORBIDDEN`] and updates no `pg_settings`: a statement that cannot change the role it runs as.
+/// of [`ROLE_CHANGING`], directly or as a column reference, and names no `pg_settings`: a statement that cannot
+/// change the role it runs as, provided its tables are what the test schema says.
 ///
 /// Every other kind of statement is a utility statement or `MERGE`, and none of those can appear inside these
 /// four in Postgres's grammar. `crates/fuzz/src/lib.rs` makes the same check.
@@ -165,9 +227,12 @@ pub fn assert_cannot_change_role(sql: &str, context: &str) {
         "{context}: not a SELECT, INSERT, UPDATE or DELETE: {sql}"
     );
     for function in called_functions(&parsed) {
+        assert!(!changes_role(&function), "{context}: calls {function}: {sql}");
+    }
+    for column in column_names(&parsed) {
         assert!(
-            !function.rsplit('.').next().is_some_and(functions::is_forbidden),
-            "{context}: calls {function}: {sql}"
+            !changes_role(&column),
+            "{context}: reads {column}, which can be a call: {sql}"
         );
     }
     for table in parsed.tables() {

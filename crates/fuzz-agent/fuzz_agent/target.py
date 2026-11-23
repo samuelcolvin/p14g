@@ -35,8 +35,8 @@ def policy(**options: Any) -> Policy:
         Insert('orders', columns=['product', 'qty'], extra=lambda context: {'tenant_id': context['tenant']}),
         Update('orders', columns=['qty']),
         Delete('orders'),
-        # a view, all of its columns
-        Select('v'),
+        # a view
+        Select('v', ['id', 'product', 'qty', 'created', 'data']),
         # a table in another schema
         Select('app.events', columns=['id', 'kind']),
         Select('limited', columns=['a', 'b']),
